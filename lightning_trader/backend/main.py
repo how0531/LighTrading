@@ -26,7 +26,7 @@ from core.shioaji_client import ShioajiClient
 from core.config import Config
 from shioaji.constant import Action, OrderType
 
-app = FastAPI(title="LighTrade Backend API")
+app = FastAPI(title="LighTrade Backend API", version="1.0.1")
 
 # 實例化 ShioajiClient
 shioaji_client = ShioajiClient()

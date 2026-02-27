@@ -475,25 +475,30 @@ class ShioajiClient(QObject):
         """獲取所有可用帳號資訊"""
         try:
             raw_accounts = self.api.list_accounts()
-            print(f"DEBUG: Shioaji 帳號列表: {raw_accounts}")
+            print(f"DEBUG: 原始帳號清單: {raw_accounts}")
             accounts = []
             for acc in raw_accounts:
-                # 嘗試組合出像截圖那樣的名稱：Broker-Account-Person (如果有的話)
-                # Shioaji Account 物件通常有 broker_id, account_id, username
+                # 判斷類別 (Shioaji 物件可能沒有 category 屬性，改用類別名稱判斷)
+                class_name = acc.__class__.__name__
+                category = "Stock" if "Stock" in class_name else "Future" if "Future" in class_name else "Other"
+                
+                # 組合介面顯示名稱
                 display_name = f"{acc.broker_id}-{acc.account_id}"
                 if hasattr(acc, 'username') and acc.username:
                     display_name += f"-{acc.username}"
                 
                 accounts.append({
                     "account_id": acc.account_id,
-                    "category": acc.category.name, # STK, FUT 等
+                    "category": category, # 改傳回 Stock 或 Future 字符串
                     "person_id": acc.person_id,
                     "broker_id": acc.broker_id,
                     "account_name": display_name
                 })
             return accounts
         except Exception as e:
-            print(f"獲取帳號列表失敗: {e}")
+            print(f"獲取帳號列表發生異常: {e}")
+            import traceback
+            traceback.print_exc()
             return []
 
     def get_order_history(self):

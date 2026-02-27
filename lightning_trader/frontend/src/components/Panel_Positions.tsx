@@ -17,7 +17,7 @@ interface Account {
 }
 
 const Panel_Positions: React.FC = () => {
-  const { accountSummary } = useTradingContext();
+  const { isConnected, accountSummary } = useTradingContext();
   const [positions, setPositions] = useState<Position[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<'ALL' | 'Stock' | 'Future'>('ALL');
@@ -27,7 +27,13 @@ const Panel_Positions: React.FC = () => {
   const fetchAccounts = async () => {
     try {
       const data = await getAccounts();
+      console.log("DEBUG: 獲取到的帳號清單:", data);
       setAccounts(data || []);
+
+      // 如果還沒選帳號，且現在有帳號了，預設選第一個
+      if (!selectedAccountId && data && data.length > 0) {
+        // 考慮到類別篩選，這裡暫不預設避免混亂，讓使用者手動選
+      }
     } catch (err) {
       console.error("Failed to fetch accounts:", err);
     }
@@ -45,21 +51,26 @@ const Panel_Positions: React.FC = () => {
     }
   };
 
+  // 1. 初次掛載與連機狀態變動時，更新帳號列表
   useEffect(() => {
     fetchAccounts();
-    fetchPositions();
-  }, []);
+  }, [isConnected]);
 
-  // 當類別或帳號 ID 改變時重新抓取
+  // 2. 當選擇的帳號改變或 WebSocket 有帳務摘要更新時，更新持倉
   useEffect(() => {
     fetchPositions(selectedAccountId || undefined);
-  }, [selectedAccountId]);
+  }, [selectedAccountId, accountSummary]);
 
   // 過濾後的帳號清單
   const filteredAccounts = useMemo(() => {
     if (selectedCategory === 'ALL') return accounts;
-    // Shioaji 的 category 通常是 'Stock' 或 'Future'
-    return accounts.filter(acc => acc.category.startsWith(selectedCategory));
+    // 使用不區分大小寫的匹配，增加容錯
+    const target = selectedCategory.toLowerCase();
+    return accounts.filter(acc => {
+      if (!acc.category) return false;
+      const cat = acc.category.toLowerCase();
+      return cat.startsWith(target);
+    });
   }, [accounts, selectedCategory]);
 
   // 當類別改變時，如果目前的 selectedAccountId 不在 filtered 內，清空它 (或者如果類別變更，先重設)
