@@ -1,0 +1,12 @@
+請扮演前端資深架構師與 UI/UX 專家（請務必參考專案內的技能文件：`.agents/skills/ui-ux-pro-max-skill/SKILL.md` 以及 `trading_algo_patterns/SKILL.md`），幫我大幅擴充與優化 `frontend/src/` 下的 React 應用程式，打造一個讓使用者驚豔的「新世代戰鬥閃電下單看盤軟體」。
+
+目前我們已經在 `frontend/src/App.tsx` 與 `index.css` 建立了基礎的 Tailwind V4 Glassmorphism（玻璃擬物化）樣式，並連上了 WebSocket `/ws/quotes`。
+請以此為基礎，並閱讀 `backend/main.py` 以了解現有後端 API（如 `/login`, `/ws/quotes`, `place_order`），完成以下四大目標：
+
+1. **實作高質感登入畫面 (Login)**：設計一個科技感十足的登入表單元件，讓使用者輸入 Shioaji 的 API_KEY 與 SECRET_KEY，並確實串接後端的登入機制。
+2. **實作閃電下單匣/深度報價階梯 (DOM)**：這是看盤軟體的核心。請做一個直式、多列的價格階梯表格，能顯示各檔位的買賣量。要求視覺回饋極佳（例如價格跳動的紅綠閃爍特效、點擊該列即能設定目標價的互動感）。
+3. **實作帳務與部位總覽 (Account/Portfolio)**：設計一個區塊來顯示當前帳戶的資金、持有部位與即時損益。
+4. **架構重構**：請將目前全部塞在 `App.tsx` 裡的程式碼，乾淨俐落地拆分到 `frontend/src/components/` 底下（例如 `LoginPanel.tsx`, `DOMPanel.tsx`, `QuoteHistory.tsx` 等），並在主元件中把這些區塊拼湊成一個現代化儀表板。
+
+如果缺什麼套件（如 React Router 或 Axios 等），請自行使用 `npm install` 補齊。
+請運用你的最高算力，不需詢問，直接幫我改寫並產出程式碼檔案！

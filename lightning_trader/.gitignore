@@ -1,0 +1,7 @@
+.env
+__pycache__/
+*.pyc
+.agents/
+.vs/
+.vscode/
+gemini_subagent.log

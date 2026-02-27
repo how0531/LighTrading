@@ -1,0 +1,13 @@
+請修改 `frontend/src/components/LoginPanel.tsx`，因為後端的登入規格已經更新。
+
+Shioaji API 的登入需要以下資訊：
+1. **模擬模式 (Simulation = true)**：只需要 `API Key` 與 `Secret Key`。
+2. **正式環境 (Live = false)**：除了 API Key 與 Secret Key 之外，還「強烈需要」出示憑證資訊才能下單，也就是：
+   - 憑證實體檔案路徑 (`ca_path`) (例如：`C:/Sinopac/Sinopac.pfx`)
+   - 憑證密碼 (`ca_passwd`)
+
+任務要求：
+- 在 `LoginPanel.tsx` 中，當使用者切換到 "Live" (正式環境) 模式時，請在 UI 上「多展開」兩個輸入框，分別讓使用者輸入 `CA Path` (憑證路徑) 以及 `CA Password` (憑證密碼)。
+- 將這四個欄位的值一併包裝在 axios 的 POST request body 送給 `/login` (欄位名稱請對應: `api_key`, `secret_key`, `simulation`, `ca_path`, `ca_passwd`)。
+- UI 請繼續維持現在酷炫的 Glassmorphism (玻璃擬物) 與未來科技感風格，用流暢的過場動畫展開憑證輸入框會更好。
+- 不需詢問，直接產生並覆寫該檔案。
