@@ -474,14 +474,22 @@ class ShioajiClient(QObject):
     def get_all_accounts(self):
         """獲取所有可用帳號資訊"""
         try:
+            raw_accounts = self.api.list_accounts()
+            print(f"DEBUG: Shioaji 帳號列表: {raw_accounts}")
             accounts = []
-            for acc in self.api.list_accounts():
+            for acc in raw_accounts:
+                # 嘗試組合出像截圖那樣的名稱：Broker-Account-Person (如果有的話)
+                # Shioaji Account 物件通常有 broker_id, account_id, username
+                display_name = f"{acc.broker_id}-{acc.account_id}"
+                if hasattr(acc, 'username') and acc.username:
+                    display_name += f"-{acc.username}"
+                
                 accounts.append({
                     "account_id": acc.account_id,
                     "category": acc.category.name, # STK, FUT 等
                     "person_id": acc.person_id,
                     "broker_id": acc.broker_id,
-                    "account_name": getattr(acc, 'account_name', f"{acc.category.name}-{acc.account_id}")
+                    "account_name": display_name
                 })
             return accounts
         except Exception as e:

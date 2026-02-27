@@ -20,14 +20,14 @@ const Panel_Positions: React.FC = () => {
   const { accountSummary } = useTradingContext();
   const [positions, setPositions] = useState<Position[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selectedCategory, setSelectedCategory] = useState<'ALL' | 'STK' | 'FUT'>('ALL');
+  const [selectedCategory, setSelectedCategory] = useState<'ALL' | 'Stock' | 'Future'>('ALL');
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
 
   const fetchAccounts = async () => {
     try {
       const data = await getAccounts();
-      setAccounts(data);
+      setAccounts(data || []);
     } catch (err) {
       console.error("Failed to fetch accounts:", err);
     }
@@ -37,7 +37,7 @@ const Panel_Positions: React.FC = () => {
     setIsLoading(true);
     try {
       const data = await getPositions(accountId);
-      setPositions(data);
+      setPositions(data || []);
     } catch (err) {
       console.error("Failed to fetch positions:", err);
     } finally {
@@ -58,10 +58,11 @@ const Panel_Positions: React.FC = () => {
   // 過濾後的帳號清單
   const filteredAccounts = useMemo(() => {
     if (selectedCategory === 'ALL') return accounts;
-    return accounts.filter(acc => acc.category === selectedCategory);
+    // Shioaji 的 category 通常是 'Stock' 或 'Future'
+    return accounts.filter(acc => acc.category.startsWith(selectedCategory));
   }, [accounts, selectedCategory]);
 
-  // 當類別改變時，如果目前的 selectedAccountId 不在 filtered 內，清空它
+  // 當類別改變時，如果目前的 selectedAccountId 不在 filtered 內，清空它 (或者如果類別變更，先重設)
   useEffect(() => {
     if (selectedAccountId && !filteredAccounts.find(a => a.account_id === selectedAccountId)) {
       setSelectedAccountId('');
@@ -69,16 +70,16 @@ const Panel_Positions: React.FC = () => {
   }, [selectedCategory, filteredAccounts]);
 
   return (
-    <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
-      <div className="flex flex-col gap-3 mb-4">
+    <div className="bg-slate-800/50 rounded-lg p-3 border border-slate-700 h-full flex flex-col glass-panel shadow-2xl relative">
+      <div className="flex flex-col gap-2.5 mb-3">
         <div className="flex justify-between items-center">
-          <h3 className="text-sm font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
-            <span className="w-1.5 h-4 bg-emerald-500 rounded-full"></span>
+          <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
+            <span className="w-1 h-3.5 bg-amber-500 rounded-full"></span>
             即時持倉 (Positions)
           </h3>
           <button
             onClick={() => fetchPositions(selectedAccountId)}
-            className="text-[10px] bg-slate-700/50 hover:bg-slate-600 px-2 py-1 rounded transition-all text-slate-400 border border-slate-600"
+            className="text-[10px] bg-slate-700/50 hover:bg-slate-600 px-2 py-0.5 rounded transition-all text-slate-400 border border-slate-600"
           >
             重新整理
           </button>
@@ -86,18 +87,23 @@ const Panel_Positions: React.FC = () => {
 
         {/* 控制列：類別與帳號選單 */}
         <div className="flex items-center gap-2">
-          {/* 類別切換 */}
-          <div className="flex bg-slate-900/50 p-0.5 rounded-md border border-slate-700/50 grow-0 shrink-0">
-            {['ALL', 'STK', 'FUT'].map((cat) => (
+          {/* 類別切換 (樣式模仿截圖) */}
+          <div className="flex gap-1">
+            {[
+              { id: 'ALL', label: '全' },
+              { id: 'Stock', label: '證' },
+              { id: 'Future', label: '期' },
+              { id: 'Future', label: '權' } // 權通常在期裡面，點擊同樣篩選 Future
+            ].map((cat, idx) => (
               <button
-                key={cat}
-                onClick={() => setSelectedCategory(cat as any)}
-                className={`px-3 py-1 text-[10px] font-bold rounded transition-all ${selectedCategory === cat
-                    ? 'bg-blue-500 text-white shadow-lg'
-                    : 'text-slate-500 hover:text-slate-300'
+                key={`${cat.id}-${idx}`}
+                onClick={() => setSelectedCategory(cat.id as any)}
+                className={`w-7 h-7 flex items-center justify-center text-xs font-bold rounded-sm border transition-all ${selectedCategory === cat.id
+                  ? 'bg-amber-400 text-slate-900 border-amber-500 shadow-[0_0_10px_rgba(251,191,36,0.2)]'
+                  : 'bg-slate-800 text-slate-500 border-slate-700 hover:border-slate-500'
                   }`}
               >
-                {cat === 'ALL' ? '全部' : cat === 'STK' ? '股票' : '期貨'}
+                {cat.label}
               </button>
             ))}
           </div>
@@ -106,12 +112,12 @@ const Panel_Positions: React.FC = () => {
           <select
             value={selectedAccountId}
             onChange={(e) => setSelectedAccountId(e.target.value)}
-            className="flex-1 bg-slate-900/80 border border-slate-700 text-slate-200 text-[10px] font-bold py-1 px-2 rounded-md outline-none focus:border-blue-500 transition-colors"
+            className="flex-1 bg-slate-900/90 border border-slate-700 text-slate-200 text-[11px] font-medium py-1 px-2 rounded outline-none focus:border-amber-500/50 transition-colors h-7 shadow-inner"
           >
             <option value="">所有帳號</option>
             {filteredAccounts.map(acc => (
               <option key={acc.account_id} value={acc.account_id}>
-                {acc.account_name} ({acc.account_id})
+                {acc.account_name}
               </option>
             ))}
           </select>
