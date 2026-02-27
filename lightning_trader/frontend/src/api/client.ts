@@ -7,8 +7,8 @@ export const apiClient = axios.create({
   },
 });
 
-export const getPositions = async () => {
-  const response = await apiClient.get('/positions');
+export const getPositions = async (accountId?: string) => {
+  const response = await apiClient.get('/positions', { params: { account_id: accountId } });
   return response.data;
 };
 
@@ -17,7 +17,12 @@ export const getAccountBalance = async () => {
   return response.data;
 };
 
-export const getOrderHistory = async () => {
-  const response = await apiClient.get('/order_history');
+export const getOrderHistory = async (accountId?: string) => {
+  const response = await apiClient.get('/order_history', { params: { account_id: accountId } });
+  return response.data;
+};
+
+export const getAccounts = async () => {
+  const response = await apiClient.get('/accounts');
   return response.data;
 };

@@ -414,10 +414,14 @@ class ShioajiClient(QObject):
         except:
              pass
 
-    def list_positions(self, account=None):
+    def list_positions(self, account_id=None):
         try:
-            if account:
-                return self.api.list_positions(account)
+            if account_id:
+                # 尋找匹配的帳號物件
+                target_acc = next((acc for acc in self.api.list_accounts() if acc.account_id == account_id), None)
+                if target_acc:
+                    return self.api.list_positions(target_acc)
+                return []
             
             positions = []
             if self.api.stock_account:
@@ -431,10 +435,13 @@ class ShioajiClient(QObject):
             print(f"查詢持倉失敗: {e}")
             return []
 
-    def list_profit_loss(self, account=None):
+    def list_profit_loss(self, account_id=None):
         try:
-            if account:
-                return self.api.list_profit_loss(account)
+            if account_id:
+                target_acc = next((acc for acc in self.api.list_accounts() if acc.account_id == account_id), None)
+                if target_acc:
+                    return self.api.list_profit_loss(target_acc)
+                return []
                 
             pnl = []
             if self.api.stock_account:
@@ -463,6 +470,23 @@ class ShioajiClient(QObject):
         except Exception as e:
             print(f"獲取帳戶餘額失敗: {e}")
             return None
+
+    def get_all_accounts(self):
+        """獲取所有可用帳號資訊"""
+        try:
+            accounts = []
+            for acc in self.api.list_accounts():
+                accounts.append({
+                    "account_id": acc.account_id,
+                    "category": acc.category.name, # STK, FUT 等
+                    "person_id": acc.person_id,
+                    "broker_id": acc.broker_id,
+                    "account_name": getattr(acc, 'account_name', f"{acc.category.name}-{acc.account_id}")
+                })
+            return accounts
+        except Exception as e:
+            print(f"獲取帳號列表失敗: {e}")
+            return []
 
     def get_order_history(self):
         """

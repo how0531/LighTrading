@@ -287,10 +287,10 @@ async def cancel_all(req: CancelAllRequest):
         raise HTTPException(status_code=500, detail="刪單過程遭遇錯誤")
 
 @app.get("/api/positions")
-async def get_positions():
+async def get_positions(account_id: str = None):
     """獲取目前的持倉部位"""
     try:
-        positions = shioaji_client.list_positions()
+        positions = shioaji_client.list_positions(account_id)
         # 將 Shioaji Position 物件轉成 JSON 格式
         pos_list = []
         for p in positions:
@@ -335,12 +335,17 @@ async def get_account_balance():
         return {}
 
 @app.get("/api/order_history")
-async def get_order_history():
+async def get_order_history(account_id: str = None):
     """獲取當日委託/成交紀錄"""
     try:
+        # TODO: 未來可進一步在 shioaji_client 內實現 account_id 過濾 trades
         trades = shioaji_client.get_order_history()
         trade_list = []
         for t in trades:
+            # 支援篩選功能（如果傳入則過濾）
+            if account_id and t.order.account.account_id != account_id:
+                continue
+                
             trade_list.append({
                 "time": format_datetime(t.status.update_time),
                 "symbol": t.contract.symbol,
@@ -356,6 +361,15 @@ async def get_order_history():
         return trade_list
     except Exception as e:
         logger.error(f"獲取委託歷史發生錯誤: {e}")
+        return []
+
+@app.get("/api/accounts")
+async def get_accounts():
+    """獲取所有可用帳號資訊"""
+    try:
+        return shioaji_client.get_all_accounts()
+    except Exception as e:
+        logger.error(f"獲取帳號列表失敗: {e}")
         return []
 
 if __name__ == "__main__":
