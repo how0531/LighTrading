@@ -32,8 +32,7 @@
   * **委託量柱狀圖 (Volume Histogram)**：在委託量欄位內疊加半透明的進度條，直覺顯示該檔位的掛單厚度。
 
 ### 3. 字體排版 (Typography Hierarchy)
-* **數字字型**：全面強制使用等寬數字 (`font-variant-numeric: tabular-nums`) 或 Fira Code，確保跳動時畫面不會左右抖動。
-* **浮動小數點**：價格的整數部分使用大字體（`text-base` 或 `text-lg`），小數點後使用小字體（`text-xs`）並降低透明度，強化視覺焦點。
+* **數字字型**：全面強制使用等寬數字 (`font-variant-numeric: tabular-nums`) 或 barlow，確保跳動時畫面不會左右抖動。
 * **極端值標記**：當日最高價旁標註紅色小上標 `H`，最低價標註綠色小下標 `L`。
 
 ---
