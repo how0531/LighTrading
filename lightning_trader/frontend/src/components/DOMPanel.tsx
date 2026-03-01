@@ -292,7 +292,7 @@ const DOMPanel: React.FC = () => {
 
                 const isCurrent = currentPrice === price;
                 const isAvgCenter = avgClosestPrice === price;
-                const isAvgBand = avgPriceBand.includes(price);
+                const isAvgBand = Boolean(avgPriceBand.includes(price as never));
 
                 const askWidthPct = Math.min((askVol / maxVolume) * 100, 100);
                 const bidWidthPct = Math.min((bidVol / maxVolume) * 100, 100);
@@ -311,6 +311,11 @@ const DOMPanel: React.FC = () => {
                       onClick={() => handlePlaceOrder('Buy', price)}
                     >
                       <span className="opacity-30 group-hover/order:opacity-100 transition-opacity">{calculateFinalQty(price)}</span>
+                    </td>
+                    {/* 委買量 */}
+                    <td className={`font-bold relative z-0 overflow-hidden ${isCurrent ? 'text-[#D4AF37] font-black' : 'text-slate-200'}`}>
+                      <div className="absolute inset-y-0.5 right-0 bg-red-500/15 transition-all duration-150 ease-out" style={{ width: `${bidWidthPct}%` }}></div>
+                      <span key={`bid-${bidVol}`} className={`relative z-10 ${bidDiff > 0 ? 'animate-flash-inc' : bidDiff < 0 ? 'animate-flash-dec' : ''}`}>{bidVol || ''}</span>
                     </td>
                     {/* 價格 */}
                     <td key={`price-${isCurrent ? quote?.Price : price}`} className={`font-semibold relative overflow-hidden transition-colors ${isCurrent ? 'text-[#D4AF37] bg-slate-800 animate-tick' : `bg-slate-900/80 ${getPriceColor(price)}`} border-l border-r border-slate-800/50`}>

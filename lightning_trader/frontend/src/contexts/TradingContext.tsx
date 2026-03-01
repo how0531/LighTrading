@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import type { QuoteData, BidAskData } from '../types';
 
 interface AccountPosition {
@@ -39,16 +39,17 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [bidAsk, setBidAsk] = useState<BidAskData | null>(null);
   const [quoteHistory, setQuoteHistory] = useState<QuoteData[]>([]);
   const [accountSummary, setAccountSummary] = useState<AccountSummary | null>(null);
+
   const wsRef = useRef<WebSocket | null>(null);
+  const reconnectAttemptsRef = useRef(0);
+  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useEffect(() => {
-    connectWebSocket();
-    return () => {
-      if (wsRef.current) wsRef.current.close();
-    };
-  }, []);
+  // Buffer for high-frequency messages to prevent excessive re-renders
+  const pendingQuotesRef = useRef<QuoteData[]>([]);
+  const pendingBidAskRef = useRef<BidAskData | null>(null);
+  const pendingAccountRef = useRef<AccountSummary | null>(null);
 
-  const connectWebSocket = () => {
+  const connectWebSocket = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
     console.log("Connecting to WebSocket...");
@@ -58,6 +59,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     ws.onopen = () => {
       console.log('Connected to Shioaji Backend');
       setIsConnected(true);
+      reconnectAttemptsRef.current = 0; // Reset attempts on successful connection
+
       // Auto subscribe to default
       ws.send(JSON.stringify({ action: 'subscribe', symbol: targetSymbol }));
     };
@@ -66,17 +69,11 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       try {
         const data = JSON.parse(event.data);
         if (data.type === 'Tick' && data.data) {
-          const newQuote = data.data;
-          setQuote(newQuote);
-          setQuoteHistory(prev => {
-            const newHist = [newQuote, ...prev];
-            if (newHist.length > 50) newHist.pop();
-            return newHist;
-          });
+          pendingQuotesRef.current.push(data.data);
         } else if (data.type === 'BidAsk' && data.data) {
-          setBidAsk(data.data);
+          pendingBidAskRef.current = data.data;
         } else if (data.type === 'AccountUpdate' && data.data) {
-          setAccountSummary(data.data);
+          pendingAccountRef.current = data.data;
         }
       } catch (err) {
         console.error("Failed to parse message:", err);
@@ -86,30 +83,77 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     ws.onclose = () => {
       console.log('Disconnected from backend');
       setIsConnected(false);
-      setTimeout(connectWebSocket, 5000);
+
+      // Exponential backoff strategy: 1s, 2s, 4s, 8s, up to max 30s
+      const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
+      reconnectAttemptsRef.current += 1;
+      console.log(`Will attempt to reconnect in ${delay}ms...`);
+
+      reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay);
     };
 
     wsRef.current = ws;
-  };
+  }, []); // Remove targetSymbol to prevent reconnect loop
+
+  useEffect(() => {
+    connectWebSocket();
+    return () => {
+      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
+      if (wsRef.current) wsRef.current.close();
+    };
+  }, [connectWebSocket]);
+
+  // Throttled UI updates loop
+  useEffect(() => {
+    const updateInterval = setInterval(() => {
+      if (pendingQuotesRef.current.length > 0) {
+        const quotes = pendingQuotesRef.current;
+        const latestQuote = quotes[quotes.length - 1];
+        setQuote(latestQuote);
+        setQuoteHistory(prev => {
+          // Add new quotes in chronological order (latest is at the start or end?
+          // Previous logic: newQuote, ...prev. We want latest first in the history array.
+          // reversed order for the batched items so they maintain sequence
+          const reversedQuotes = [...quotes].reverse();
+          const newHist = [...reversedQuotes, ...prev];
+          return newHist.slice(0, 50); // Keep last 50
+        });
+        pendingQuotesRef.current = [];
+      }
+
+      if (pendingBidAskRef.current) {
+        setBidAsk(pendingBidAskRef.current);
+        pendingBidAskRef.current = null;
+      }
+
+      if (pendingAccountRef.current) {
+        setAccountSummary(pendingAccountRef.current);
+        pendingAccountRef.current = null;
+      }
+    }, 150); // Throttle interval roughly 150ms
+
+    return () => clearInterval(updateInterval);
+  }, []);
 
   const subscribe = (symbol: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       setTargetSymbol(symbol);
       setQuoteHistory([]);
+      pendingQuotesRef.current = [];
       wsRef.current.send(JSON.stringify({ action: 'subscribe', symbol }));
     }
   };
 
   return (
-    <TradingContext.Provider value={{ 
-      isConnected, 
-      targetSymbol, 
-      setTargetSymbol, 
-      quote, 
-      bidAsk, 
-      quoteHistory, 
+    <TradingContext.Provider value={{
+      isConnected,
+      targetSymbol,
+      setTargetSymbol,
+      quote,
+      bidAsk,
+      quoteHistory,
       accountSummary,
-      subscribe 
+      subscribe
     }}>
       {children}
     </TradingContext.Provider>

@@ -13,12 +13,21 @@ interface Trade {
   filled_avg_price: number;
 }
 
+const getStatusColor = (status: string) => {
+  if (status === 'Filled') return 'text-green-400';
+  if (status === 'Cancelled') return 'text-slate-500';
+  if (['PendingSubmit', 'PreSubmitted', 'Submitted'].includes(status)) return 'text-yellow-400';
+  if (['Failed', 'Rejected'].includes(status)) return 'text-red-400';
+  return 'text-slate-100';
+};
+
 const Panel_OrderHistory: React.FC = () => {
   const { accountSummary } = useTradingContext();
   const [trades, setTrades] = useState<Trade[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   const fetchHistory = async () => {
+    setIsLoading(true);
     try {
       const data = await getOrderHistory();
       setTrades(data);
@@ -33,19 +42,11 @@ const Panel_OrderHistory: React.FC = () => {
     fetchHistory();
   }, [accountSummary]);
 
-  const getStatusColor = (status: string) => {
-    if (status === 'Filled') return 'text-green-400';
-    if (status === 'Cancelled') return 'text-slate-500';
-    if (['PendingSubmit', 'PreSubmitted', 'Submitted'].includes(status)) return 'text-yellow-400';
-    if (['Failed', 'Rejected'].includes(status)) return 'text-red-400';
-    return 'text-slate-100';
-  };
-
   return (
     <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700 h-full flex flex-col">
       <div className="flex justify-between items-center mb-4">
         <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider">今日委託 (Order History)</h3>
-        <button 
+        <button
           onClick={fetchHistory}
           className="text-xs bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition-colors"
         >
@@ -53,7 +54,12 @@ const Panel_OrderHistory: React.FC = () => {
         </button>
       </div>
 
-      <div className="flex-1 overflow-auto">
+      <div className="flex-1 overflow-auto relative">
+        {isLoading && (
+          <div className="absolute inset-0 bg-slate-900/50 flex items-center justify-center z-10">
+            <span className="text-slate-400 text-sm">Loading...</span>
+          </div>
+        )}
         <table className="w-full text-xs text-left">
           <thead className="sticky top-0 bg-slate-800 text-slate-500">
             <tr>

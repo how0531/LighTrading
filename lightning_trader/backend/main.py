@@ -2,7 +2,8 @@ import os
 import sys
 import threading
 import concurrent.futures
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import uvicorn
@@ -28,6 +29,14 @@ from core.config import Config
 from shioaji.constant import Action, OrderType
 
 app = FastAPI(title="LighTrade Backend API", version="1.0.1")
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    logger.error(f"未捕獲的例外錯誤: {exc}", exc_info=True)
+    return JSONResponse(
+        status_code=500,
+        content={"status": "error", "message": str(exc)}
+    )
 
 # 實例化 ShioajiClient
 shioaji_client = ShioajiClient()

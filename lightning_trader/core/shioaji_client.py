@@ -38,16 +38,44 @@ class ShioajiClient(QObject):
             QTimer.singleShot(100, self.login)
 
     def check_connection(self):
-        """檢查連線狀態，斷線則自動重連"""
+        """檢查連線狀態，斷線則自動重連 (具備指數退避機制)"""
+        if getattr(self, '_is_reconnecting', False):
+            return
+
         if self._is_connected:
             try:
                 # 簡單呼叫取得帳戶資訊來測試連線
                 if self.api.stock_account is None and self.api.futopt_account is None:
                     raise Exception("Account not found")
             except Exception as e:
+                import logging
+                logging.warning(f"偵測到斷線: {e}，準備自動重連...")
                 print(f"偵測到斷線: {e}，準備自動重連...")
                 self._is_connected = False
-                self.login()
+                self._reconnect_delay = 5000  # 初始延遲 5 秒
+                self._attempt_reconnect()
+
+    def _attempt_reconnect(self):
+        self._is_reconnecting = True
+        print(f"將在 {self._reconnect_delay / 1000} 秒後嘗試重連...")
+        QTimer.singleShot(int(self._reconnect_delay), self._do_login_reconnect)
+
+    def _do_login_reconnect(self):
+        print("開始執行重連登入...")
+        # 調用 login() 嘗試連線，login 內已包含自動重啟訂閱 current_contract 的邏輯
+        success = self.login()
+        if success:
+            import logging
+            logging.info("重連成功，已恢復連線與訂閱。")
+            print("重連成功，已恢復連線與訂閱。")
+            self._is_reconnecting = False
+            self._reconnect_delay = 5000  # 重置延遲時間
+        else:
+            import logging
+            self._reconnect_delay = min(getattr(self, '_reconnect_delay', 5000) * 2, 30000)  # 指數退避，最大 30 秒
+            logging.warning(f"重連失敗，退避延遲增加至 {self._reconnect_delay / 1000} 秒。")
+            print(f"重連失敗，退避延遲增加至 {self._reconnect_delay / 1000} 秒。")
+            self._attempt_reconnect()
 
     def _setup_callbacks(self):
         @self.api.on_tick_stk_v1()
@@ -177,10 +205,8 @@ class ShioajiClient(QObject):
         if not contract:
             contract = self.api.Contracts.Futures.get(symbol)
         if not contract:
-            # 嘗試搜尋 (Search)
-            results = self.api.search_main_contract(symbol)
-            if results:
-                contract = results[0]
+            # 嘗試搜尋選擇權
+            contract = self.api.Contracts.Options.get(symbol)
         return contract
 
     def subscribe(self, symbol: str) -> bool:
