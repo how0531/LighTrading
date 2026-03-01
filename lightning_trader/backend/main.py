@@ -1,6 +1,7 @@
 import os
 import sys
 import threading
+import concurrent.futures
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -18,7 +19,7 @@ logger = logging.getLogger(__name__)
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 # 初始化 PyQt5 的 QApplication (因為 shioaji_client.py 內含 QObject, pyqtSignal, QTimer)
-from PyQt5.QtCore import QCoreApplication
+from PyQt5.QtCore import QCoreApplication, QObject, pyqtSignal
 if not QCoreApplication.instance():
     qapp = QCoreApplication(sys.argv)
 
@@ -30,6 +31,36 @@ app = FastAPI(title="LighTrade Backend API", version="1.0.1")
 
 # 實例化 ShioajiClient
 shioaji_client = ShioajiClient()
+
+class QtWorker(QObject):
+    """
+    用於將任務派發到 Qt 主執行緒執行的 Worker。
+    解決 FastAPI 在 Uvicorn worker thread 中直接呼叫 ShioajiClient (QObject) 導致的 Thread-Safety 問題。
+    """
+    execute_signal = pyqtSignal(object, object)
+
+    def __init__(self):
+        super().__init__()
+        self.execute_signal.connect(self._execute)
+
+    def _execute(self, func, future):
+        try:
+            res = func()
+            future.set_result(res)
+        except Exception as e:
+            future.set_exception(e)
+
+qt_worker = QtWorker()
+
+async def run_in_qt_thread(func, *args, **kwargs):
+    """
+    非同步輔助函數：將同步函數 func 丟到 Qt 主執行緒中執行，並等待其完成。
+    """
+    loop = asyncio.get_running_loop()
+    future = concurrent.futures.Future()
+    # emit 訊號，Qt 事件迴圈會將其排入主執行緒執行
+    qt_worker.execute_signal.emit(lambda: func(*args, **kwargs), future)
+    return await loop.run_in_executor(None, future.result)
 
 # 活躍的 WebSocket 連接
 active_connections: list[WebSocket] = []
@@ -199,7 +230,8 @@ async def login(req: LoginRequest):
     接收 JSON 格式的登入資訊並透過 shioaji_client 登入。
     """
     Config.SIMULATION = req.simulation
-    success = shioaji_client.login(
+    success = await run_in_qt_thread(
+        shioaji_client.login,
         api_key=req.api_key, 
         secret_key=req.secret_key, 
         simulation=req.simulation,
@@ -226,7 +258,7 @@ async def websocket_quotes(websocket: WebSocket):
             try:
                 msg = json.loads(data)
                 if msg.get("action") == "subscribe" and msg.get("symbol"):
-                    success = shioaji_client.subscribe(msg["symbol"])
+                    success = await run_in_qt_thread(shioaji_client.subscribe, msg["symbol"])
                     await websocket.send_text(json.dumps({
                         "status": "success" if success else "failed", 
                         "action": "subscribe", 
@@ -256,7 +288,8 @@ async def place_order(req: PlaceOrderRequest):
     elif req.order_type.upper() == "FOK":
         order_type_val = OrderType.FOK
 
-    trade = shioaji_client.place_order(
+    trade = await run_in_qt_thread(
+        shioaji_client.place_order,
         symbol=req.symbol,
         price=req.price,
         action=action_val,
@@ -280,7 +313,7 @@ async def cancel_all(req: CancelAllRequest):
     """
     action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
     try:
-        cancel_count = shioaji_client.cancel_all(req.symbol, action_val)
+        cancel_count = await run_in_qt_thread(shioaji_client.cancel_all, req.symbol, action_val)
         return {"status": "success", "message": f"成功送出 {cancel_count} 筆刪單指令"}
     except Exception as e:
         logger.error(f"批次刪單失敗: {e}")
@@ -290,7 +323,7 @@ async def cancel_all(req: CancelAllRequest):
 async def get_positions(account_id: str = None):
     """獲取目前的持倉部位"""
     try:
-        positions = shioaji_client.list_positions(account_id)
+        positions = await run_in_qt_thread(shioaji_client.list_positions, account_id)
         # 將 Shioaji Position 物件轉成 JSON 格式
         pos_list = []
         for p in positions:
@@ -321,7 +354,7 @@ async def get_positions(account_id: str = None):
 async def get_account_balance():
     """獲取帳戶餘額 (保證金)"""
     try:
-        balance = shioaji_client.get_account_balance()
+        balance = await run_in_qt_thread(shioaji_client.get_account_balance)
         if balance:
             return {
                 "equity": float(getattr(balance, 'equity', 0)),
@@ -339,7 +372,7 @@ async def get_order_history(account_id: str = None):
     """獲取當日委託/成交紀錄"""
     try:
         # TODO: 未來可進一步在 shioaji_client 內實現 account_id 過濾 trades
-        trades = shioaji_client.get_order_history()
+        trades = await run_in_qt_thread(shioaji_client.get_order_history)
         trade_list = []
         for t in trades:
             # 支援篩選功能（如果傳入則過濾）
@@ -367,7 +400,7 @@ async def get_order_history(account_id: str = None):
 async def get_accounts():
     """獲取所有可用帳號資訊"""
     try:
-        return shioaji_client.get_all_accounts()
+        return await run_in_qt_thread(shioaji_client.get_all_accounts)
     except Exception as e:
         logger.error(f"獲取帳號列表失敗: {e}")
         return []

@@ -129,17 +129,17 @@ const DOMPanel: React.FC = () => {
   const lowPrice = quote?.Low || 0;
 
   const maxVolume = useMemo(() => Math.max(
-    ...(bidAsk?.BidVolume || [0]),
-    ...(bidAsk?.AskVolume || [0]),
+    ...(bidAsk?.BidVolume || ([] as number[])),
+    ...(bidAsk?.AskVolume || ([] as number[])),
     1
   ), [bidAsk]);
 
-  const totalBidVol = useMemo(() => (bidAsk?.BidVolume || []).reduce((a, b) => a + b, 0), [bidAsk]);
-  const totalAskVol = useMemo(() => (bidAsk?.AskVolume || []).reduce((a, b) => a + b, 0), [bidAsk]);
+  const totalBidVol = useMemo(() => (bidAsk?.BidVolume || ([] as number[])).reduce((a, b) => a + b, 0), [bidAsk]);
+  const totalAskVol = useMemo(() => (bidAsk?.AskVolume || ([] as number[])).reduce((a, b) => a + b, 0), [bidAsk]);
 
   const getPriceColor = (p: number) => {
-    if (!refPrice || p === refPrice) return 'text-white';
-    return p > refPrice ? 'text-red-500' : 'text-green-500';
+    if (!refPrice || p === refPrice) return 'text-slate-100';
+    return p > refPrice ? 'text-rose-400' : 'text-emerald-400';
   };
 
   // 格式化價格：整數部分大，小數部分小
@@ -217,9 +217,9 @@ const DOMPanel: React.FC = () => {
   const placeholderRows = Array.from({ length: 25 });
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 rounded-xl border border-slate-700/50 overflow-hidden bg-[#0a0a0a] shadow-2xl">
+    <div className="flex flex-col flex-1 min-h-0 rounded-lg border border-slate-800 overflow-hidden bg-slate-950 shadow-2xl">
       {/* 頂部控制列 - Compact Condition Bar */}
-      <div className="px-3 py-2 bg-[#1C2331] border-b border-slate-800 flex items-center justify-between shrink-0">
+      <div className="px-3 py-2 bg-slate-900/50 border-b border-slate-800/80 flex items-center justify-between shrink-0">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-1.5">
             <span className="text-xs font-bold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">ROD</span>
@@ -266,17 +266,17 @@ const DOMPanel: React.FC = () => {
       </div>
 
       {/* 主表格區域 */}
-      <div ref={tableContainerRef} className="flex-1 overflow-auto custom-scrollbar p-0 relative bg-[#0a0a0a]">
-        <table className="w-full border-collapse text-xs font-mono text-center select-none table-fixed">
-          <thead className="sticky top-0 z-10 bg-[#0a0a0a] text-slate-400 border-b border-slate-800 shadow-md">
-            <tr className="text-[10px] uppercase tracking-tighter">
-              <th className="w-[8%] py-1.5 border-r border-slate-800 text-slate-500">刪除</th>
-              <th className="w-[14%] py-1.5 border-r border-slate-800 text-red-500/70">欲委託</th>
-              <th className="w-[20%] py-1.5 border-r border-slate-800">委託買單</th>
-              <th className="w-[16%] py-1.5 border-r border-slate-800 bg-slate-900/30">股價</th>
-              <th className="w-[20%] py-1.5 border-r border-slate-800">委託賣單</th>
-              <th className="w-[14%] py-1.5 border-r border-slate-800 text-green-500/70">欲委託</th>
-              <th className="w-[8%] py-1.5 text-slate-500">刪除</th>
+      <div ref={tableContainerRef} className="flex-1 overflow-auto custom-scrollbar p-0 relative bg-slate-950">
+        <table className="w-full border-collapse text-xs font-mono text-center select-none table-fixed tabular-nums">
+          <thead className="sticky top-0 z-10 bg-slate-900 text-slate-500 border-b border-slate-700">
+            <tr className="text-[10px] uppercase tracking-wider font-bold">
+              <th className="w-[8%] py-1.5 border-r border-slate-800">Del</th>
+              <th className="w-[14%] py-1.5 border-r border-slate-800 font-sans font-normal opacity-70">Pre-Buy</th>
+              <th className="w-[20%] py-1.5 border-r border-slate-800">Bid Vol</th>
+              <th className="w-[16%] py-1.5 border-r border-slate-800 bg-slate-800/50">Price</th>
+              <th className="w-[20%] py-1.5 border-r border-slate-800">Ask Vol</th>
+              <th className="w-[14%] py-1.5 border-r border-slate-800 font-sans font-normal opacity-70">Pre-Sell</th>
+              <th className="w-[8%] py-1.5">Del</th>
             </tr>
           </thead>
           <tbody>
@@ -299,50 +299,43 @@ const DOMPanel: React.FC = () => {
 
                 return (
                   <tr
-                    key={price}
+                    key={String(price)}
                     ref={isCurrent ? currentPriceRef : null}
-                    className={`h-7 border-b border-slate-900 group transition-colors ${isCurrent ? 'bg-red-600' : 'hover:bg-slate-800/30'} ${isAvgBand && !isCurrent ? 'bg-cyan-900/20' : ''}`}
+                    className={`h-7 border-b border-slate-900/40 transition-colors ${isCurrent ? 'bg-slate-800' : 'hover:bg-slate-900/60'} ${isAvgBand && !isCurrent ? 'bg-cyan-950/20' : ''}`}
                   >
                     {/* 刪除買 */}
-                    <td className="text-[10px] text-slate-700 hover:text-red-500 cursor-pointer active:bg-red-500/10 transition-colors border-r border-slate-900/50" onClick={() => handleCancelAll('Buy')}>DEL</td>
+                    <td className="text-[10px] text-slate-600 hover:text-white hover:bg-rose-900 cursor-pointer transition-colors border-r border-slate-900/50" onClick={() => handleCancelAll('Buy')}>✕</td>
                     {/* 欲委託買單 */}
                     <td
-                      className="cursor-pointer bg-red-950/20 hover:bg-red-900/40 text-red-500 font-bold transition-colors border-r border-slate-800/50 relative overflow-hidden group/order"
+                      className="cursor-pointer bg-slate-950 hover:bg-rose-950/40 text-rose-500 font-bold transition-colors border-r border-slate-800/50 relative overflow-hidden group/order"
                       onClick={() => handlePlaceOrder('Buy', price)}
                     >
-                      <span className="opacity-40 group-hover/order:opacity-100 group-hover/order:scale-110 inline-block transition-all">{calculateFinalQty(price)}</span>
+                      <span className="opacity-30 group-hover/order:opacity-100 transition-opacity">{calculateFinalQty(price)}</span>
                     </td>
-                    {/* 委買量 */}
-                    <td className={`font-bold relative z-0 overflow-hidden ${isCurrent ? 'text-white' : 'text-slate-200'} ${bidDiff > 0 ? 'animate-flash-inc' : bidDiff < 0 ? 'animate-flash-dec' : ''}`}>
-                      <div className="absolute inset-y-0.5 right-0 bg-red-500/20 transition-colors" style={{ width: `${bidWidthPct}%` }}></div>
-                      <span className="relative z-10 drop-shadow-md">{bidVol || ''}</span>
-                    </td>
-
                     {/* 價格 */}
-                    <td className={`font-medium relative overflow-hidden transition-colors ${isCurrent ? 'text-white' : `bg-[#0a0a0a] ${getPriceColor(price)}`} border-l border-r border-slate-800/50`}>
+                    <td key={`price-${isCurrent ? quote?.Price : price}`} className={`font-semibold relative overflow-hidden transition-colors ${isCurrent ? 'text-[#D4AF37] bg-slate-800 animate-tick' : `bg-slate-900/80 ${getPriceColor(price)}`} border-l border-r border-slate-800/50`}>
                       <div className="flex items-center justify-center gap-1">
-                        {price === highPrice && <span className="text-[8px] text-red-500 font-bold absolute left-1">H</span>}
-                        {price === lowPrice && <span className="text-[8px] text-green-500 font-bold absolute left-1">L</span>}
+                        {price === highPrice && <span className="text-[8px] text-red-500 absolute left-1 opacity-60">H</span>}
+                        {price === lowPrice && <span className="text-[8px] text-emerald-500 absolute left-1 opacity-60">L</span>}
                         {renderPrice(price)}
-                        {isAvgCenter && <div className="absolute right-0.5 top-0.5 w-1 h-1 bg-cyan-400 rounded-full shadow-[0_0_4px_rgba(34,211,238,0.8)]"></div>}
-                        {isAvgBand && !isAvgCenter && <div className="absolute right-1 top-1 w-0.5 h-0.5 bg-cyan-600/50 rounded-full"></div>}
+                        {isAvgCenter && <div className="absolute right-0.5 top-0.5 w-1 h-1 bg-cyan-700 rounded-full"></div>}
                       </div>
                     </td>
 
                     {/* 委賣量 */}
-                    <td className={`font-bold relative z-0 overflow-hidden ${isCurrent ? 'text-white' : 'text-slate-200'} ${askDiff > 0 ? 'animate-flash-inc' : askDiff < 0 ? 'animate-flash-dec' : ''}`}>
-                      <div className="absolute inset-y-0.5 left-0 bg-green-500/20 transition-colors" style={{ width: `${askWidthPct}%` }}></div>
-                      <span className="relative z-10 drop-shadow-md">{askVol || ''}</span>
+                    <td className={`font-bold relative z-0 overflow-hidden ${isCurrent ? 'text-[#D4AF37] font-black' : 'text-slate-200'}`}>
+                      <div className="absolute inset-y-0.5 left-0 bg-emerald-500/15 transition-all duration-150 ease-out" style={{ width: `${askWidthPct}%` }}></div>
+                      <span key={`ask-${askVol}`} className={`relative z-10 ${askDiff > 0 ? 'animate-flash-inc' : askDiff < 0 ? 'animate-flash-dec' : ''}`}>{askVol || ''}</span>
                     </td>
                     {/* 欲委託賣單 */}
                     <td
-                      className="cursor-pointer bg-green-950/20 hover:bg-green-900/40 text-green-500 font-bold transition-colors border-l border-slate-800/50 relative overflow-hidden group/order"
+                      className="cursor-pointer bg-slate-950 hover:bg-emerald-950/40 text-emerald-500 font-bold transition-colors border-l border-slate-800/50 relative overflow-hidden group/order"
                       onClick={() => handlePlaceOrder('Sell', price)}
                     >
-                      <span className="opacity-40 group-hover/order:opacity-100 group-hover/order:scale-110 inline-block transition-all">{calculateFinalQty(price)}</span>
+                      <span className="opacity-30 group-hover/order:opacity-100 transition-opacity">{calculateFinalQty(price)}</span>
                     </td>
                     {/* 刪除賣 */}
-                    <td className="text-[10px] text-slate-700 hover:text-green-500 cursor-pointer active:bg-green-500/10 transition-colors border-l border-slate-900/50" onClick={() => handleCancelAll('Sell')}>DEL</td>
+                    <td className="text-[10px] text-slate-600 hover:text-white hover:bg-emerald-900 cursor-pointer transition-colors border-l border-slate-900/50" onClick={() => handleCancelAll('Sell')}>✕</td>
                   </tr>
                 );
               })
@@ -360,12 +353,12 @@ const DOMPanel: React.FC = () => {
               ))
             )}
           </tbody>
-          <tfoot className="sticky bottom-0 bg-[#0a0a0a] border-t border-slate-800 text-[11px] text-slate-500">
+          <tfoot className="sticky bottom-0 bg-slate-950 border-t border-slate-800 text-[11px] text-slate-500">
             <tr className="h-6">
-              <td colSpan={2} className="border-r border-slate-800">TOTAL</td>
-              <td className="border-r border-slate-800 font-bold text-red-500/80">{totalBidVol}</td>
-              <td className="border-r border-slate-800 bg-slate-900/20">{(totalBidVol - totalAskVol)}</td>
-              <td className="border-r border-slate-800 font-bold text-green-500/80">{totalAskVol}</td>
+              <td colSpan={2} className="border-r border-slate-900/50">TOTAL</td>
+              <td className="border-r border-slate-900/50 font-bold text-rose-500/60">{totalBidVol}</td>
+              <td className="border-r border-slate-900/50 bg-slate-900/40">{(totalBidVol - totalAskVol)}</td>
+              <td className="border-r border-slate-900/50 font-bold text-emerald-500/60">{totalAskVol}</td>
               <td colSpan={2}></td>
             </tr>
           </tfoot>
@@ -373,45 +366,36 @@ const DOMPanel: React.FC = () => {
       </div>
 
       {/* 底部功能鈕 - Pro Battle Bar */}
-      <div className="px-1.5 py-1.5 bg-[#0a0a0a] border-t border-slate-800 grid grid-cols-5 gap-1.5 shrink-0">
+      <div className="px-2 py-2 bg-slate-950 border-t border-slate-800 grid grid-cols-[1fr_2fr_1.5fr_2fr_1fr] gap-2 shrink-0">
         <button
           onClick={() => handleCancelAll('Buy')}
-          className="bg-slate-900 hover:bg-red-950/40 text-[10px] text-slate-400 hover:text-red-500 py-2 rounded border border-slate-800 transition-all font-bold"
+          className="bg-slate-900 hover:bg-rose-950/50 text-[11px] text-slate-400 hover:text-rose-400 py-2 rounded focus:outline-none focus:ring-1 focus:ring-slate-700 transition-all font-sans"
         >
           買全刪
         </button>
         <button
           onClick={() => handleMarketOrder('Buy')}
-          className="bg-red-600 hover:bg-red-500 text-[11px] text-white py-2 rounded shadow-lg shadow-red-900/20 transition-all font-black"
+          className="bg-rose-800 hover:bg-rose-700 text-[12px] text-white py-2 rounded shadow-sm shadow-rose-950/50 transition-all font-sans"
         >
-          市價買
+          市價買進
         </button>
 
         <button
           onClick={() => setIsCombatMode(!isCombatMode)}
-          className={`flex flex-col items-center justify-center rounded border transition-all ${isCombatMode ? 'bg-yellow-500/10 border-yellow-500 text-yellow-500' : 'bg-slate-900 border-slate-800 text-slate-500'}`}
+          className={`flex flex-col items-center justify-center rounded border transition-all ${isCombatMode ? 'bg-[#D4AF37]/10 border-[#D4AF37] text-[#D4AF37]' : 'bg-slate-900 border-slate-800 text-slate-500'}`}
         >
-          {isCombatMode ? (
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-              <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
-            </svg>
-          ) : (
-            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-              <path d="M10 2a5 5 0 00-5 5v2a2 2 0 00-2 2v5a2 2 0 002 2h10a2 2 0 002-2v-5a2 2 0 00-2-2V7a5 5 0 00-5-5zM7 7a3 3 0 016 0v2H7V7z" />
-            </svg>
-          )}
-          <span className="text-[7px] font-black leading-none mt-0.5">{isCombatMode ? 'LOCK' : 'SAFE'}</span>
+          <span className="text-[10px] font-sans font-medium">{isCombatMode ? '🔒 Locked' : '⚡ 1-Click'}</span>
         </button>
 
         <button
           onClick={() => handleMarketOrder('Sell')}
-          className="bg-green-600 hover:bg-green-500 text-[11px] text-white py-2 rounded shadow-lg shadow-green-900/20 transition-all font-black"
+          className="bg-emerald-800 hover:bg-emerald-700 text-[12px] text-white py-2 rounded shadow-sm shadow-emerald-950/50 transition-all font-sans"
         >
-          市價賣
+          市價賣出
         </button>
         <button
           onClick={() => handleCancelAll('Sell')}
-          className="bg-slate-900 hover:bg-green-950/40 text-[10px] text-slate-400 hover:text-green-500 py-2 rounded border border-slate-800 transition-all font-bold"
+          className="bg-slate-900 hover:bg-emerald-950/50 text-[11px] text-slate-400 hover:text-emerald-400 py-2 rounded focus:outline-none focus:ring-1 focus:ring-slate-700 transition-all font-sans"
         >
           賣全刪
         </button>

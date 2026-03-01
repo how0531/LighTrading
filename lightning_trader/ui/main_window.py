@@ -27,41 +27,49 @@ class LightningOrderWindow(QMainWindow):
         self.setWindowTitle('閃電下單 - 專業看盤終端')
         self.resize(1200, 850)
         
-        # 套用現代化深色主題 (Dark Mode)
+        # 套用現代化深色主題 (Navy & Gold Dark Mode)
         self.setStyleSheet("""
-            QMainWindow { background-color: #0F172A; }
-            QLabel { color: #CBD5E1; font-weight: 500; font-size: 14px; }
+            QMainWindow { background-color: #161C2D; }
+            QLabel { color: #A0AABF; font-weight: 500; font-size: 13px; font-family: "Fira Sans", sans-serif; }
             QLineEdit, QSpinBox, QComboBox {
-                background-color: #1E293B; color: #F8FAFC;
-                border: 1px solid #334155; padding: 6px;
-                border-radius: 6px; font-size: 14px;
+                background-color: #1D263B; color: #F5F6FA;
+                border: 1px solid #435B83; padding: 6px;
+                border-radius: 4px; font-size: 13px;
+                font-family: "Fira Code", monospace;
             }
-            QLineEdit:focus, QSpinBox:focus { border: 1px solid #3B82F6; }
+            QLineEdit:focus, QSpinBox:focus { border: 1px solid #E2B25A; }
             QPushButton {
-                background-color: #3B82F6; color: white;
-                border: none; padding: 8px 16px;
-                border-radius: 6px; font-weight: bold; font-size: 14px;
+                background-color: #2C3E5D; color: #E2E8F0;
+                border: 1px solid #435B83; padding: 8px 16px;
+                border-radius: 4px; font-weight: bold; font-size: 13px;
+                font-family: "Fira Sans", sans-serif;
             }
-            QPushButton:hover { background-color: #2563EB; }
+            QPushButton:hover { background-color: #435B83; color: white; }
             QTableWidget {
-                background-color: #1E293B; color: #F8FAFC;
-                gridline-color: #334155; border: 1px solid #334155;
-                border-radius: 8px; font-size: 15px;
+                background-color: #1D263B; color: #F5F6FA;
+                gridline-color: #2C3E5D; border: none;
+                border-radius: 0px; font-size: 14px;
+                font-family: "Fira Code", monospace;
             }
             QHeaderView::section {
-                background-color: #0F172A; color: #94A3B8;
-                padding: 8px; border: 1px solid #334155; font-weight: bold;
+                background-color: #161C2D; color: #8BA2C4;
+                padding: 6px; border: 1px solid #2C3E5D; 
+                font-weight: normal; font-size: 11px;
+                font-family: "Fira Sans", sans-serif;
             }
             QDockWidget {
-                color: #CBD5E1;
-                font-weight: bold;
+                color: #A0AABF;
+                font-weight: normal;
+                background: #161C2D;
+                font-family: "Fira Sans", sans-serif;
             }
             QDockWidget::title {
-                background: #1E293B;
+                background: #1D263B;
                 padding-left: 10px;
                 padding-top: 4px;
             }
         """)
+
 
         # -----------------------------
         # Central Widget (閃電下單表格)
@@ -210,51 +218,60 @@ class LightningOrderWindow(QMainWindow):
         super().closeEvent(event)
 
     def init_table_ui(self):
-        color_buy_deep = QColor(69, 10, 10)     
-        color_buy = QColor(127, 29, 29)         
-        color_buy_light = QColor(153, 27, 27)   
+        color_buy_deep = QColor(28, 25, 23)     # 深度低調紅黑
+        color_buy = QColor(69, 10, 10, 180)     # 低飽和深紅
+        color_buy_light = QColor(153, 27, 27, 40) # 極淡紅背板
         
-        color_sell_deep = QColor(12, 74, 110)   
-        color_sell = QColor(3, 105, 161)        
-        color_sell_light = QColor(2, 132, 199)  
+        color_sell_deep = QColor(2, 43, 58)     # 深度低調藍綠黑
+        color_sell = QColor(12, 74, 110, 180)   # 低飽和深藍
+        color_sell_light = QColor(2, 132, 199, 40) # 極淡藍背板
         
-        color_price = QColor(30, 41, 59)        
+        color_price = QColor(29, 38, 59)        # Navy Panel (#1D263B)
         
-        font_bold = QFont()
-        font_bold.setBold(True)
-        font_bold.setPointSize(11)
+        font_mono = QFont("Fira Code")
+        font_mono.setBold(True)
+        font_mono.setPointSize(10)
+        font_mono.setStyleHint(QFont.Monospace)
 
         for row in range(11):
             for col in range(9):
                 item = QTableWidgetItem("")
                 item.setTextAlignment(Qt.AlignCenter)
-                item.setFont(font_bold)
+                item.setFont(font_mono)
                 
                 if col in [0, 1]:
                     item.setBackground(color_buy_deep)
-                    item.setForeground(QColor("#FECACA"))
+                    item.setForeground(QColor("#7F1D1D"))
+                    if col == 0:
+                        font_del = QFont("Fira Sans")
+                        font_del.setPointSize(9)
+                        item.setFont(font_del)
                 elif col == 2:
                     item.setBackground(color_buy)
-                    item.setForeground(QColor("#FFFFFF"))
+                    item.setForeground(QColor("#FECACA"))
                 elif col == 3:
                     item.setBackground(color_buy_light)
-                    item.setForeground(QColor("#FEF2F2"))
+                    item.setForeground(QColor("#F8FAFC"))
                 elif col == 4:
                     item.setBackground(color_price)
-                    item.setForeground(QColor("#FBBF24"))
-                    font_price = QFont()
+                    item.setForeground(QColor("#E2B25A")) # Dawho Gold
+                    font_price = QFont("Fira Code")
                     font_price.setBold(True)
-                    font_price.setPointSize(13)
+                    font_price.setPointSize(12)
                     item.setFont(font_price)
                 elif col == 5:
                     item.setBackground(color_sell_light)
-                    item.setForeground(QColor("#F0F9FF"))
+                    item.setForeground(QColor("#F8FAFC"))
                 elif col == 6:
                     item.setBackground(color_sell)
-                    item.setForeground(QColor("#FFFFFF"))
+                    item.setForeground(QColor("#BAE6FD"))
                 elif col in [7, 8]:
                     item.setBackground(color_sell_deep)
-                    item.setForeground(QColor("#BAE6FD"))
+                    item.setForeground(QColor("#083344"))
+                    if col == 8:
+                        font_del = QFont("Fira Sans")
+                        font_del.setPointSize(9)
+                        item.setFont(font_del)
                     
                 self.table.setItem(row, col, item)
 

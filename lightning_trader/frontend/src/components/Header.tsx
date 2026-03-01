@@ -8,30 +8,33 @@ const Header: React.FC = () => {
 
   const handleSub = (e: React.FormEvent) => {
     e.preventDefault();
-    if(symInput) subscribe(symInput);
+    if (symInput) subscribe(symInput);
   };
 
   return (
-    <div className="glass-panel w-full px-6 py-4 rounded-xl flex items-center justify-between border border-slate-700/50 mb-6">
+    <div className="glass-panel w-full px-5 py-3 rounded-lg flex items-center justify-between border border-slate-700/50 mb-6 transition-all duration-300">
       <div className="flex items-center gap-4">
-        <Activity className={`w-6 h-6 ${isConnected ? 'text-emerald-400 animate-pulse-slow' : 'text-red-400'}`} />
+        <Activity className={`w-6 h-6 ${isConnected ? 'text-[#10B981]' : 'text-red-500'}`} />
         <div>
-          <h2 className="text-xl font-bold tracking-widest text-white">LighTrade</h2>
-          <span className="text-xs text-slate-400 font-mono">{isConnected ? 'SYS_ONLINE' : 'SYS_OFFLINE'}</span>
+          <h2 className="text-lg font-black tracking-[0.2em] text-white italic transition-transform hover:scale-105 cursor-default font-mono">LIGHTRADE</h2>
+          <div className="flex items-center gap-1.5 mt-0.5">
+            <div className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-[#10B981] shadow-[0_0_6px_rgba(16,185,129,0.3)]' : 'bg-[#EF4444]'}`}></div>
+            <span className="text-[10px] text-slate-400 font-mono tracking-widest uppercase font-bold">{isConnected ? 'ONLINE' : 'OFFLINE'}</span>
+          </div>
         </div>
       </div>
 
       <form onSubmit={handleSub} className="flex items-center gap-3">
-        <label className="text-xs text-slate-400 uppercase tracking-wider font-semibold hidden md:block">Active Symbol</label>
-        <div className="flex bg-slate-900/50 rounded-lg border border-slate-700 overflow-hidden focus-within:border-yellow-500 transition-colors">
-          <input 
-            type="text" 
+        <label className="text-xs text-slate-400 uppercase tracking-wider font-semibold hidden md:block font-mono">Active Symbol</label>
+        <div className="flex bg-slate-900 rounded border border-slate-700 overflow-hidden focus-within:border-[#D4AF37] transition-all shadow-inner">
+          <input
+            type="text"
             value={symInput}
             onChange={(e) => setSymInput(e.target.value)}
-            className="bg-transparent text-white px-4 py-2 outline-none font-mono w-32 placeholder-slate-600"
-            placeholder="Symbol..."
+            className="bg-transparent text-slate-200 px-3 py-1.5 outline-none font-mono w-24 text-sm placeholder-slate-600 font-bold"
+            placeholder="SYMBOL..."
           />
-          <button type="submit" className="bg-yellow-600 text-white hover:bg-yellow-500 px-4 py-2 text-sm font-bold transition-colors">
+          <button type="submit" className="bg-slate-800 text-slate-400 hover:bg-[#D4AF37] hover:text-white px-3 py-1.5 text-[10px] font-black tracking-tighter border-l border-slate-700 transition-all uppercase">
             LOAD
           </button>
         </div>

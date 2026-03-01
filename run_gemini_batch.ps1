@@ -3,7 +3,7 @@
 $instructionPath = "C:\Users\How\OneDrive\Documents\LighTrade\lightning_trader\gemini_instructions.txt"
 
 Write-Host "================================================" -ForegroundColor Cyan
-Write-Host " 啟動 Gemini CLI 子代理 (閃電下單器 Phase 2) " -ForegroundColor Cyan
+Write-Host " 啟動 Gemini CLI 子代理  " -ForegroundColor Cyan
 Write-Host "================================================" -ForegroundColor Cyan
 
 # 讓程式變成「常駐守護進程 (Daemon)」，確保任務可以一直進行

@@ -1,32 +1,46 @@
+@import url('https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700;800&family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --color-blue-gray-900: #1C2331;
-  --color-blue-gray-800: #2C3545;
-  --color-accent-gold: #D4AF37;
-  --color-accent-green: #10b981;
-  --color-accent-red: #ef4444;
-  
-  --font-sans: "Inter", "system-ui", sans-serif;
+  --color-slate-950: #101623;
+  /* Very Dark Navy Base */
+  --color-slate-900: #1C2331;
+  /* Deep Navy Panel */
+  --color-slate-800: #29344A;
+  /* Hover / Lighter Navy */
+  --color-slate-700: #3E4E6D;
+  /* Borders */
+
+  --color-buy-muted: #EF4444;
+  /* Dawho Red (Buy) */
+  --color-sell-muted: #10B981;
+  /* Dawho Green (Sell) */
+  --color-accent-amber: #D4AF37;
+  /* Dawho Gold */
+
+  --font-sans: "Fira Sans", "-apple-system", sans-serif;
+  --font-mono: "Barlow", "Fira Code", monospace;
 }
 
 body {
   margin: 0;
   padding: 0;
   font-family: var(--font-sans);
-  background-color: var(--color-blue-gray-900);
-  color: #f8fafc;
+  background-color: var(--color-slate-950);
+  color: #f1f5f9;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
+  overflow: hidden;
+  /* Prevent body scroll if dashboard handles it */
 }
 
 /* Glassmorphism Classes */
 .glass-panel {
-  background: rgba(44, 53, 69, 0.8); /* slate-800/80 equivalent */
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  border: 1px solid rgba(51, 65, 85, 0.5); /* border-slate-700/50 equivalent */
-  box-shadow: 0 8px 32px 0 rgba(0, 0, 0, 0.3);
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(51, 65, 85, 0.3);
+  box-shadow: 0 4px 24px -2px rgba(0, 0, 0, 0.5);
 }
 
 .text-glow-green {
@@ -42,8 +56,15 @@ body {
 }
 
 @keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: .7; }
+
+  0%,
+  100% {
+    opacity: 1;
+  }
+
+  50% {
+    opacity: .7;
+  }
 }
 
 /* Custom Scrollbar */
@@ -51,32 +72,76 @@ body {
   width: 6px;
   height: 6px;
 }
+
 .custom-scrollbar::-webkit-scrollbar-track {
   background: rgba(15, 23, 42, 0.5);
 }
+
 .custom-scrollbar::-webkit-scrollbar-thumb {
   background: rgba(51, 65, 85, 0.8);
   border-radius: 3px;
 }
+
 .custom-scrollbar::-webkit-scrollbar-thumb:hover {
   background: rgba(71, 85, 105, 1);
 }
 
-/* Flash Animations for DOM Volume Changes */
-@keyframes flash-increase {
-  0% { background-color: rgba(255, 255, 255, 0.6); }
-  100% { background-color: transparent; }
+/* High-Frequency Update Animations */
+/* Fast 250ms transitions that only affect text color to avoid strobing */
+@keyframes text-flash-inc {
+  0% {
+    color: #e2b25a;
+    font-weight: 800;
+    transform: scale(1.05);
+  }
+
+  100% {
+    color: inherit;
+    font-weight: inherit;
+    transform: scale(1);
+  }
 }
 
-@keyframes flash-decrease {
-  0% { color: #facc15; text-shadow: 0 0 8px rgba(250, 204, 21, 0.8); }
-  100% { color: inherit; text-shadow: none; }
+@keyframes text-flash-dec {
+  0% {
+    color: #8ba2c4;
+    opacity: 0.5;
+  }
+
+  100% {
+    color: inherit;
+    opacity: 1;
+  }
+}
+
+@keyframes bg-flash-tick {
+  0% {
+    background-color: rgba(226, 178, 90, 0.25);
+  }
+
+  100% {
+    background-color: transparent;
+  }
 }
 
 .animate-flash-inc {
-  animation: flash-increase 0.4s ease-out forwards;
+  animation: text-flash-inc 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  display: inline-block;
 }
 
 .animate-flash-dec {
-  animation: flash-decrease 0.4s ease-out forwards;
+  animation: text-flash-dec 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+  display: inline-block;
+}
+
+.animate-tick {
+  animation: bg-flash-tick 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* Tabular Nums for Trading Data */
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  -moz-font-feature-settings: "tnum";
+  -webkit-font-feature-settings: "tnum";
+  font-feature-settings: "tnum";
 }
