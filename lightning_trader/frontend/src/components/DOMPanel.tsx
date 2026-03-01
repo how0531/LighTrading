@@ -1,411 +1,243 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useTradingContext } from '../contexts/TradingContext';
 import { apiClient } from '../api/client';
 
 const DOMPanel: React.FC = () => {
-  const { quote, bidAsk, targetSymbol, accountSummary } = useTradingContext();
-  const [orderMode, setOrderMode] = useState<'Qty' | 'Amount'>('Qty');
+  const context = useTradingContext();
+  const { 
+    quote, bidAsk, targetSymbol, accountSummary, 
+    accounts = [], activeAccount, selectAccount = () => {} 
+  } = context;
+
   const [orderValue, setOrderValue] = useState(1);
-  const [placingOrder, setPlacingOrder] = useState(false);
-  const [isCombatMode, setIsCombatMode] = useState(true);
-  const tableContainerRef = useRef<HTMLDivElement>(null);
-  const currentPriceRef = useRef<HTMLTableRowElement>(null);
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  const [isSyncing, setIsSyncing] = useState(false);
+  
+  const qData: any = quote || {};
+  const bData: any = bidAsk || {};
+  const currentPrice = qData.Price || 0;
+  const refPrice = qData.Reference || 68.0;
+  const highPrice = qData.High || 0;
+  const lowPrice = qData.Low || 0;
+  const isSimulation = accountSummary.is_simulation ?? true;
 
-  // 取得當前商品的部位資訊
-  const currentPosition = accountSummary?.positions?.find(p => p.symbol === targetSymbol);
-  const netQty = currentPosition ? (currentPosition.direction === 'Buy' ? currentPosition.qty : -currentPosition.qty) : 0;
-  const avgPrice = currentPosition?.price || 0;
-
-  const centerToCurrentPrice = () => {
-    if (currentPriceRef.current) {
-      currentPriceRef.current.scrollIntoView({ behavior: 'smooth', block: 'center' });
-    }
-  };
+  // --- 報價閃爍邏輯 ---
+  const prevPriceRef = React.useRef<number>(currentPrice);
+  const [flashDir, setFlashDir] = useState<'up' | 'down' | 'none'>('none');
 
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLInputElement) return;
-
-      if (e.code === 'Space') {
-        e.preventDefault();
-        centerToCurrentPrice();
-      } else if (e.code === 'Escape') {
-        e.preventDefault();
-        handleCancelAll('Buy');
-        handleCancelAll('Sell');
+      if (currentPrice > prevPriceRef.current) {
+          setFlashDir('up');
+          setTimeout(() => setFlashDir('none'), 200);
+      } else if (currentPrice < prevPriceRef.current) {
+          setFlashDir('down');
+          setTimeout(() => setFlashDir('none'), 200);
       }
+      prevPriceRef.current = currentPrice;
+  }, [currentPrice]);
+
+  // --- 終極部位匹配 (模糊比對，只要包含數字 ID 就加總) ---
+  const currentPosition = useMemo(() => {
+    const positions = accountSummary.positions || [];
+    if (!targetSymbol || positions.length === 0) return null;
+    
+    // 取得當前標的的純數字代碼 (如 5309)
+    const targetCode = targetSymbol.trim().toUpperCase().replace(/\D/g, ''); 
+    
+    const allMatches = positions.filter((p: any) => {
+        if (!p.symbol) return false;
+        const pSymbol = String(p.symbol).trim().toUpperCase();
+        // 如果 symbol 完全相同，或是 symbol 包含 targetCode (處理 TSE/5309 等格式)
+        return pSymbol === targetSymbol.toUpperCase() || pSymbol.includes(targetCode);
+    });
+
+    if (allMatches.length === 0) return null;
+    
+    const totalQty = allMatches.reduce((sum: number, p: any) => sum + p.qty, 0);
+    const avgPrice = allMatches.reduce((sum: number, p: any) => sum + (p.price * p.qty), 0) / (totalQty || 1);
+    const totalBackendPnl = allMatches.reduce((sum: number, p: any) => sum + (p.pnl || 0), 0);
+    
+    return { 
+        ...allMatches[0], 
+        qty: totalQty, 
+        price: avgPrice, 
+        backendPnl: totalBackendPnl,
+        matchCount: allMatches.length
     };
+  }, [accountSummary.positions, targetSymbol]);
 
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [targetSymbol]);
+  const netQty = currentPosition ? (currentPosition.direction === 'Buy' ? currentPosition.qty : -currentPosition.qty) : 0;
+  
+  // --- 損益重算 ---
+  const realtimePnL = useMemo(() => {
+    if (netQty === 0 || !currentPosition) return 0;
+    const cp = currentPrice || refPrice;
+    if (cp > 0 && currentPosition.price > 0) {
+        const sym = targetSymbol || "";
+        let multiplier = (sym.startsWith('MXF') || sym.includes('小台')) ? 50 : (sym.startsWith('TXF') || sym.includes('大台')) ? 200 : 1000;
+        const localPnl = Math.round((cp - currentPosition.price) * netQty * multiplier);
+        if (localPnl !== 0) return localPnl;
+    }
+    return currentPosition.backendPnl || 0;
+  }, [currentPrice, refPrice, currentPosition, netQty, targetSymbol]);
 
-  const calculateFinalQty = (price: number) => {
-    if (orderMode === 'Qty') return orderValue;
-    // 萬模式： orderValue 萬。1張=1000股, 總額=price*1000。
-    // 張數 = floor((orderValue * 10000) / (price * 1000)) = floor((orderValue * 10) / price)
-    const q = Math.floor((orderValue * 10) / price);
-    return Math.max(0, q);
+  const getTickSize = (p: number) => {
+    if (p < 10) return 0.01; if (p < 50) return 0.05; if (p < 100) return 0.1; if (p < 500) return 0.5; if (p < 1000) return 1.0; return 5.0;
   };
-
-  const handlePlaceOrder = async (action: 'Buy' | 'Sell', price: number) => {
-    if (placingOrder) return;
-    if (price <= 0) return;
-
-    const finalQty = calculateFinalQty(price);
-    if (finalQty < 1) {
-      alert("換算張數不足 1 張，請提高金額或改用零股交易。");
-      return;
-    }
-
-    if (!isCombatMode) {
-      const confirm = window.confirm(`確認下單: ${action} ${finalQty}張 @ ${price}?`);
-      if (!confirm) return;
-    }
-
-    setPlacingOrder(true);
-    try {
-      await apiClient.post('/place_order', {
-        symbol: targetSymbol,
-        price,
-        action,
-        qty: finalQty,
-        order_type: "ROD"
-      });
-    } catch (err) {
-      console.error("Order failed", err);
-    } finally {
-      setPlacingOrder(false);
-    }
-  };
-
-  const handleMarketOrder = async (action: 'Buy' | 'Sell') => {
-    if (placingOrder) return;
-
-    const estPrice = currentPrice > 0 ? currentPrice : refPrice;
-    if (estPrice <= 0) return;
-
-    const finalQty = calculateFinalQty(estPrice);
-    if (finalQty < 1) {
-      alert("換算張數不足 1 張，請提高金額或改用零股交易。");
-      return;
-    }
-
-    if (!isCombatMode) {
-      const confirm = window.confirm(`確認市價下單: ${action} ${finalQty}張?`);
-      if (!confirm) return;
-    }
-
-    setPlacingOrder(true);
-    try {
-      await apiClient.post('/place_order', {
-        symbol: targetSymbol,
-        price: 0,
-        action,
-        qty: finalQty,
-        order_type: "IOC"
-      });
-    } catch (err) {
-      console.error("Market order failed", err);
-    } finally {
-      setPlacingOrder(false);
-    }
-  };
-
-  const handleCancelAll = async (action: 'Buy' | 'Sell') => {
-    try {
-      await apiClient.post('/cancel_all', {
-        symbol: targetSymbol,
-        action
-      });
-    } catch (err) {
-      console.warn("Cancel all failed", err);
-    }
-  };
-
-  const currentPrice = quote?.Price || 0;
-  const refPrice = quote?.Reference || 0;
-  const highPrice = quote?.High || 0;
-  const lowPrice = quote?.Low || 0;
-
-  const maxVolume = useMemo(() => Math.max(
-    ...(bidAsk?.BidVolume || ([] as number[])),
-    ...(bidAsk?.AskVolume || ([] as number[])),
-    1
-  ), [bidAsk]);
-
-  const totalBidVol = useMemo(() => (bidAsk?.BidVolume || ([] as number[])).reduce((a, b) => a + b, 0), [bidAsk]);
-  const totalAskVol = useMemo(() => (bidAsk?.AskVolume || ([] as number[])).reduce((a, b) => a + b, 0), [bidAsk]);
-
-  const getPriceColor = (p: number) => {
-    if (!refPrice || p === refPrice) return 'text-slate-100';
-    return p > refPrice ? 'text-rose-400' : 'text-emerald-400';
-  };
-
-  // 格式化價格：整數部分大，小數部分小
-  const renderPrice = (p: number) => {
-    const s = p.toFixed(p < 1000 ? 2 : 1);
-    const parts = s.split('.');
-    return (
-      <span className="font-bold">
-        {parts[0]}<span className="text-[10px] opacity-80">.{parts[1]}</span>
-      </span>
-    );
-  };
-
-  // 依據參考價生成台股真實 Tick Size 陣列
-  const generateFullPriceRange = (refP: number, limitUp: number, limitDown: number): number[] => {
-    if (!refP || !limitUp || !limitDown) return [];
-
-    // 台股現貨 Tick Size Rule
-    const getTickSize = (p: number) => {
-      if (p < 10) return 0.01;
-      if (p < 50) return 0.05;
-      if (p < 100) return 0.1;
-      if (p < 500) return 0.5;
-      if (p < 1000) return 1.0;
-      return 5.0;
-    };
-
-    const prices: number[] = [];
-    let currentP = limitDown;
-
-    // 解決浮點數誤差，使用乘 100 取整
-    while (currentP <= limitUp + 0.0001) {
-      prices.push(currentP);
-      currentP = Math.round((currentP + getTickSize(currentP)) * 100) / 100;
-    }
-
-    // 返回從大到小 (漲停 -> 跌停)
-    return prices.reverse();
-  };
-
-  const limitUp = quote?.LimitUp || (refPrice ? Math.round(refPrice * 1.1 * 100) / 100 : 0);
-  const limitDown = quote?.LimitDown || (refPrice ? Math.round(refPrice * 0.9 * 100) / 100 : 0);
 
   const fullPrices = useMemo(() => {
-    return generateFullPriceRange(refPrice, limitUp, limitDown);
-  }, [refPrice, limitUp, limitDown]);
-
-  // 計算均價 (VWAP) 所在的最近 Tick，以及其上下兩檔 (共五檔) 形成的均價帶
-  const { avgClosestPrice, avgPriceBand } = useMemo(() => {
-    if (!avgPrice || fullPrices.length === 0) return { avgClosestPrice: null, avgPriceBand: [] };
-
-    let closestIdx = -1;
-    let minDiff = Infinity;
-    for (let i = 0; i < fullPrices.length; i++) {
-      const diff = Math.abs(fullPrices[i] - avgPrice);
-      if (diff < minDiff) {
-        minDiff = diff;
-        closestIdx = i;
-      }
+    const prices = [];
+    const base = currentPrice || refPrice || 68.0;
+    const step = getTickSize(base);
+    for (let i = 25; i >= -25; i--) {
+        prices.push(Math.round((base + i * step) * 100) / 100);
     }
+    return prices;
+  }, [currentPrice, refPrice]);
 
-    if (closestIdx === -1) return { avgClosestPrice: null, avgPriceBand: [] };
+  const maxVolume = useMemo(() => {
+      const bidVols = bData.BidVolume || [];
+      const askVols = bData.AskVolume || [];
+      return Math.max(...bidVols, ...askVols, 1);
+  }, [bData]);
 
-    const band: number[] = [];
-    for (let i = Math.max(0, closestIdx - 2); i <= Math.min(fullPrices.length - 1, closestIdx + 2); i++) {
-      band.push(fullPrices[i]);
-    }
-
-    return {
-      avgClosestPrice: fullPrices[closestIdx],
-      avgPriceBand: band
-    };
-  }, [avgPrice, fullPrices]);
-
-  const placeholderRows = Array.from({ length: 25 });
+  const handleManualSync = async () => {
+      setIsSyncing(true);
+      try { if (activeAccount) await selectAccount(activeAccount); } catch(e) {}
+      finally { setTimeout(() => setIsSyncing(false), 1000); }
+  };
 
   return (
-    <div className="flex flex-col flex-1 min-h-0 rounded-lg border border-slate-800 overflow-hidden bg-slate-950 shadow-2xl">
-      {/* 頂部控制列 - Compact Condition Bar */}
-      <div className="px-3 py-2 bg-slate-900/50 border-b border-slate-800/80 flex items-center justify-between shrink-0">
-        <div className="flex items-center gap-3">
-          <div className="flex items-center gap-1.5">
-            <span className="text-xs font-bold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">ROD</span>
-            <span className="text-xs font-bold text-slate-400 bg-slate-800 px-1.5 py-0.5 rounded border border-slate-700">現股</span>
-          </div>
-          <div className="h-4 w-[1px] bg-slate-700"></div>
-          <div className="flex items-center gap-1.5 bg-slate-900/50 p-1 rounded border border-slate-700/50">
-            <select
-              value={orderMode}
-              onChange={(e) => setOrderMode(e.target.value as 'Qty' | 'Amount')}
-              className="bg-transparent text-xs font-bold text-slate-300 outline-none cursor-pointer appearance-none pl-1"
-            >
-              <option value="Qty" className="bg-slate-800">張數</option>
-              <option value="Amount" className="bg-slate-800">萬</option>
-            </select>
-            <div className="h-3 w-[1px] bg-slate-600"></div>
-            <button onClick={() => setOrderValue(Math.max(1, orderValue - 1))} className="w-5 h-5 flex items-center justify-center bg-slate-800 hover:bg-slate-700 rounded text-slate-300">-</button>
-            <input
-              type="number"
-              value={orderValue}
-              onChange={(e) => setOrderValue(Number(e.target.value))}
-              className="w-12 bg-transparent text-center text-sm font-bold text-yellow-500 outline-none"
-            />
-            <button onClick={() => setOrderValue(orderValue + 1)} className="w-5 h-5 flex items-center justify-center bg-slate-800 hover:bg-slate-700 rounded text-slate-300">+</button>
-          </div>
-        </div>
-
-        <div className="flex items-center gap-4">
-          {netQty !== 0 && (
-            <div className="flex items-center gap-2 px-2 py-0.5 rounded bg-slate-900/50 border border-slate-700">
-              <span className={`text-[10px] font-bold ${netQty > 0 ? 'text-red-500' : 'text-green-500'}`}>
-                {netQty > 0 ? '多' : '空'} {Math.abs(netQty)}
-              </span>
-              <span className={`text-[10px] font-mono ${(accountSummary?.["參考損益"] || 0) >= 0 ? 'text-red-400' : 'text-green-400'}`}>
-                {(accountSummary?.["參考損益"] || 0) > 0 ? '+' : ''}{accountSummary?.["參考損益"] || 0}
-              </span>
+    <div className="flex flex-col flex-1 min-h-0 rounded-xl border border-slate-800 bg-[#101623] text-slate-100 relative overflow-hidden shadow-2xl">
+      
+      {/* 診斷面板 */}
+      {isSettingsOpen && (
+        <div className="absolute inset-0 z-[100] bg-[#1c2331] p-6 overflow-y-auto">
+            <div className="flex justify-between items-center mb-4 border-b border-slate-700 pb-2">
+                <h3 className="font-bold text-red-500 underline text-lg">TRUTH DIAGNOSTIC</h3>
+                <button onClick={() => setIsSettingsOpen(false)} className="text-2xl font-black">✕</button>
             </div>
-          )}
-          <div className="flex items-center gap-1">
-            <div className={`w-2 h-2 rounded-full ${bidAsk ? 'bg-green-500 shadow-[0_0_8px_rgba(34,197,94,0.6)]' : 'bg-red-500'}`}></div>
-            <span className="text-[10px] text-slate-500 font-mono">LIVE</span>
-          </div>
+            <div className="bg-black/40 p-3 rounded mb-4 border border-slate-700">
+                <p className="text-xs text-yellow-500 font-bold">Detected Pos Matches: {currentPosition?.matchCount || 0}</p>
+                <p className="text-xs text-blue-400 font-bold">WS Message Count: {accountSummary.msg_count}</p>
+            </div>
+            <pre className="text-[10px] bg-black p-4 rounded text-emerald-400 overflow-x-auto border border-emerald-900/30">
+                {JSON.stringify({
+                    target: targetSymbol,
+                    currentPosition,
+                    ws_pool: accountSummary.positions
+                }, null, 2)}
+            </pre>
+        </div>
+      )}
+
+      {/* Header */}
+      <div className="px-4 py-3 border-b border-slate-800 bg-[#1c2331] flex items-center justify-between shrink-0 shadow-lg">
+        <div className="flex items-center gap-3">
+            <div className="flex flex-col">
+                <span className="text-[8px] opacity-50 uppercase font-bold mb-0.5">Account</span>
+                <select 
+                    value={activeAccount || ''} 
+                    onChange={(e) => selectAccount(e.target.value)}
+                    className="bg-[#101623] border border-slate-700 rounded text-[11px] font-bold p-1 text-[#D4AF37] outline-none"
+                >
+                    {accounts.map((acc: any) => (
+                        <option key={acc.account_id} value={`${acc.broker_id}-${acc.account_id}`}>{acc.account_id}</option>
+                    ))}
+                </select>
+            </div>
+
+            <div className={`flex flex-col items-center px-3 py-1 rounded border ${netQty > 0 ? 'bg-red-900/20 border-red-800/50' : netQty < 0 ? 'bg-blue-900/20 border-blue-800/50' : 'bg-slate-800 border-slate-700'}`}>
+                <span className="text-[8px] opacity-50 uppercase font-bold">Position</span>
+                <span className={`text-sm font-black leading-none ${netQty > 0 ? 'text-red-400 shadow-[0_0_10px_#ef444433]' : netQty < 0 ? 'text-blue-400 shadow-[0_0_10px_#3b82f633]' : 'text-slate-500'}`}>
+                    {netQty > 0 ? 'LONG' : netQty < 0 ? 'SHORT' : 'FLAT'} {Math.abs(netQty)}
+                </span>
+            </div>
+
+            <div className={`flex flex-col items-center px-3 py-1 rounded border ${realtimePnL >= 0 ? 'bg-emerald-900/20 border-emerald-800/50' : 'bg-red-900/20 border-red-800/50'}`}>
+                <span className="text-[8px] opacity-50 uppercase font-bold text-center">Reference PnL</span>
+                <span className={`text-sm font-mono font-black leading-none ${realtimePnL >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                    {realtimePnL.toLocaleString()}
+                </span>
+            </div>
+        </div>
+        
+        <div className="flex items-center gap-2">
+            <div className={`px-2 py-1 rounded-md border ${isSimulation ? 'border-yellow-600/50 bg-yellow-900/20' : 'border-emerald-600/50 bg-emerald-900/20'}`}>
+                <p className={`text-[10px] font-black ${isSimulation ? 'text-yellow-500' : 'text-emerald-500'}`}>{isSimulation ? 'SIM' : 'LIVE'}</p>
+            </div>
+            <button onClick={() => setIsSettingsOpen(true)} className="px-3 py-1 bg-red-600 text-white rounded text-[10px] font-bold animate-pulse shadow-lg">DEBUG</button>
         </div>
       </div>
 
-      {/* 主表格區域 */}
-      <div ref={tableContainerRef} className="flex-1 overflow-auto custom-scrollbar p-0 relative bg-slate-950">
-        <table className="w-full border-collapse text-xs font-mono text-center select-none table-fixed tabular-nums">
-          <thead className="sticky top-0 z-10 bg-slate-900 text-slate-500 border-b border-slate-700">
-            <tr className="text-[10px] uppercase tracking-wider font-bold">
-              <th className="w-[8%] py-1.5 border-r border-slate-800">Del</th>
-              <th className="w-[14%] py-1.5 border-r border-slate-800 font-sans font-normal opacity-70">Pre-Buy</th>
-              <th className="w-[20%] py-1.5 border-r border-slate-800">Bid Vol</th>
-              <th className="w-[16%] py-1.5 border-r border-slate-800 bg-slate-800/50">Price</th>
-              <th className="w-[20%] py-1.5 border-r border-slate-800">Ask Vol</th>
-              <th className="w-[14%] py-1.5 border-r border-slate-800 font-sans font-normal opacity-70">Pre-Sell</th>
-              <th className="w-[8%] py-1.5">Del</th>
-            </tr>
+      {/* Main Table Area */}
+      <div className="flex-1 overflow-auto bg-black/10 custom-scrollbar">
+        <table className="w-full border-collapse text-xs text-center table-fixed tabular-nums">
+          <thead className="sticky top-0 z-10 bg-slate-900 text-slate-500 border-b border-slate-800 shadow-md">
+            <tr><th className="py-2.5 font-bold border-r border-slate-800 uppercase">Bid</th><th className="py-2.5 font-bold border-r border-slate-800 bg-slate-800/30 text-slate-300 uppercase">Price</th><th className="py-2.5 font-bold uppercase">Ask</th></tr>
           </thead>
           <tbody>
-            {(fullPrices && fullPrices.length > 0) ? (
-              fullPrices.map((price) => {
-                const askIdx = bidAsk?.AskPrice?.indexOf(price) ?? -1;
-                const bidIdx = bidAsk?.BidPrice?.indexOf(price) ?? -1;
+            {fullPrices.map((p) => {
+              const isC = currentPrice === p;
+              const isCostLine = currentPosition && Math.abs(p - currentPosition.price) < (getTickSize(p) * 0.5);
+              
+              const bidIdx = bData.BidPrice?.indexOf(p) ?? -1;
+              const askIdx = bData.AskPrice?.indexOf(p) ?? -1;
+              const bv = bidIdx !== -1 ? bData.BidVolume[bidIdx] : null;
+              const av = askIdx !== -1 ? bData.AskVolume[askIdx] : null;
+              
+              const bWidth = bv ? Math.min((bv / maxVolume) * 100, 100) : 0;
+              const aWidth = av ? Math.min((av / maxVolume) * 100, 100) : 0;
 
-                const askVol = askIdx !== -1 ? (bidAsk?.AskVolume?.[askIdx] || 0) : 0;
-                const bidVol = bidIdx !== -1 ? (bidAsk?.BidVolume?.[bidIdx] || 0) : 0;
-                const askDiff = askIdx !== -1 ? (bidAsk?.DiffAskVol?.[askIdx] || 0) : 0;
-                const bidDiff = bidIdx !== -1 ? (bidAsk?.DiffBidVol?.[bidIdx] || 0) : 0;
-
-                const isCurrent = currentPrice === price;
-                const isAvgCenter = avgClosestPrice === price;
-                const isAvgBand = Boolean(avgPriceBand.includes(price as never));
-
-                const askWidthPct = Math.min((askVol / maxVolume) * 100, 100);
-                const bidWidthPct = Math.min((bidVol / maxVolume) * 100, 100);
-
-                return (
-                  <tr
-                    key={String(price)}
-                    ref={isCurrent ? currentPriceRef : null}
-                    className={`h-7 border-b border-slate-900/40 transition-colors ${isCurrent ? 'bg-slate-800' : 'hover:bg-slate-900/60'} ${isAvgBand && !isCurrent ? 'bg-cyan-950/20' : ''}`}
-                  >
-                    {/* 刪除買 */}
-                    <td className="text-[10px] text-slate-600 hover:text-white hover:bg-rose-900 cursor-pointer transition-colors border-r border-slate-900/50" onClick={() => handleCancelAll('Buy')}>✕</td>
-                    {/* 欲委託買單 */}
-                    <td
-                      className="cursor-pointer bg-slate-950 hover:bg-rose-950/40 text-rose-500 font-bold transition-colors border-r border-slate-800/50 relative overflow-hidden group/order"
-                      onClick={() => handlePlaceOrder('Buy', price)}
-                    >
-                      <span className="opacity-30 group-hover/order:opacity-100 transition-opacity">{calculateFinalQty(price)}</span>
-                    </td>
-                    {/* 委買量 */}
-                    <td className={`font-bold relative z-0 overflow-hidden ${isCurrent ? 'text-[#D4AF37] font-black' : 'text-slate-200'}`}>
-                      <div className="absolute inset-y-0.5 right-0 bg-red-500/15 transition-all duration-150 ease-out" style={{ width: `${bidWidthPct}%` }}></div>
-                      <span key={`bid-${bidVol}`} className={`relative z-10 ${bidDiff > 0 ? 'animate-flash-inc' : bidDiff < 0 ? 'animate-flash-dec' : ''}`}>{bidVol || ''}</span>
-                    </td>
-                    {/* 價格 */}
-                    <td key={`price-${isCurrent ? quote?.Price : price}`} className={`font-semibold relative overflow-hidden transition-colors ${isCurrent ? 'text-[#D4AF37] bg-slate-800 animate-tick' : `bg-slate-900/80 ${getPriceColor(price)}`} border-l border-r border-slate-800/50`}>
-                      <div className="flex items-center justify-center gap-1">
-                        {price === highPrice && <span className="text-[8px] text-red-500 absolute left-1 opacity-60">H</span>}
-                        {price === lowPrice && <span className="text-[8px] text-emerald-500 absolute left-1 opacity-60">L</span>}
-                        {renderPrice(price)}
-                        {isAvgCenter && <div className="absolute right-0.5 top-0.5 w-1 h-1 bg-cyan-700 rounded-full"></div>}
+              return (
+                <tr key={p} className={`h-10 border-b border-slate-900/30 transition-colors ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-yellow-500/10') : ''}`}>
+                  <td className="relative bg-red-900/5 text-red-400 font-bold cursor-pointer hover:bg-red-900/20 border-r border-slate-900/30" onClick={() => apiClient.post('/place_order', { symbol: targetSymbol, price: p, action: 'Buy', qty: orderValue, order_type: 'ROD' })}>
+                      <div className="absolute inset-y-0.5 right-0 bg-red-500/10 transition-all" style={{ width: `${bWidth}%` }}></div>
+                      <div className="relative z-10 flex justify-between px-3">
+                          <span className="opacity-20 font-mono text-[10px]">{orderValue}</span>
+                          <span className="text-red-500">{bv || ''}</span>
                       </div>
-                    </td>
-
-                    {/* 委賣量 */}
-                    <td className={`font-bold relative z-0 overflow-hidden ${isCurrent ? 'text-[#D4AF37] font-black' : 'text-slate-200'}`}>
-                      <div className="absolute inset-y-0.5 left-0 bg-emerald-500/15 transition-all duration-150 ease-out" style={{ width: `${askWidthPct}%` }}></div>
-                      <span key={`ask-${askVol}`} className={`relative z-10 ${askDiff > 0 ? 'animate-flash-inc' : askDiff < 0 ? 'animate-flash-dec' : ''}`}>{askVol || ''}</span>
-                    </td>
-                    {/* 欲委託賣單 */}
-                    <td
-                      className="cursor-pointer bg-slate-950 hover:bg-emerald-950/40 text-emerald-500 font-bold transition-colors border-l border-slate-800/50 relative overflow-hidden group/order"
-                      onClick={() => handlePlaceOrder('Sell', price)}
-                    >
-                      <span className="opacity-30 group-hover/order:opacity-100 transition-opacity">{calculateFinalQty(price)}</span>
-                    </td>
-                    {/* 刪除賣 */}
-                    <td className="text-[10px] text-slate-600 hover:text-white hover:bg-emerald-900 cursor-pointer transition-colors border-l border-slate-900/50" onClick={() => handleCancelAll('Sell')}>✕</td>
-                  </tr>
-                );
-              })
-            ) : (
-              placeholderRows.map((_, i) => (
-                <tr key={i} className="h-7 border-b border-slate-900">
-                  <td className="border-r border-slate-900"></td>
-                  <td className="border-r border-slate-900"></td>
-                  <td className="border-r border-slate-900"></td>
-                  <td className="border-r border-slate-900"></td>
-                  <td className="border-r border-slate-900"></td>
-                  <td className="border-r border-slate-900"></td>
-                  <td></td>
+                  </td>
+                  
+                  <td className={`font-black border-r border-slate-900/30 ${isC ? 'bg-yellow-400 text-black shadow-lg scale-105 rounded-sm z-20 relative' : (p > refPrice ? 'text-red-400' : 'text-emerald-400')}`}>
+                      <div className="flex items-center justify-center gap-1.5 relative">
+                          {isCostLine && <div className="absolute inset-0 border-y border-blue-500/50 bg-blue-500/5"></div>}
+                          {isCostLine && <span className="text-[8px] px-1 bg-blue-600 text-white rounded-sm z-10">COST</span>}
+                          <span className="z-10">{p.toFixed(2)}</span>
+                          {p === highPrice && <span className="text-[8px] text-red-500 font-bold z-10 absolute right-1 top-0">H</span>}
+                          {p === lowPrice && <span className="text-[8px] text-green-500 font-bold z-10 absolute right-1 bottom-0">L</span>}
+                      </div>
+                  </td>
+                  
+                  <td className="relative bg-blue-900/5 text-blue-400 font-bold cursor-pointer hover:bg-blue-900/20" onClick={() => apiClient.post('/place_order', { symbol: targetSymbol, price: p, action: 'Sell', qty: orderValue, order_type: 'ROD' })}>
+                      <div className="absolute inset-y-0.5 left-0 bg-blue-500/10 transition-all" style={{ width: `${aWidth}%` }}></div>
+                      <div className="relative z-10 flex justify-between px-3">
+                          <span className="text-blue-500">{av || ''}</span>
+                          <span className="opacity-20 font-mono text-[10px]">{orderValue}</span>
+                      </div>
+                  </td>
                 </tr>
-              ))
-            )}
+              );
+            })}
           </tbody>
-          <tfoot className="sticky bottom-0 bg-slate-950 border-t border-slate-800 text-[11px] text-slate-500">
-            <tr className="h-6">
-              <td colSpan={2} className="border-r border-slate-900/50">TOTAL</td>
-              <td className="border-r border-slate-900/50 font-bold text-rose-500/60">{totalBidVol}</td>
-              <td className="border-r border-slate-900/50 bg-slate-900/40">{(totalBidVol - totalAskVol)}</td>
-              <td className="border-r border-slate-900/50 font-bold text-emerald-500/60">{totalAskVol}</td>
-              <td colSpan={2}></td>
-            </tr>
-          </tfoot>
         </table>
       </div>
 
-      {/* 底部功能鈕 - Pro Battle Bar */}
-      <div className="px-2 py-2 bg-slate-950 border-t border-slate-800 grid grid-cols-[1fr_2fr_1.5fr_2fr_1fr] gap-2 shrink-0">
-        <button
-          onClick={() => handleCancelAll('Buy')}
-          className="bg-slate-900 hover:bg-rose-950/50 text-[11px] text-slate-400 hover:text-rose-400 py-2 rounded focus:outline-none focus:ring-1 focus:ring-slate-700 transition-all font-sans"
-        >
-          買全刪
-        </button>
-        <button
-          onClick={() => handleMarketOrder('Buy')}
-          className="bg-rose-800 hover:bg-rose-700 text-[12px] text-white py-2 rounded shadow-sm shadow-rose-950/50 transition-all font-sans"
-        >
-          市價買進
-        </button>
-
-        <button
-          onClick={() => setIsCombatMode(!isCombatMode)}
-          className={`flex flex-col items-center justify-center rounded border transition-all ${isCombatMode ? 'bg-[#D4AF37]/10 border-[#D4AF37] text-[#D4AF37]' : 'bg-slate-900 border-slate-800 text-slate-500'}`}
-        >
-          <span className="text-[10px] font-sans font-medium">{isCombatMode ? '🔒 Locked' : '⚡ 1-Click'}</span>
-        </button>
-
-        <button
-          onClick={() => handleMarketOrder('Sell')}
-          className="bg-emerald-800 hover:bg-emerald-700 text-[12px] text-white py-2 rounded shadow-sm shadow-emerald-950/50 transition-all font-sans"
-        >
-          市價賣出
-        </button>
-        <button
-          onClick={() => handleCancelAll('Sell')}
-          className="bg-slate-900 hover:bg-emerald-950/50 text-[11px] text-slate-400 hover:text-emerald-400 py-2 rounded focus:outline-none focus:ring-1 focus:ring-slate-700 transition-all font-sans"
-        >
-          賣全刪
-        </button>
+      {/* Footer */}
+      <div className="p-4 border-t border-slate-800 bg-[#1c2331] flex justify-between items-center shadow-2xl">
+          <div className="flex items-center gap-3">
+              <span className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">Order Quantity</span>
+              <div className="flex items-center bg-[#101623] rounded-lg border border-slate-700 p-1">
+                  <button onClick={() => setOrderValue(Math.max(1, orderValue-1))} className="w-8 h-8 text-slate-400 hover:text-white">-</button>
+                  <input type="number" value={orderValue} onChange={(e) => setOrderValue(Number(e.target.value))} className="w-12 bg-transparent text-center text-[#D4AF37] text-lg font-black focus:outline-none" />
+                  <button onClick={() => setOrderValue(orderValue+1)} className="w-8 h-8 text-slate-400 hover:text-white">+</button>
+              </div>
+          </div>
+          <button onClick={handleManualSync} className={`px-6 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-lg font-black text-xs transition-all active:scale-95 shadow-lg shadow-blue-900/40 ${isSyncing ? 'animate-spin opacity-50' : ''}`}>
+              FORCE SYNC 🔄
+          </button>
       </div>
-    </div >
+    </div>
   );
 };
 

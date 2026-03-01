@@ -54,6 +54,7 @@ const Panel_Positions: React.FC = () => {
   // 1. 初次掛載與連機狀態變動時，更新帳號列表
   useEffect(() => {
     fetchAccounts();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isConnected]);
 
   // 2. 當選擇的帳號改變或 WebSocket 有帳務摘要更新時，更新持倉
@@ -78,6 +79,7 @@ const Panel_Positions: React.FC = () => {
     if (selectedAccountId && !filteredAccounts.find(a => a.account_id === selectedAccountId)) {
       setSelectedAccountId('');
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedCategory, filteredAccounts]);
 
   return (
@@ -108,7 +110,7 @@ const Panel_Positions: React.FC = () => {
             ].map((cat, idx) => (
               <button
                 key={`${cat.id}-${idx}`}
-                onClick={() => setSelectedCategory(cat.id as any)}
+                onClick={() => setSelectedCategory(cat.id as 'ALL' | 'Stock' | 'Future')}
                 className={`w-7 h-7 flex items-center justify-center text-xs font-bold rounded-sm border transition-all ${selectedCategory === cat.id
                   ? 'bg-amber-400 text-slate-900 border-amber-500 shadow-[0_0_10px_rgba(251,191,36,0.2)]'
                   : 'bg-slate-800 text-slate-500 border-slate-700 hover:border-slate-500'

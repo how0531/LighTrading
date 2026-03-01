@@ -20,7 +20,7 @@ const LoginPanel: React.FC = () => {
     setError('');
 
     try {
-      const payload: any = {
+      const payload: Record<string, unknown> = {
         api_key: apiKey.trim(),
         secret_key: secretKey.trim(),
         simulation: isSim
@@ -33,8 +33,9 @@ const LoginPanel: React.FC = () => {
 
       await apiClient.post('/login', payload);
       navigate('/dashboard');
-    } catch (err: any) {
-      setError(err.response?.data?.detail || '登入失敗，請檢查連線或金鑰');
+    } catch (err) {
+      const error = err as { response?: { data?: { detail?: string } } };
+      setError(error.response?.data?.detail || '登入失敗，請檢查連線或金鑰');
     } finally {
       setLoading(false);
     }

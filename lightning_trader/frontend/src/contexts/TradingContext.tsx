@@ -1,36 +1,31 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import type { QuoteData, BidAskData } from '../types';
+import { apiClient } from '../api/client';
 
 interface AccountPosition {
-  symbol: string;
-  qty: number;
-  direction: 'Buy' | 'Sell';
-  price: number;
+  symbol: string; qty: number; direction: 'Buy' | 'Sell'; price: number; pnl: number; account?: string; raw_qty?: number;
 }
 
 interface AccountSummary {
-  "當日交易": number;
-  "委託": number;
-  "刪單": number;
-  "未成交": number;
-  "成交": number;
-  "未平倉": number;
-  "參考損益": number;
-  positions?: AccountPosition[];
+  "當日交易": number; "參考損益": number; positions: AccountPosition[]; is_simulation?: boolean; active_stock?: string; active_future?: string; person_id?: string; msg_count?: number;
+}
+
+interface AccountInfo {
+  account_id: string; category: string; person_id: string; broker_id: string; account_name: string;
 }
 
 interface TradingContextType {
-  isConnected: boolean;
-  targetSymbol: string;
-  setTargetSymbol: (sym: string) => void;
-  quote: QuoteData | null;
-  bidAsk: BidAskData | null;
-  quoteHistory: QuoteData[];
-  accountSummary: AccountSummary | null;
-  subscribe: (symbol: string) => void;
+  isConnected: boolean; targetSymbol: string; setTargetSymbol: (sym: string) => void;
+  quote: QuoteData | null; bidAsk: BidAskData | null; quoteHistory: QuoteData[];
+  accountSummary: AccountSummary; accounts: AccountInfo[]; activeAccount: string | null;
+  subscribe: (symbol: string) => void; selectAccount: (accountId: string) => Promise<void>;
 }
 
 const TradingContext = createContext<TradingContextType | null>(null);
+
+const initialSummary: AccountSummary = {
+    "當日交易": 0, "參考損益": 0, positions: [], is_simulation: true, msg_count: 0
+};
 
 export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
@@ -38,102 +33,81 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [quote, setQuote] = useState<QuoteData | null>(null);
   const [bidAsk, setBidAsk] = useState<BidAskData | null>(null);
   const [quoteHistory, setQuoteHistory] = useState<QuoteData[]>([]);
-  const [accountSummary, setAccountSummary] = useState<AccountSummary | null>(null);
-
+  const [accountSummary, setAccountSummary] = useState<AccountSummary>(initialSummary);
+  const [accounts, setAccounts] = useState<AccountInfo[]>([]);
+  const [activeAccount, setActiveAccount] = useState<string | null>(null);
+  
+  const isSwitchingAccountRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
-  const reconnectAttemptsRef = useRef(0);
-  const reconnectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Buffer for high-frequency messages to prevent excessive re-renders
   const pendingQuotesRef = useRef<QuoteData[]>([]);
   const pendingBidAskRef = useRef<BidAskData | null>(null);
   const pendingAccountRef = useRef<AccountSummary | null>(null);
 
-  const connectWebSocket = useCallback(() => {
+  function connectWebSocket() {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
-
-    console.log("Connecting to WebSocket...");
     const wsUrl = `ws://${window.location.hostname}:8000/ws/quotes`;
     const ws = new WebSocket(wsUrl);
-
     ws.onopen = () => {
-      console.log('Connected to Shioaji Backend');
       setIsConnected(true);
-      reconnectAttemptsRef.current = 0; // Reset attempts on successful connection
-
-      // Auto subscribe to default
       ws.send(JSON.stringify({ action: 'subscribe', symbol: targetSymbol }));
     };
-
     ws.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data);
-        if (data.type === 'Tick' && data.data) {
-          pendingQuotesRef.current.push(data.data);
-        } else if (data.type === 'BidAsk' && data.data) {
-          pendingBidAskRef.current = data.data;
-        } else if (data.type === 'AccountUpdate' && data.data) {
-          pendingAccountRef.current = data.data;
-        }
-      } catch (err) {
-        console.error("Failed to parse message:", err);
-      }
+        if (data.type === 'Tick' && data.data) pendingQuotesRef.current.push(data.data);
+        else if (data.type === 'BidAsk' && data.data) pendingBidAskRef.current = data.data;
+        else if (data.type === 'AccountUpdate' && data.data) pendingAccountRef.current = data.data;
+        else if (data.action === 'subscribe' && data.status === 'success') { if (data.symbol) setTargetSymbol(data.symbol); }
+      } catch (err) { console.error(err); }
     };
-
-    ws.onclose = () => {
-      console.log('Disconnected from backend');
-      setIsConnected(false);
-
-      // Exponential backoff strategy: 1s, 2s, 4s, 8s, up to max 30s
-      const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
-      reconnectAttemptsRef.current += 1;
-      console.log(`Will attempt to reconnect in ${delay}ms...`);
-
-      reconnectTimeoutRef.current = setTimeout(connectWebSocket, delay);
-    };
-
+    ws.onclose = () => { setIsConnected(false); setTimeout(connectWebSocket, 5000); };
     wsRef.current = ws;
-  }, []); // Remove targetSymbol to prevent reconnect loop
+  }
 
   useEffect(() => {
     connectWebSocket();
-    return () => {
-      if (reconnectTimeoutRef.current) clearTimeout(reconnectTimeoutRef.current);
-      if (wsRef.current) wsRef.current.close();
-    };
-  }, [connectWebSocket]);
+    return () => { if (wsRef.current) wsRef.current.close(); };
+  }, []);
 
-  // Throttled UI updates loop
   useEffect(() => {
     const updateInterval = setInterval(() => {
       if (pendingQuotesRef.current.length > 0) {
         const quotes = pendingQuotesRef.current;
-        const latestQuote = quotes[quotes.length - 1];
-        setQuote(latestQuote);
-        setQuoteHistory(prev => {
-          // Add new quotes in chronological order (latest is at the start or end?
-          // Previous logic: newQuote, ...prev. We want latest first in the history array.
-          // reversed order for the batched items so they maintain sequence
-          const reversedQuotes = [...quotes].reverse();
-          const newHist = [...reversedQuotes, ...prev];
-          return newHist.slice(0, 50); // Keep last 50
-        });
+        setQuote(quotes[quotes.length - 1]);
+        setQuoteHistory(prev => [...[...quotes].reverse(), ...prev].slice(0, 50));
         pendingQuotesRef.current = [];
       }
-
       if (pendingBidAskRef.current) {
         setBidAsk(pendingBidAskRef.current);
         pendingBidAskRef.current = null;
       }
-
       if (pendingAccountRef.current) {
-        setAccountSummary(pendingAccountRef.current);
+        const summary = pendingAccountRef.current;
+        setAccountSummary(summary);
+        if (!isSwitchingAccountRef.current && summary.active_stock) setActiveAccount(summary.active_stock);
         pendingAccountRef.current = null;
       }
-    }, 150); // Throttle interval roughly 150ms
-
+    }, 150);
     return () => clearInterval(updateInterval);
   }, []);
+
+  useEffect(() => {
+      if (isConnected) {
+          apiClient.get('/accounts').then(res => {
+              setAccounts(res.data);
+              if (res.data.length > 0 && !activeAccount) setActiveAccount(`${res.data[0].broker_id}-${res.data[0].account_id}`);
+          }).catch(e => console.error(e));
+      }
+  }, [isConnected]);
+
+  const selectAccount = async (fullId: string) => {
+      setActiveAccount(fullId);
+      isSwitchingAccountRef.current = true;
+      try {
+          await apiClient.post('/set_active_account', { account_id: fullId });
+          setTimeout(() => { isSwitchingAccountRef.current = false; }, 2000);
+      } catch (err) { isSwitchingAccountRef.current = false; }
+  };
 
   const subscribe = (symbol: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -146,14 +120,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   return (
     <TradingContext.Provider value={{
-      isConnected,
-      targetSymbol,
-      setTargetSymbol,
-      quote,
-      bidAsk,
-      quoteHistory,
-      accountSummary,
-      subscribe
+      isConnected, targetSymbol, setTargetSymbol, quote, bidAsk, quoteHistory, accountSummary, accounts, activeAccount, subscribe, selectAccount
     }}>
       {children}
     </TradingContext.Provider>

@@ -1,14 +1,17 @@
-import React from 'react';
+import React, { useState } from 'react';
 import Header from './Header';
 import DOMPanel from './DOMPanel';
 import Panel_Positions from './Panel_Positions';
 import Panel_OrderHistory from './Panel_OrderHistory';
+import SettingsModal from './SettingsModal';
 import { TradingProvider } from '../contexts/TradingContext';
 
 const DashboardContent: React.FC = () => {
+  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+
   return (
     <div className="min-h-screen bg-[var(--color-blue-gray-900)] text-slate-100 p-4 md:p-6 flex flex-col overflow-hidden max-h-screen">
-      <Header />
+      <Header onOpenSettings={() => setIsSettingsOpen(true)} />
 
       <div className="flex-1 flex flex-col lg:flex-row gap-4 min-h-0">
         {/* Left: Main Trading Panel (DOM) */}
@@ -26,6 +29,11 @@ const DashboardContent: React.FC = () => {
           </div>
         </div>
       </div>
+
+      <SettingsModal 
+        isOpen={isSettingsOpen} 
+        onClose={() => setIsSettingsOpen(false)} 
+      />
     </div>
   );
 };

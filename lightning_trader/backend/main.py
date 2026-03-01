@@ -28,7 +28,7 @@ from core.shioaji_client import ShioajiClient
 from core.config import Config
 from shioaji.constant import Action, OrderType
 
-app = FastAPI(title="LighTrade Backend API", version="1.0.1")
+app = FastAPI(title="LighTrade Backend API", version="1.0.2")
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
@@ -267,11 +267,11 @@ async def websocket_quotes(websocket: WebSocket):
             try:
                 msg = json.loads(data)
                 if msg.get("action") == "subscribe" and msg.get("symbol"):
-                    success = await run_in_qt_thread(shioaji_client.subscribe, msg["symbol"])
+                    actual_symbol = await run_in_qt_thread(shioaji_client.subscribe, msg["symbol"])
                     await websocket.send_text(json.dumps({
-                        "status": "success" if success else "failed", 
+                        "status": "success" if actual_symbol else "failed", 
                         "action": "subscribe", 
-                        "symbol": msg["symbol"]
+                        "symbol": actual_symbol or msg["symbol"]
                     }))
             except json.JSONDecodeError:
                 pass
@@ -315,6 +315,63 @@ class CancelAllRequest(BaseModel):
     symbol: str
     action: str  # "Buy" 或 "Sell"
 
+class UpdateOrderRequest(BaseModel):
+    symbol: str
+    action: str
+    old_price: float
+    new_price: float
+    qty: int = None
+
+class SmartOrderRequest(BaseModel):
+    symbol: str
+    action: str
+    qty: int
+    stop_price: float = 0
+    trailing_offset: float = 0
+
+@app.post("/api/update_order")
+async def update_order(req: UpdateOrderRequest):
+    """
+    接收改單指令。
+    """
+    action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
+    success = await run_in_qt_thread(
+        shioaji_client.update_order,
+        symbol=req.symbol,
+        action=action_val,
+        old_price=req.old_price,
+        new_price=req.new_price,
+        qty=req.qty
+    )
+    if success:
+        return {"status": "success", "message": "改單指令已送出"}
+    else:
+        raise HTTPException(status_code=400, detail="改單失敗，找不到對應的委託。")
+
+@app.post("/api/add_smart_order")
+async def add_smart_order(req: SmartOrderRequest):
+    """
+    新增智慧單 (本地監控)。
+    """
+    action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
+    await run_in_qt_thread(
+        shioaji_client.add_smart_order,
+        symbol=req.symbol,
+        action=action_val,
+        qty=req.qty,
+        stop_price=req.stop_price,
+        trailing_offset=req.trailing_offset
+    )
+    return {"status": "success", "message": "智慧單已設定"}
+
+@app.get("/api/volume_profile")
+async def get_volume_profile(symbol: str):
+    """
+    獲取指定商品的價量累積數據。
+    """
+    profile = shioaji_client.volume_profile.get(symbol, {})
+    return profile
+
 @app.post("/api/cancel_all")
 async def cancel_all(req: CancelAllRequest):
     """
@@ -328,33 +385,46 @@ async def cancel_all(req: CancelAllRequest):
         logger.error(f"批次刪單失敗: {e}")
         raise HTTPException(status_code=500, detail="刪單過程遭遇錯誤")
 
+class SymbolRequest(BaseModel):
+    symbol: str
+
+class AccountSwitchRequest(BaseModel):
+    account_id: str
+
+@app.post("/api/set_active_account")
+async def set_active_account(req: AccountSwitchRequest):
+    """切換活躍帳號"""
+    success = await run_in_qt_thread(shioaji_client.set_active_account, req.account_id)
+    if success:
+        return {"status": "success", "message": f"帳號已切換"}
+    else:
+        raise HTTPException(status_code=400, detail="切換帳號失敗")
+
+@app.post("/api/flatten")
+async def flatten_position(req: SymbolRequest):
+    """一鍵平倉"""
+    success = await run_in_qt_thread(shioaji_client.flatten_position, req.symbol)
+    if success:
+        return {"status": "success", "message": "一鍵平倉指令已送出"}
+    else:
+        raise HTTPException(status_code=400, detail="一鍵平倉失敗")
+
+@app.post("/api/reverse")
+async def reverse_position(req: SymbolRequest):
+    """一鍵反向"""
+    success = await run_in_qt_thread(shioaji_client.reverse_position, req.symbol)
+    if success:
+        return {"status": "success", "message": "一鍵反向指令已送出"}
+    else:
+        raise HTTPException(status_code=400, detail="一鍵反向失敗")
+
 @app.get("/api/positions")
 async def get_positions(account_id: str = None):
     """獲取目前的持倉部位"""
     try:
-        positions = await run_in_qt_thread(shioaji_client.list_positions, account_id)
-        # 將 Shioaji Position 物件轉成 JSON 格式
-        pos_list = []
-        for p in positions:
-            # 判斷是期貨還是股票持倉
-            is_stock = hasattr(p, 'cond')
-            if is_stock:
-                # 股票持倉
-                direction = "Buy" if p.cond.name in ["Cash", "MarginTrading"] else "Sell"
-                symbol = p.code
-            else:
-                # 期貨持倉
-                direction = "Buy" if getattr(p, 'direction', Action.Buy) == Action.Buy else "Sell"
-                symbol = getattr(p.contract, 'symbol', 'Unknown')
-                
-            pos_list.append({
-                "symbol": symbol,
-                "qty": getattr(p, 'quantity', 0) or getattr(p, 'real_quantity', 0), # 相容不同版本 API
-                "direction": direction,
-                "price": float(getattr(p, 'price', 0)),
-                "pnl": float(getattr(p, 'pnl', 0))
-            })
-        return pos_list
+        results = await run_in_qt_thread(shioaji_client.list_positions)
+        # 由於 shioaji_client.list_positions() 已經回傳格式化後的字典列表，直接回傳即可
+        return results
     except Exception as e:
         logger.error(f"獲取持倉發生錯誤: {e}")
         return []
@@ -389,7 +459,7 @@ async def get_order_history(account_id: str = None):
                 continue
                 
             trade_list.append({
-                "time": format_datetime(t.status.update_time),
+                "time": format_datetime(getattr(t.status, 'modified_at', datetime.now())),
                 "symbol": t.contract.symbol,
                 "action": "Buy" if t.order.action == Action.Buy else "Sell",
                 "price": float(t.order.price),
