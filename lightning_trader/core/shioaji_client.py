@@ -81,6 +81,7 @@ class ShioajiClient(QObject):
                     "High": float(tick.high),
                     "Low": float(tick.low),
                     "AvgPrice": float(tick.avg_price),
+                    "TickType": int(tick.tick_type),
                     "TickTime": str(tick.datetime),
                 }
                 if q["Price"] > 0 and self._direct_quote_callback:
@@ -121,6 +122,7 @@ class ShioajiClient(QObject):
                     "High": float(tick.high),
                     "Low": float(tick.low),
                     "AvgPrice": float(tick.avg_price),
+                    "TickType": int(tick.tick_type),
                     "TickTime": str(tick.datetime),
                 }
                 if q["Price"] > 0 and self._direct_quote_callback:

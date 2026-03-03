@@ -184,18 +184,24 @@ const DOMPanel: React.FC = () => {
     return prices;
   }, [currentPrice, refPrice, limitUp, limitDown, targetSymbol]);
 
-  // --- 自動捲動到當前價（首次載入） ---
+  // --- 自動捲動到當前價（首次載入或手動觸發） ---
+  const scrollToCurrentPrice = useCallback(() => {
+    if (currentPrice > 0) {
+      const row = document.querySelector(`[data-price="${currentPrice}"]`);
+      if (row) {
+        row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    }
+  }, [currentPrice]);
+
   useEffect(() => {
     if (currentPrice > 0 && fullPrices.length > 0 && !hasScrolled.current) {
       hasScrolled.current = true;
       setTimeout(() => {
-        const row = document.querySelector(`[data-price="${currentPrice}"]`);
-        if (row) {
-          row.scrollIntoView({ block: 'center', behavior: 'auto' });
-        }
+        scrollToCurrentPrice();
       }, 100);
     }
-  }, [currentPrice, fullPrices]);
+  }, [currentPrice, fullPrices, scrollToCurrentPrice]);
 
   // 換商品時重置捲動
   useEffect(() => {
@@ -219,6 +225,27 @@ const DOMPanel: React.FC = () => {
     const vols = bData.AskVolume || [];
     for (let i = 0; i < prices.length; i++) {
       m.set(Math.round(prices[i] * 100), vols[i] || 0);
+    }
+    return m;
+  }, [bData]);
+
+  // --- Diff BidAsk 查找表 ---
+  const diffBidMap = useMemo(() => {
+    const m = new Map<number, number>();
+    const prices = bData.BidPrice || [];
+    const diffs = bData.DiffBidVol || [];
+    for (let i = 0; i < prices.length; i++) {
+      m.set(Math.round(prices[i] * 100), diffs[i] || 0);
+    }
+    return m;
+  }, [bData]);
+
+  const diffAskMap = useMemo(() => {
+    const m = new Map<number, number>();
+    const prices = bData.AskPrice || [];
+    const diffs = bData.DiffAskVol || [];
+    for (let i = 0; i < prices.length; i++) {
+      m.set(Math.round(prices[i] * 100), diffs[i] || 0);
     }
     return m;
   }, [bData]);
@@ -314,8 +341,17 @@ const DOMPanel: React.FC = () => {
                 <p className={`text-[10px] font-black ${isSimulation ? 'text-yellow-500' : 'text-emerald-500'}`}>{isSimulation ? 'SIM' : 'LIVE'}</p>
             </div>
             {fullPrices.length > 0 && (
-                <div className="text-[9px] text-slate-500 font-mono">
-                    {formatPrice(fullPrices[0], targetSymbol)}~{formatPrice(fullPrices[fullPrices.length - 1], targetSymbol)}
+                <div className="flex items-center gap-2">
+                    <div className="text-[9px] text-slate-500 font-mono">
+                        {formatPrice(fullPrices[0], targetSymbol)}~{formatPrice(fullPrices[fullPrices.length - 1], targetSymbol)}
+                    </div>
+                    <button 
+                        onClick={scrollToCurrentPrice}
+                        className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] rounded border border-slate-600 transition-colors shadow-sm focus:outline-none"
+                        title="捲動至當前價格"
+                    >
+                        置中
+                    </button>
                 </div>
             )}
         </div>
@@ -350,6 +386,8 @@ const DOMPanel: React.FC = () => {
               const pKey = Math.round(p * 100);
               const bv = bidMap.get(pKey) ?? null;
               const av = askMap.get(pKey) ?? null;
+              const diffBv = diffBidMap.get(pKey) ?? 0;
+              const diffAv = diffAskMap.get(pKey) ?? 0;
               
               const bWidth = bv ? Math.min((bv / maxVolume) * 100, 100) : 0;
               const aWidth = av ? Math.min((av / maxVolume) * 100, 100) : 0;
@@ -381,29 +419,47 @@ const DOMPanel: React.FC = () => {
                       {myBuyQty > 0 && <span className="bg-red-600 text-white px-1.5 py-0.5 rounded text-[10px] shadow-sm">{myBuyQty}</span>}
                   </td>
 
-                  {/* 委買量 */}
+                  {/* 委買量 (含 Δ買) */}
                   <td className="relative border-r border-slate-800 text-red-400 font-medium bg-red-950/20">
                       <div className="absolute inset-y-0.5 right-0 bg-red-500/15 transition-all" style={{ width: `${bWidth}%` }}></div>
-                      <span className="relative z-10">{bv || ''}</span>
-                  </td>
-                  
-                  {/* 價格 */}
-                  <td className={`font-black border-r border-slate-800 text-[13px] ${isC ? 'bg-[#D4AF37] text-black shadow-lg shadow-[#D4AF37]/20 rounded-sm z-20 relative scale-[1.02]' : isLimitUp ? 'text-red-400 bg-red-950/30' : isLimitDown ? 'text-emerald-400 bg-emerald-950/30' : (p > refPrice ? 'text-red-500 bg-slate-900/40' : p < refPrice ? 'text-emerald-500 bg-slate-900/40' : 'text-slate-300 bg-slate-900/40')}`}>
-                      <div className="flex items-center justify-center gap-1 relative w-full h-full">
-                          {isCostLine && <div className="absolute inset-0 border-y border-blue-500/50 bg-blue-500/10"></div>}
-                          {isCostLine && <span className="text-[9px] px-1 bg-blue-600 text-white rounded-sm z-10 shadow-sm font-bold">COST</span>}
-                          {isLimitUp && <span className="text-[8px] text-red-500 font-bold z-10">▲</span>}
-                          {isLimitDown && <span className="text-[8px] text-emerald-500 font-bold z-10">▼</span>}
-                          <span className="z-10 tracking-wider">{formatPrice(p, targetSymbol)}</span>
-                          {p === highPrice && <span className="text-[9px] text-red-500 font-bold z-10 absolute right-1 top-0.5">H</span>}
-                          {p === lowPrice && <span className="text-[9px] text-emerald-500 font-bold z-10 absolute right-1 bottom-0.5">L</span>}
+                      <div className="relative z-10 flex justify-between items-center px-2">
+                        <span className={`text-[9px] font-bold ${diffBv > 0 ? 'text-red-400' : 'text-slate-500'}`}>{diffBv !== 0 ? (diffBv > 0 ? `+${diffBv}` : diffBv) : ''}</span>
+                        <span>{bv || ''}</span>
                       </div>
                   </td>
                   
-                  {/* 委賣量 */}
+                  {/* 價格 (含最新單筆成交量) */}
+                  <td className={`font-black border-r border-slate-800 text-[13px] ${isC ? 'bg-[#D4AF37] text-black shadow-lg shadow-[#D4AF37]/20 rounded-sm z-20 relative scale-[1.02]' : isLimitUp ? 'text-red-400 bg-red-950/30' : isLimitDown ? 'text-emerald-400 bg-emerald-950/30' : (p > refPrice ? 'text-red-500 bg-slate-900/40' : p < refPrice ? 'text-emerald-500 bg-slate-900/40' : 'text-slate-300 bg-slate-900/40')}`}>
+                      <div className="flex items-center justify-center gap-1 relative w-full h-full text-center">
+                          {isLimitUp && !isC && <span className="text-[8px] text-red-500 font-bold z-10 absolute left-1">▲</span>}
+                          {isLimitDown && !isC && <span className="text-[8px] text-emerald-500 font-bold z-10 absolute left-1">▼</span>}
+                          
+                          {/* 成交明細 (TickType: 1=外盤/紅/右，2=內盤/綠/左) */}
+                          {isC && qData.Volume > 0 && (
+                            qData.TickType === 2 ? (
+                              <span className="absolute left-1 text-[10px] font-bold text-emerald-50 bg-emerald-600/90 px-1 rounded-sm shadow-sm">{qData.Volume}</span>
+                            ) : (
+                              <span className="absolute right-1 text-[10px] font-bold text-red-50 bg-red-600/90 px-1 rounded-sm shadow-sm">{qData.Volume}</span>
+                            )
+                          )}
+                          
+                          {isCostLine && <div className="absolute inset-0 border-y border-blue-500/50 bg-blue-500/10"></div>}
+                          {isCostLine && <span className="text-[9px] px-1 bg-blue-600 text-white rounded-sm z-10 shadow-sm font-bold absolute left-6">COST</span>}
+                          
+                          <span className="z-10 tracking-wider inline-block min-w-[3rem] px-2">{formatPrice(p, targetSymbol)}</span>
+                          
+                          {p === highPrice && !isC && <span className="text-[9px] text-red-500 font-bold z-10 absolute right-1">H</span>}
+                          {p === lowPrice && !isC && <span className="text-[9px] text-emerald-500 font-bold z-10 absolute right-1">L</span>}
+                      </div>
+                  </td>
+                  
+                  {/* 委賣量 (含 Δ賣) */}
                   <td className="relative border-r border-slate-800 text-emerald-400 font-medium bg-emerald-950/20">
                       <div className="absolute inset-y-0.5 left-0 bg-emerald-500/15 transition-all" style={{ width: `${aWidth}%` }}></div>
-                      <span className="relative z-10">{av || ''}</span>
+                      <div className="relative z-10 flex justify-between items-center px-2">
+                        <span>{av || ''}</span>
+                        <span className={`text-[9px] font-bold ${diffAv > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>{diffAv !== 0 ? (diffAv > 0 ? `+${diffAv}` : diffAv) : ''}</span>
+                      </div>
                   </td>
 
                   {/* 賣出 */}

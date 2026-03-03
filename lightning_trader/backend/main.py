@@ -184,6 +184,7 @@ def on_shioaji_quote(quote_data: dict):
                 "High": float(_val(q.get('High', q.get('high', 0)))),
                 "Low": float(_val(q.get('Low', q.get('low', 0)))),
                 "AvgPrice": float(_val(q.get('AvgPrice', q.get('avg_price', 0)))),
+                "TickType": int(_val(q.get('TickType', q.get('tick_type', 0)))),
                 "TickTime": format_datetime(q.get('Time', q.get('TickTime', q.get('datetime', q.get('ts', ''))))),
                 "Action": q.get('Action', q.get('action', ''))
             }
