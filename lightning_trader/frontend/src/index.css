@@ -44,11 +44,11 @@ body {
 }
 
 .text-glow-green {
-  text-shadow: 0 0 10px rgba(16, 185, 129, 0.5);
+  text-shadow: 0 0 10px rgba(71, 240, 184, 0.5);
 }
 
 .text-glow-red {
-  text-shadow: 0 0 10px rgba(239, 68, 68, 0.5);
+  text-shadow: 0 0 10px rgba(203, 30, 30, 0.5);
 }
 
 .animate-pulse-slow {

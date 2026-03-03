@@ -82,18 +82,57 @@ const DOMPanel: React.FC = () => {
   }, [currentPrice, refPrice, currentPosition, netQty, targetSymbol]);
 
   const getTickSize = (p: number) => {
+    const sym = (targetSymbol || "").toUpperCase();
+    // 期貨合約：台指期(TXF/MXF)跳動單位固定 1 點
+    if (sym.startsWith('TXF') || sym.startsWith('MXF') || sym.startsWith('TX') || sym.startsWith('MX')) return 1;
+    // 股票跳價級距 (台灣證交所規定)
     if (p < 10) return 0.01; if (p < 50) return 0.05; if (p < 100) return 0.1; if (p < 500) return 0.5; if (p < 1000) return 1.0; return 5.0;
   };
 
   const fullPrices = useMemo(() => {
-    const prices = [];
     const base = currentPrice || refPrice || 68.0;
-    const step = getTickSize(base);
-    for (let i = 25; i >= -25; i--) {
-        prices.push(Math.round((base + i * step) * 100) / 100);
+    
+    // 往下算 25 檔，動態調整 tick size
+    let pDown = base;
+    const lowerPrices = [];
+    for (let i = 0; i < 25; i++) {
+        pDown = Math.round((pDown - getTickSize(pDown - 0.0001)) * 100) / 100;
+        lowerPrices.push(pDown);
     }
-    return prices;
+    
+    // 往上算 25 檔，動態調整 tick size
+    let pUp = base;
+    const upperPrices = [];
+    for (let i = 0; i < 25; i++) {
+        pUp = Math.round((pUp + getTickSize(pUp)) * 100) / 100;
+        upperPrices.push(pUp);
+    }
+    
+    return [...upperPrices.reverse(), base, ...lowerPrices];
   }, [currentPrice, refPrice]);
+
+  // --- 建立五檔 BidAsk 查找表 (以 round key 避免浮點精度問題) ---
+  const bidMap = useMemo(() => {
+    const m = new Map<number, number>();
+    const prices = bData.BidPrice || [];
+    const vols = bData.BidVolume || [];
+    for (let i = 0; i < prices.length; i++) {
+      const key = Math.round(prices[i] * 100);
+      m.set(key, vols[i] || 0);
+    }
+    return m;
+  }, [bData]);
+
+  const askMap = useMemo(() => {
+    const m = new Map<number, number>();
+    const prices = bData.AskPrice || [];
+    const vols = bData.AskVolume || [];
+    for (let i = 0; i < prices.length; i++) {
+      const key = Math.round(prices[i] * 100);
+      m.set(key, vols[i] || 0);
+    }
+    return m;
+  }, [bData]);
 
   const maxVolume = useMemo(() => {
       const bidVols = bData.BidVolume || [];
@@ -172,49 +211,80 @@ const DOMPanel: React.FC = () => {
 
       {/* Main Table Area */}
       <div className="flex-1 overflow-auto bg-black/10 custom-scrollbar">
-        <table className="w-full border-collapse text-xs text-center table-fixed tabular-nums">
-          <thead className="sticky top-0 z-10 bg-slate-900 text-slate-500 border-b border-slate-800 shadow-md">
-            <tr><th className="py-2.5 font-bold border-r border-slate-800 uppercase">Bid</th><th className="py-2.5 font-bold border-r border-slate-800 bg-slate-800/30 text-slate-300 uppercase">Price</th><th className="py-2.5 font-bold uppercase">Ask</th></tr>
+        <table className="w-full border-collapse text-xs text-center table-fixed tabular-nums select-none">
+          <thead className="sticky top-0 z-10 bg-slate-900 text-slate-400 border-b border-slate-700 shadow-md">
+            <tr>
+              <th className="py-2 font-normal border-r border-slate-700 w-[10%] opacity-70">刪買</th>
+              <th className="py-2 font-bold border-r border-slate-700 w-[15%] text-red-500 bg-red-950/60 shadow-[inset_0_0_10px_rgba(239,68,68,0.1)]">買進</th>
+              <th className="py-2 font-normal border-r border-slate-700 w-[15%] text-red-300 bg-red-950/30">委買</th>
+              <th className="py-2 font-bold border-r border-slate-700 w-[20%] bg-slate-800 text-slate-200 shadow-lg z-20">價格</th>
+              <th className="py-2 font-normal border-r border-slate-700 w-[15%] text-emerald-300 bg-emerald-950/30">委賣</th>
+              <th className="py-2 font-bold border-r border-slate-700 w-[15%] text-emerald-500 bg-emerald-950/60 shadow-[inset_0_0_10px_rgba(16,185,129,0.1)]">賣出</th>
+              <th className="py-2 font-normal w-[10%] opacity-70">刪賣</th>
+            </tr>
           </thead>
           <tbody>
             {fullPrices.map((p) => {
               const isC = currentPrice === p;
               const isCostLine = currentPosition && Math.abs(p - currentPosition.price) < (getTickSize(p) * 0.5);
               
-              const bidIdx = bData.BidPrice?.indexOf(p) ?? -1;
-              const askIdx = bData.AskPrice?.indexOf(p) ?? -1;
-              const bv = bidIdx !== -1 ? bData.BidVolume[bidIdx] : null;
-              const av = askIdx !== -1 ? bData.AskVolume[askIdx] : null;
+              // 使用 Map 查找 (以 rounded 整數 key 避免浮點精度問題)
+              const pKey = Math.round(p * 100);
+              const bv = bidMap.get(pKey) ?? null;
+              const av = askMap.get(pKey) ?? null;
               
               const bWidth = bv ? Math.min((bv / maxVolume) * 100, 100) : 0;
               const aWidth = av ? Math.min((av / maxVolume) * 100, 100) : 0;
 
+              // TODO: Integrate actual working orders later
+              const mockWorkingBuyQty = 0; 
+              const mockWorkingSellQty = 0;
+
               return (
-                <tr key={p} className={`h-10 border-b border-slate-900/30 transition-colors ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-yellow-500/10') : ''}`}>
-                  <td className="relative bg-red-900/5 text-red-400 font-bold cursor-pointer hover:bg-red-900/20 border-r border-slate-900/30" onClick={() => apiClient.post('/place_order', { symbol: targetSymbol, price: p, action: 'Buy', qty: orderValue, order_type: 'ROD' })}>
-                      <div className="absolute inset-y-0.5 right-0 bg-red-500/10 transition-all" style={{ width: `${bWidth}%` }}></div>
-                      <div className="relative z-10 flex justify-between px-3">
-                          <span className="opacity-20 font-mono text-[10px]">{orderValue}</span>
-                          <span className="text-red-500">{bv || ''}</span>
+                <tr key={p} className={`h-8 border-b border-slate-800/80 transition-none ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-yellow-500/10') : ''}`}>
+                  {/* Cancel Buy */}
+                  <td className="border-r border-slate-800 hover:bg-slate-700 cursor-pointer text-slate-500 flex items-center justify-center">
+                    {mockWorkingBuyQty > 0 && <span className="font-bold text-[10px] hover:text-white transition-colors">✕</span>}
+                  </td>
+
+                  {/* Place Buy Order */}
+                  <td className="bg-red-950/40 text-red-500 font-bold cursor-pointer hover:bg-red-900/60 border-r border-slate-800 transition-colors" 
+                      onClick={() => apiClient.post('/place_order', { symbol: targetSymbol, price: p, action: 'Buy', qty: orderValue, order_type: 'ROD' })}>
+                      {mockWorkingBuyQty > 0 && <span className="bg-red-600 text-white px-2 py-0.5 rounded shadow-sm shadow-red-900/50">{mockWorkingBuyQty}</span>}
+                  </td>
+
+                  {/* Bid Volume */}
+                  <td className="relative border-r border-slate-800 text-red-400 font-medium bg-red-950/20">
+                      <div className="absolute inset-y-0.5 right-0 bg-red-500/15 transition-all" style={{ width: `${bWidth}%` }}></div>
+                      <span className="relative z-10">{bv || ''}</span>
+                  </td>
+                  
+                  {/* Price */}
+                  <td className={`font-black border-r border-slate-800 text-[13px] ${isC ? 'bg-[#D4AF37] text-black shadow-lg shadow-[#D4AF37]/20 rounded-sm z-20 relative scale-[1.02]' : (p > refPrice ? 'text-red-500 bg-slate-900/40' : p < refPrice ? 'text-emerald-500 bg-slate-900/40' : 'text-slate-300 bg-slate-900/40')}`}>
+                      <div className="flex items-center justify-center gap-1.5 relative w-full h-full">
+                          {isCostLine && <div className="absolute inset-0 border-y border-blue-500/50 bg-blue-500/10"></div>}
+                          {isCostLine && <span className="text-[9px] px-1 bg-blue-600 text-white rounded-sm z-10 shadow-sm shadow-blue-900/50 font-bold">COST</span>}
+                          <span className="z-10 tracking-wider">{p.toFixed(2)}</span>
+                          {p === highPrice && <span className="text-[9px] text-red-500 font-bold z-10 absolute right-1 top-0.5">H</span>}
+                          {p === lowPrice && <span className="text-[9px] text-emerald-500 font-bold z-10 absolute right-1 bottom-0.5">L</span>}
                       </div>
                   </td>
                   
-                  <td className={`font-black border-r border-slate-900/30 ${isC ? 'bg-yellow-400 text-black shadow-lg scale-105 rounded-sm z-20 relative' : (p > refPrice ? 'text-red-400' : 'text-emerald-400')}`}>
-                      <div className="flex items-center justify-center gap-1.5 relative">
-                          {isCostLine && <div className="absolute inset-0 border-y border-blue-500/50 bg-blue-500/5"></div>}
-                          {isCostLine && <span className="text-[8px] px-1 bg-blue-600 text-white rounded-sm z-10">COST</span>}
-                          <span className="z-10">{p.toFixed(2)}</span>
-                          {p === highPrice && <span className="text-[8px] text-red-500 font-bold z-10 absolute right-1 top-0">H</span>}
-                          {p === lowPrice && <span className="text-[8px] text-green-500 font-bold z-10 absolute right-1 bottom-0">L</span>}
-                      </div>
+                  {/* Ask Volume */}
+                  <td className="relative border-r border-slate-800 text-emerald-400 font-medium bg-emerald-950/20">
+                      <div className="absolute inset-y-0.5 left-0 bg-emerald-500/15 transition-all" style={{ width: `${aWidth}%` }}></div>
+                      <span className="relative z-10">{av || ''}</span>
                   </td>
-                  
-                  <td className="relative bg-blue-900/5 text-blue-400 font-bold cursor-pointer hover:bg-blue-900/20" onClick={() => apiClient.post('/place_order', { symbol: targetSymbol, price: p, action: 'Sell', qty: orderValue, order_type: 'ROD' })}>
-                      <div className="absolute inset-y-0.5 left-0 bg-blue-500/10 transition-all" style={{ width: `${aWidth}%` }}></div>
-                      <div className="relative z-10 flex justify-between px-3">
-                          <span className="text-blue-500">{av || ''}</span>
-                          <span className="opacity-20 font-mono text-[10px]">{orderValue}</span>
-                      </div>
+
+                  {/* Place Sell Order */}
+                  <td className="bg-emerald-950/40 text-emerald-500 font-bold cursor-pointer hover:bg-emerald-900/60 border-r border-slate-800 transition-colors"
+                      onClick={() => apiClient.post('/place_order', { symbol: targetSymbol, price: p, action: 'Sell', qty: orderValue, order_type: 'ROD' })}>
+                      {mockWorkingSellQty > 0 && <span className="bg-emerald-600 text-white px-2 py-0.5 rounded shadow-sm shadow-emerald-900/50">{mockWorkingSellQty}</span>}
+                  </td>
+
+                  {/* Cancel Sell */}
+                  <td className="hover:bg-slate-700 cursor-pointer text-slate-500 flex items-center justify-center">
+                    {mockWorkingSellQty > 0 && <span className="font-bold text-[10px] hover:text-white transition-colors">✕</span>}
                   </td>
                 </tr>
               );

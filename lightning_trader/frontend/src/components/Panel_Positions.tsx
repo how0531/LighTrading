@@ -58,9 +58,11 @@ const Panel_Positions: React.FC = () => {
   }, [isConnected]);
 
   // 2. 當選擇的帳號改變或 WebSocket 有帳務摘要更新時，更新持倉
+  // 使用 msg_count 作為 dependency，避免每個 tick 都觸發 HTTP 請求
+  const accountMsgCount = accountSummary.msg_count;
   useEffect(() => {
     fetchPositions(selectedAccountId || undefined);
-  }, [selectedAccountId, accountSummary]);
+  }, [selectedAccountId, accountMsgCount]);
 
   // 過濾後的帳號清單
   const filteredAccounts = useMemo(() => {

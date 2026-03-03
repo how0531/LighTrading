@@ -5,3 +5,15 @@ __pycache__/
 .vs/
 .vscode/
 gemini_subagent.log
+
+# 日誌與暫存
+*.log
+*.jsonl
+uvicorn_log.txt
+node_modules/
+
+# 臨時測試腳本（防止未來誤加）
+backend/test_*.py
+backend/dump_*.py
+backend/intercept_*.py
+backend/print_*.py
