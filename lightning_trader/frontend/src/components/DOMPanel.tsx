@@ -48,6 +48,8 @@ const DOMPanel: React.FC = () => {
   } = context;
 
   const [orderValue, setOrderValue] = useState(1);
+  const [orderType, setOrderType] = useState('ROD');
+  const [calcAmount, setCalcAmount] = useState<number | ''>('');
   const [isSyncing, setIsSyncing] = useState(false);
   
   // 下單回饋狀態
@@ -250,11 +252,41 @@ const DOMPanel: React.FC = () => {
     return m;
   }, [bData]);
 
-  const maxVolume = useMemo(() => {
-    const bidVols = bData.BidVolume || [];
-    const askVols = bData.AskVolume || [];
-    return Math.max(...bidVols, ...askVols, 1);
+  // --- 累計 BidAsk 查找表 (Cumulative Depth) ---
+  const cumBidMap = useMemo(() => {
+    const m = new Map<number, number>();
+    const prices = bData.BidPrice || [];
+    const vols = bData.BidVolume || [];
+    let cum = 0;
+    for (let i = 0; i < prices.length; i++) {
+      if (prices[i] > 0) {
+        cum += (vols[i] || 0);
+        m.set(Math.round(prices[i] * 100), cum);
+      }
+    }
+    return m;
   }, [bData]);
+
+  const cumAskMap = useMemo(() => {
+    const m = new Map<number, number>();
+    const prices = bData.AskPrice || [];
+    const vols = bData.AskVolume || [];
+    let cum = 0;
+    for (let i = 0; i < prices.length; i++) {
+      if (prices[i] > 0) {
+        cum += (vols[i] || 0);
+        m.set(Math.round(prices[i] * 100), cum);
+      }
+    }
+    return m;
+  }, [bData]);
+
+  const maxCumVolume = useMemo(() => {
+    let max = 1;
+    cumBidMap.forEach(v => { if (v > max) max = v; });
+    cumAskMap.forEach(v => { if (v > max) max = v; });
+    return max;
+  }, [cumBidMap, cumAskMap]);
 
   // --- 下單（含回饋） ---
   const handlePlaceOrder = useCallback(async (price: number, action: 'Buy' | 'Sell') => {
@@ -265,7 +297,7 @@ const DOMPanel: React.FC = () => {
 
     try {
       await apiClient.post('/place_order', { 
-        symbol: targetSymbol, price, action, qty: orderValue, order_type: 'ROD' 
+        symbol: targetSymbol, price, action, qty: orderValue, order_type: orderType 
       });
       setOrderFeedback({ price, action, status: 'success' });
     } catch {
@@ -295,6 +327,20 @@ const DOMPanel: React.FC = () => {
   const handleReverse = useCallback(async () => {
     try { await apiClient.post('/reverse', { symbol: targetSymbol }); } catch { /* */ }
   }, [targetSymbol]);
+
+  // --- 金額換算張數 ---
+  const handleAmountConvert = useCallback((amountAmt: number | '') => {
+      const amt = Number(amountAmt);
+      if (amt > 0 && targetSymbol) {
+          const cp = currentPrice > 0 ? currentPrice : refPrice;
+          if (cp > 0) {
+              const sym = targetSymbol.toUpperCase();
+              const multiplier = (sym.startsWith('MXF') || sym.includes('小台')) ? 50 : (sym.startsWith('TXF') || sym.includes('大台')) ? 200 : 1000;
+              const calcQty = Math.floor(amt / (cp * multiplier));
+              setOrderValue(Math.max(1, calcQty));
+          }
+      }
+  }, [targetSymbol, currentPrice, refPrice]);
 
   const handleManualSync = async () => {
     setIsSyncing(true);
@@ -389,11 +435,15 @@ const DOMPanel: React.FC = () => {
               const diffBv = diffBidMap.get(pKey) ?? 0;
               const diffAv = diffAskMap.get(pKey) ?? 0;
               
-              const bWidth = bv ? Math.min((bv / maxVolume) * 100, 100) : 0;
-              const aWidth = av ? Math.min((av / maxVolume) * 100, 100) : 0;
+              const cumBv = cumBidMap.get(pKey) || 0;
+              const cumAv = cumAskMap.get(pKey) || 0;
+              const bWidth = cumBv ? Math.min((cumBv / maxCumVolume) * 100, 100) : 0;
+              const aWidth = cumAv ? Math.min((cumAv / maxCumVolume) * 100, 100) : 0;
 
               const myBuyQty = workingBuyMap.get(pKey) || 0;
               const mySellQty = workingSellMap.get(pKey) || 0;
+              
+              const isBigTrade = qData.Volume >= 50 || (currentPrice > 0 && qData.Volume * currentPrice * 1000 >= 3000000);
 
               // 下單回饋閃爍
               const isBuyFb = orderFeedback && orderFeedback.price === p && orderFeedback.action === 'Buy';
@@ -406,7 +456,7 @@ const DOMPanel: React.FC = () => {
                 : '';
 
               return (
-                <tr key={p} data-price={p} className={`h-8 border-b border-slate-800/80 transition-none ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-yellow-500/10') : ''} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''}`}>
+                <tr key={p} data-price={p} className={`h-8 transition-none ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-[#D4AF37]/10 border-y border-[#D4AF37]/50 relative z-10 box-border') : 'border-b border-slate-800/80'} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''}`}>
                   {/* 刪買 */}
                   <td className="border-r border-slate-800 hover:bg-slate-700 cursor-pointer" 
                       onClick={() => myBuyQty > 0 && handleCancelAtPrice('Buy')}>
@@ -421,7 +471,7 @@ const DOMPanel: React.FC = () => {
 
                   {/* 委買量 (含 Δ買) */}
                   <td className="relative border-r border-slate-800 text-red-400 font-medium bg-red-950/20">
-                      <div className="absolute inset-y-0.5 right-0 bg-red-500/15 transition-all" style={{ width: `${bWidth}%` }}></div>
+                      <div className="absolute inset-y-0.5 right-0 bg-gradient-to-l from-red-600/30 to-red-600/5 transition-all" style={{ width: `${bWidth}%` }}></div>
                       <div className="relative z-10 flex justify-between items-center px-2">
                         <span className={`text-[9px] font-bold ${diffBv > 0 ? 'text-red-400' : 'text-slate-500'}`}>{diffBv !== 0 ? (diffBv > 0 ? `+${diffBv}` : diffBv) : ''}</span>
                         <span>{bv || ''}</span>
@@ -437,9 +487,9 @@ const DOMPanel: React.FC = () => {
                           {/* 成交明細 (TickType: 1=外盤/紅/右，2=內盤/綠/左) */}
                           {isC && qData.Volume > 0 && (
                             qData.TickType === 2 ? (
-                              <span className="absolute left-1 text-[10px] font-bold text-emerald-50 bg-emerald-600/90 px-1 rounded-sm shadow-sm">{qData.Volume}</span>
+                              <span className={`absolute left-1 text-[10px] font-bold text-emerald-50 bg-emerald-600/90 px-1 rounded-sm shadow-sm transition-all ${isBigTrade ? 'ring-2 ring-emerald-400 shadow-[0_0_10px_rgba(16,185,129,1)] animate-pulse scale-110 z-30' : ''}`}>{qData.Volume}</span>
                             ) : (
-                              <span className="absolute right-1 text-[10px] font-bold text-red-50 bg-red-600/90 px-1 rounded-sm shadow-sm">{qData.Volume}</span>
+                              <span className={`absolute right-1 text-[10px] font-bold text-red-50 bg-red-600/90 px-1 rounded-sm shadow-sm transition-all ${isBigTrade ? 'ring-2 ring-red-400 shadow-[0_0_10px_rgba(239,68,68,1)] animate-pulse scale-110 z-30' : ''}`}>{qData.Volume}</span>
                             )
                           )}
                           
@@ -455,7 +505,7 @@ const DOMPanel: React.FC = () => {
                   
                   {/* 委賣量 (含 Δ賣) */}
                   <td className="relative border-r border-slate-800 text-emerald-400 font-medium bg-emerald-950/20">
-                      <div className="absolute inset-y-0.5 left-0 bg-emerald-500/15 transition-all" style={{ width: `${aWidth}%` }}></div>
+                      <div className="absolute inset-y-0.5 left-0 bg-gradient-to-r from-emerald-600/30 to-emerald-600/5 transition-all" style={{ width: `${aWidth}%` }}></div>
                       <div className="relative z-10 flex justify-between items-center px-2">
                         <span>{av || ''}</span>
                         <span className={`text-[9px] font-bold ${diffAv > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>{diffAv !== 0 ? (diffAv > 0 ? `+${diffAv}` : diffAv) : ''}</span>
@@ -482,13 +532,51 @@ const DOMPanel: React.FC = () => {
       </div>
 
       {/* Footer — 快捷操作列 */}
-      <div className="p-3 border-t border-slate-800 bg-[#1c2331] flex justify-between items-center shadow-2xl gap-2">
-          <div className="flex items-center gap-2">
-              <span className="text-[9px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">QTY</span>
-              <div className="flex items-center bg-[#101623] rounded-lg border border-slate-700 p-0.5">
-                  <button onClick={() => setOrderValue(Math.max(1, orderValue-1))} className="w-7 h-7 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors cursor-pointer">-</button>
-                  <input type="number" value={orderValue} onChange={(e) => setOrderValue(Math.max(1, Number(e.target.value)))} className="w-10 bg-transparent text-center text-[#D4AF37] text-sm font-black focus:outline-none" />
-                  <button onClick={() => setOrderValue(orderValue+1)} className="w-7 h-7 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors cursor-pointer">+</button>
+      <div className="p-3 border-t border-slate-800 bg-[#1c2331] flex flex-wrap justify-between items-center shadow-2xl gap-2 md:gap-4">
+          <div className="flex flex-wrap items-center gap-2">
+              {/* 委託種類設定 */}
+              <div className="flex flex-col gap-0.5">
+                  <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">Type</span>
+                  <select 
+                      value={orderType} 
+                      onChange={(e) => setOrderType(e.target.value)}
+                      className="bg-[#101623] border border-slate-700 hover:border-slate-600 rounded text-[11px] font-bold py-1 px-1.5 text-slate-200 outline-none cursor-pointer focus:ring-1 focus:ring-slate-500"
+                  >
+                      <option value="ROD">ROD</option>
+                      <option value="IOC">IOC</option>
+                      <option value="FOK">FOK</option>
+                  </select>
+              </div>
+
+              {/* 金額換算 */}
+              <div className="flex flex-col gap-0.5">
+                  <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">Amount to QTY</span>
+                  <div className="flex items-center bg-[#101623] rounded border border-slate-700 overflow-hidden focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500">
+                      <input 
+                          type="number" 
+                          placeholder="輸入金額..."
+                          value={calcAmount} 
+                          onChange={(e) => setCalcAmount(e.target.value ? Number(e.target.value) : '')} 
+                          onKeyDown={(e) => e.key === 'Enter' && handleAmountConvert(calcAmount)}
+                          className="w-20 sm:w-24 bg-transparent text-right text-slate-300 px-1 py-1 text-[11px] font-mono focus:outline-none placeholder:text-slate-600" 
+                      />
+                      <button 
+                          onClick={() => handleAmountConvert(calcAmount)}
+                          className="bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white px-2 py-1 text-[10px] font-bold border-l border-slate-700 transition-colors"
+                      >
+                          換算
+                      </button>
+                  </div>
+              </div>
+
+              {/* QTY 直播輸入 (原本的功能) */}
+              <div className="flex flex-col gap-0.5 ml-1">
+                  <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">QTY</span>
+                  <div className="flex items-center bg-[#101623] rounded border border-slate-700 p-[1px]">
+                      <button onClick={() => setOrderValue(Math.max(1, orderValue-1))} className="w-6 h-6 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors cursor-pointer text-sm font-black leading-none">-</button>
+                      <input type="number" value={orderValue} onChange={(e) => setOrderValue(Math.max(1, Number(e.target.value)))} className="w-10 bg-transparent text-center text-[#D4AF37] text-[13px] font-black focus:outline-none tabular-nums" />
+                      <button onClick={() => setOrderValue(orderValue+1)} className="w-6 h-6 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors cursor-pointer text-sm font-black leading-none">+</button>
+                  </div>
               </div>
           </div>
 
