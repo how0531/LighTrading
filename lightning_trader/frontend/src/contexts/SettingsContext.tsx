@@ -1,5 +1,22 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 
+// 快捷鍵行為定義
+export interface HotkeyItem {
+  key: string;          // e.g. "F1", "Escape", "q", " "
+  action: 'Buy' | 'Sell' | 'CancelAll' | 'Flatten' | 'ScrollCenter';
+  label: string;
+}
+
+// 拆單設定
+export interface SplitOrderConfig {
+  enabled: boolean;
+  threshold: number;   // 超過此張數才拆
+  minPerLot: number;   // 每筆最少張數
+  maxPerLot: number;   // 每筆最多張數
+  minDelay: number;    // 每筆送出最小間隔 ms
+  maxDelay: number;    // 每筆送出最大間隔 ms
+}
+
 /**
  * 交易系統設定介面
  */
@@ -18,6 +35,8 @@ export interface Settings {
     fontSize: number;
   };
   theme: 'dark' | 'light';
+  hotkeys: HotkeyItem[];
+  splitOrder: SplitOrderConfig;
 }
 
 /**
@@ -38,6 +57,21 @@ const DEFAULT_SETTINGS: Settings = {
     fontSize: 12,
   },
   theme: 'dark',
+  hotkeys: [
+    { key: 'F1',     action: 'Buy',          label: '買進 (Buy)' },
+    { key: 'F2',     action: 'Sell',         label: '賣出 (Sell)' },
+    { key: 'Escape', action: 'CancelAll',    label: '全刪掛單' },
+    { key: 'Delete', action: 'Flatten',      label: '全部平倉' },
+    { key: ' ',      action: 'ScrollCenter', label: '置中 (捲動到現價)' },
+  ],
+  splitOrder: {
+    enabled: false,
+    threshold: 499,
+    minPerLot: 1,
+    maxPerLot: 10,
+    minDelay: 200,
+    maxDelay: 800,
+  },
 };
 
 interface SettingsContextType {
@@ -58,12 +92,13 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
-        // 合併預設值以確保新增的欄位能被正確初始化
         return {
           ...DEFAULT_SETTINGS,
           ...parsed,
           confirmations: { ...DEFAULT_SETTINGS.confirmations, ...parsed.confirmations },
           visuals: { ...DEFAULT_SETTINGS.visuals, ...parsed.visuals },
+          hotkeys: parsed.hotkeys || DEFAULT_SETTINGS.hotkeys,
+          splitOrder: { ...DEFAULT_SETTINGS.splitOrder, ...parsed.splitOrder },
         };
       } catch (e) {
         console.error("Failed to parse settings from localStorage", e);
@@ -72,47 +107,28 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return DEFAULT_SETTINGS;
   });
 
-  // 持久化儲存與主題切換
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-    
-    // 同步 Tailwind Dark Mode 類別
     if (settings.theme === 'dark') {
       document.documentElement.classList.add('dark');
     } else {
       document.documentElement.classList.remove('dark');
     }
-    
-    // 設定全域字體大小 (透過 CSS 變數)
     document.documentElement.style.setProperty('--base-font-size', `${settings.visuals.fontSize || 12}px`);
   }, [settings]);
 
-  /**
-   * 支援部分更新與深層合併
-   */
   const updateSetting = (updates: Partial<Settings> | ((prev: Settings) => Settings)) => {
     setSettings(prev => {
-      if (typeof updates === 'function') {
-        return updates(prev);
-      }
-
+      if (typeof updates === 'function') return updates(prev);
       const next = { ...prev, ...updates };
-      
-      // 處理巢狀物件的合併
-      if (updates.confirmations) {
-        next.confirmations = { ...prev.confirmations, ...updates.confirmations };
-      }
-      if (updates.visuals) {
-        next.visuals = { ...prev.visuals, ...updates.visuals };
-      }
-      
+      if (updates.confirmations) next.confirmations = { ...prev.confirmations, ...updates.confirmations };
+      if (updates.visuals) next.visuals = { ...prev.visuals, ...updates.visuals };
+      if (updates.splitOrder) next.splitOrder = { ...prev.splitOrder, ...updates.splitOrder };
       return next;
     });
   };
 
-  const resetSettings = () => {
-    setSettings(DEFAULT_SETTINGS);
-  };
+  const resetSettings = () => setSettings(DEFAULT_SETTINGS);
 
   return (
     <SettingsContext.Provider value={{ settings, updateSetting, resetSettings }}>
@@ -121,14 +137,8 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
   );
 };
 
-/**
- * Hook: useSettings
- * 方便在組件中存取與更新設定
- */
 export const useSettings = () => {
   const context = useContext(SettingsContext);
-  if (!context) {
-    throw new Error('useSettings must be used within a SettingsProvider');
-  }
+  if (!context) throw new Error('useSettings must be used within a SettingsProvider');
   return context;
 };

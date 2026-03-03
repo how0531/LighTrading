@@ -506,10 +506,12 @@ async def reverse_position(req: SymbolRequest):
 
 @app.get("/api/positions")
 async def get_positions(account_id: str = None):
-    """獲取目前的持倉部位"""
+    """獲取目前的持倉部位，支援依 account_id 篩選"""
     try:
         results = await run_in_qt_thread(shioaji_client.list_positions)
-        # 由於 shioaji_client.list_positions() 已經回傳格式化後的字典列表，直接回傳即可
+        # 依照前端傳入的帳號篩選（格式: broker_id-account_id，如 9A9J-9802004）
+        if account_id:
+            results = [p for p in results if p.get("account", "") == account_id]
         return results
     except Exception as e:
         logger.error(f"獲取持倉發生錯誤: {e}")

@@ -17,7 +17,7 @@ interface Account {
 }
 
 const Panel_Positions: React.FC = () => {
-  const { isConnected, accountSummary } = useTradingContext();
+  const { isConnected, accountSummary, subscribe } = useTradingContext();
   const [positions, setPositions] = useState<Position[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<'ALL' | 'Stock' | 'Future'>('ALL');
@@ -158,7 +158,11 @@ const Panel_Positions: React.FC = () => {
             ) : (
               positions.map((pos, idx) => (
                 <tr key={`${pos.symbol}-${idx}`} className="bg-slate-700/20 hover:bg-slate-700/40 transition-colors">
-                  <td className="px-2 py-2 font-mono text-slate-200">{pos.symbol}</td>
+                  <td 
+                    className="px-2 py-2 font-mono text-slate-200 cursor-pointer hover:text-[#D4AF37] hover:underline transition-colors" 
+                    onClick={() => subscribe(pos.symbol)}
+                    title={`點擊切換至 ${pos.symbol}`}
+                  >{pos.symbol}</td>
                   <td className={`px-2 py-2 font-extrabold ${pos.direction === 'Buy' ? 'text-red-500' : 'text-green-500'}`}>
                     <span className={`inline-block px-1 rounded ${pos.direction === 'Buy' ? 'bg-red-500/10' : 'bg-green-500/10'}`}>
                       {pos.direction === 'Buy' ? '多' : '空'}

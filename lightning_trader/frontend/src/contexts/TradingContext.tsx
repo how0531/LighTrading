@@ -98,6 +98,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       LimitUp:   (incoming.LimitUp   && incoming.LimitUp   > 0) ? incoming.LimitUp   : prev?.LimitUp,
       LimitDown: (incoming.LimitDown && incoming.LimitDown > 0) ? incoming.LimitDown : prev?.LimitDown,
       TickTime:  incoming.TickTime  ?? prev?.TickTime  ?? '',
+      TickType:  incoming.TickType  ?? prev?.TickType,
       Action:    incoming.Action    ?? prev?.Action    ?? '',
     };
     latestQuoteRef.current = merged;
@@ -130,7 +131,10 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const data = JSON.parse(event.data);
         const isMatch = (payload: any): boolean => {
           if (!payload?.Symbol) return true;
-          return String(payload.Symbol).trim().toUpperCase() === targetSymbolRef.current.trim().toUpperCase();
+          const sym = String(payload.Symbol).trim().toUpperCase();
+          const target = targetSymbolRef.current.trim().toUpperCase();
+          // 完全相等，或者期貨別名：如 TXFR1 匹配訂閱的 TXF、MXF 匹配 MXF*
+          return sym === target || sym.startsWith(target);
         };
 
         if (data.type === 'Tick' && data.data && isMatch(data.data)) {
