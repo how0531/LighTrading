@@ -46,21 +46,21 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // 穩定的 quote 緩衝區
   const latestQuoteRef = useRef<QuoteData | null>(null);
   const latestBidAskRef = useRef<BidAskData | null>(null);
+  const quoteDirtyRef = useRef(false);   // 標記 quote 有新資料需同步
+  const bidaskDirtyRef = useRef(false);   // 標記 bidask 有新資料需同步
   const pendingHistoryRef = useRef<QuoteData[]>([]);
   const pendingAccountRef = useRef<AccountSummary | null>(null);
 
   // 100ms 節流計時器：批次將 ref 中累積的資料同步到 React state
   useEffect(() => {
     const timer = setInterval(() => {
-      if (latestQuoteRef.current !== null) {
-        const q = latestQuoteRef.current;
-        latestQuoteRef.current = null; // 清除標記（先清再 set，避免重複）
-        setQuote({ ...q });
+      if (quoteDirtyRef.current && latestQuoteRef.current) {
+        quoteDirtyRef.current = false;
+        setQuote({ ...latestQuoteRef.current });
       }
-      if (latestBidAskRef.current !== null) {
-        const b = latestBidAskRef.current;
-        latestBidAskRef.current = null;
-        setBidAsk({ ...b });
+      if (bidaskDirtyRef.current && latestBidAskRef.current) {
+        bidaskDirtyRef.current = false;
+        setBidAsk({ ...latestBidAskRef.current });
       }
       if (pendingHistoryRef.current.length > 0) {
         const batch = pendingHistoryRef.current;
@@ -101,6 +101,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       Action:    incoming.Action    ?? prev?.Action    ?? '',
     };
     latestQuoteRef.current = merged;
+    quoteDirtyRef.current = true;
     pendingHistoryRef.current.push(merged);
   }, []);
 
@@ -136,6 +137,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           mergeQuote(data.data as Partial<QuoteData>);
         } else if (data.type === 'BidAsk' && data.data && isMatch(data.data)) {
           latestBidAskRef.current = data.data as BidAskData;
+          bidaskDirtyRef.current = true;
         } else if (data.type === 'AccountUpdate' && data.data) {
           pendingAccountRef.current = data.data;
         } else if (data.action === 'subscribe' && data.status === 'success') {

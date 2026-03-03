@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { apiClient } from "../api/client";
 import { KeyRound, ShieldCheck, Cpu, FileKey } from "lucide-react";
@@ -24,6 +24,16 @@ const LoginPanel: React.FC = () => {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const navigate = useNavigate();
+
+  // 自動偵測：如果後端已登入（有帳號），直接跳轉 Dashboard
+  useEffect(() => {
+    apiClient.get('/accounts').then(res => {
+      if (res.data && res.data.length > 0) {
+        console.log('[Login] 後端已登入，自動跳轉 Dashboard');
+        navigate('/dashboard');
+      }
+    }).catch(() => { /* 後端未啟動或未登入，留在登入頁 */ });
+  }, [navigate]);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();

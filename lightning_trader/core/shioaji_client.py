@@ -40,8 +40,8 @@ class ShioajiClient(QObject):
         self.reconnect_timer.timeout.connect(self.check_connection)
         self.reconnect_timer.start(10000) 
         
-        if Config.API_KEY and Config.SECRET_KEY:
-            QTimer.singleShot(100, self.login)
+        # 注意：自動登入已移至 main.py lifespan，避免雙重登入競態
+        # 如果需要從 PyQt5 GUI 使用，可在 GUI 中手動呼叫 login()
 
     def check_connection(self):
         if getattr(self, '_is_reconnecting', False): return
@@ -66,55 +66,96 @@ class ShioajiClient(QObject):
             QTimer.singleShot(10000, self._do_login_reconnect)
 
     def _setup_callbacks(self):
-        # === 單一報價回呼路徑 ===
-        # Shioaji set_quote_callback → _handle_quote → _direct_quote_callback → asyncio Queue → WebSocket
-        def _handle_quote(topic: str, quote):
+        # === Shioaji v1 回呼（新版 SDK 預設格式） ===
+        # TickSTKv1 / BidAskSTKv1 → 統一 dict → _direct_quote_callback → asyncio Queue → WebSocket
+
+        def _on_tick_stk(exchange, tick):
+            """股票 Tick 回呼"""
             try:
-                symbol = self.current_contract.symbol if self.current_contract else (topic.split("/")[-1] if "/" in topic else "")
-                
-                # 將各種格式統一轉為 dict
-                if hasattr(quote, "dict"):
-                    q_dict = quote.dict()
-                elif hasattr(quote, "to_dict"):
-                    q_dict = quote.to_dict()
-                elif not isinstance(quote, dict):
-                    q_dict = dict(quote)
-                else:
-                    q_dict = quote.copy()
-                
-                q_dict["Symbol"] = symbol
-                is_bidask = any(k in q_dict for k in ["AskPrice", "BidPrice", "ask_price", "bid_price"])
-                
-                if is_bidask:
-                    # BidAsk：直接轉發
-                    if self._direct_quote_callback:
-                        self._direct_quote_callback(q_dict)
-                    # 保留 event_bus 供 PyQt UI 使用
-                    if self.event_bus:
-                        self.event_bus.on_bidask.emit(symbol, q_dict)
-                else:
-                    # Tick：將 Close 陣列/數值統一為 Price 純量
-                    close_val = q_dict.get('Close', q_dict.get('close', q_dict.get('Price', 0)))
-                    if isinstance(close_val, list):
-                        close_val = close_val[0] if close_val else 0
-                    q_dict['Price'] = float(close_val)
-                    
-                    # 過濾 Price=0 的純量能更新（不送往前端）
-                    if q_dict['Price'] > 0:
-                        if self._direct_quote_callback:
-                            self._direct_quote_callback(q_dict)
-                    # 保留 event_bus 供 PyQt UI 使用
-                    if self.event_bus:
-                        self.event_bus.on_tick.emit(symbol, q_dict)
+                symbol = self.current_contract.symbol if self.current_contract else str(tick.code)
+                q = {
+                    "Symbol": symbol,
+                    "Price": float(tick.close),
+                    "Volume": int(tick.volume),
+                    "Open": float(tick.open),
+                    "High": float(tick.high),
+                    "Low": float(tick.low),
+                    "AvgPrice": float(tick.avg_price),
+                    "TickTime": str(tick.datetime),
+                }
+                if q["Price"] > 0 and self._direct_quote_callback:
+                    self._direct_quote_callback(q)
             except Exception as e:
-                logger.error(f"解析報價時發生錯誤 (topic={topic}): {e}")
+                logger.error(f"_on_tick_stk 錯誤: {e}")
 
-        # 只註冊一個回呼，消除重複觸發
-        self.api.quote.set_quote_callback(_handle_quote)
-        logger.info("✅ 已註冊報價回呼 (單一路徑: set_quote_callback → direct_callback)")
+        def _on_bidask_stk(exchange, bidask):
+            """股票 BidAsk 回呼"""
+            try:
+                symbol = self.current_contract.symbol if self.current_contract else str(bidask.code)
+                bp = [float(p) for p in bidask.bid_price]
+                bv = [int(v) for v in bidask.bid_volume]
+                ap = [float(p) for p in bidask.ask_price]
+                av = [int(v) for v in bidask.ask_volume]
+                q = {
+                    "Symbol": symbol,
+                    "AskPrice": ap, "AskVolume": av,
+                    "BidPrice": bp, "BidVolume": bv,
+                    "DiffBidVol": [int(v) for v in bidask.diff_bid_vol],
+                    "DiffAskVol": [int(v) for v in bidask.diff_ask_vol],
+                    "Time": str(bidask.datetime),
+                }
+                if self._direct_quote_callback:
+                    self._direct_quote_callback(q)
+            except Exception as e:
+                logger.error(f"_on_bidask_stk 錯誤: {e}")
 
+        def _on_tick_fop(exchange, tick):
+            """期貨/選擇權 Tick 回呼"""
+            try:
+                symbol = self.current_contract.symbol if self.current_contract else str(tick.code)
+                q = {
+                    "Symbol": symbol,
+                    "Price": float(tick.close),
+                    "Volume": int(tick.volume),
+                    "Open": float(tick.open),
+                    "High": float(tick.high),
+                    "Low": float(tick.low),
+                    "AvgPrice": float(tick.avg_price),
+                    "TickTime": str(tick.datetime),
+                }
+                if q["Price"] > 0 and self._direct_quote_callback:
+                    self._direct_quote_callback(q)
+            except Exception as e:
+                logger.error(f"_on_tick_fop 錯誤: {e}")
 
-        
+        def _on_bidask_fop(exchange, bidask):
+            """期貨/選擇權 BidAsk 回呼"""
+            try:
+                symbol = self.current_contract.symbol if self.current_contract else str(bidask.code)
+                bp = [float(p) for p in bidask.bid_price]
+                bv = [int(v) for v in bidask.bid_volume]
+                ap = [float(p) for p in bidask.ask_price]
+                av = [int(v) for v in bidask.ask_volume]
+                q = {
+                    "Symbol": symbol,
+                    "AskPrice": ap, "AskVolume": av,
+                    "BidPrice": bp, "BidVolume": bv,
+                    "DiffBidVol": [int(v) for v in bidask.diff_bid_vol],
+                    "DiffAskVol": [int(v) for v in bidask.diff_ask_vol],
+                    "Time": str(bidask.datetime),
+                }
+                if self._direct_quote_callback:
+                    self._direct_quote_callback(q)
+            except Exception as e:
+                logger.error(f"_on_bidask_fop 錯誤: {e}")
+
+        # 註冊 v1 回呼（股票 + 期貨/選擇權）
+        self.api.quote.set_on_tick_stk_v1_callback(_on_tick_stk)
+        self.api.quote.set_on_bidask_stk_v1_callback(_on_bidask_stk)
+        self.api.quote.set_on_tick_fop_v1_callback(_on_tick_fop)
+        self.api.quote.set_on_bidask_fop_v1_callback(_on_bidask_fop)
+        logger.info("✅ 已註冊 v1 報價回呼 (STK + FOP Tick/BidAsk)")
+
         def on_order_status(state, msg: dict):
             self.signal_order_update.emit(msg)
             QTimer.singleShot(500, self.trigger_account_update)
@@ -141,6 +182,9 @@ class ShioajiClient(QObject):
             self.active_stock_account = next((a for a in accounts if "Stock" in a.__class__.__name__), None)
             self.active_futopt_account = next((a for a in accounts if "Future" in a.__class__.__name__), None)
             self._is_connected = True
+            # ★ 關鍵：login 後強制重新註冊回呼，確保 set_quote_callback 在已登入狀態下生效
+            self._setup_callbacks()
+            logger.info("✅ Shioaji 登入成功，回呼已重新註冊")
             self.signal_login_status.emit(True, "登入成功")
             QTimer.singleShot(1000, self.trigger_account_update)
             if self.current_contract: self.subscribe(self.current_contract.symbol)
@@ -285,7 +329,6 @@ class ShioajiClient(QObject):
                     "TickTime": str(s.ts),
                     "Action": "Snapshot"
                 }
-                self.signal_quote_tick.emit(tick_data)
                 if self._direct_quote_callback:
                     self._direct_quote_callback(tick_data)
                 
@@ -307,7 +350,6 @@ class ShioajiClient(QObject):
                         "DiffAskVol": [0],
                         "Time": str(s.ts)
                     }
-                    self.signal_quote_bidask.emit(bidask_data)
                     if self._direct_quote_callback:
                         self._direct_quote_callback(bidask_data)
         except Exception as e:

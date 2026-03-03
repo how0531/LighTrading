@@ -61,11 +61,29 @@ async def lifespan(app):
     qt_task = asyncio.create_task(qt_event_loop())
     broadcast_task = asyncio.create_task(quote_broadcaster())
     
+    # 自動登入用 background task，避免在 lifespan 中阻塞
+    async def _auto_login():
+        await asyncio.sleep(2)  # 等待 Qt event loop 穩定
+        if Config.API_KEY and Config.SECRET_KEY:
+            logger.info("🔑 偵測到 .env 憑證，自動登入 Shioaji...")
+            try:
+                success = await run_in_qt_thread(shioaji_client.login)
+                if success:
+                    logger.info("✅ Shioaji 自動登入成功")
+                else:
+                    logger.warning("⚠️ Shioaji 自動登入失敗，請檢查 .env 設定")
+            except Exception as e:
+                logger.error(f"❌ 自動登入發生例外: {e}")
+    
+    login_task = asyncio.create_task(_auto_login())
+    
     yield
     
+    login_task.cancel()
     qt_task.cancel()
     broadcast_task.cancel()
     try:
+        await login_task
         await qt_task
         await broadcast_task
     except asyncio.CancelledError:
@@ -166,12 +184,16 @@ def on_shioaji_quote(quote_data: dict):
                 "High": float(_val(q.get('High', q.get('high', 0)))),
                 "Low": float(_val(q.get('Low', q.get('low', 0)))),
                 "AvgPrice": float(_val(q.get('AvgPrice', q.get('avg_price', 0)))),
-                "Reference": float(_val(q.get('Reference', q.get('reference', 0)))),
-                "LimitUp": float(_val(q.get('LimitUp', q.get('limit_up', 0)))),
-                "LimitDown": float(_val(q.get('LimitDown', q.get('limit_down', 0)))),
                 "TickTime": format_datetime(q.get('Time', q.get('TickTime', q.get('datetime', q.get('ts', ''))))),
                 "Action": q.get('Action', q.get('action', ''))
             }
+            # 只在非零時才送靜態欄位（避免覆蓋 Snapshot 的正確值）
+            ref = float(_val(q.get('Reference', q.get('reference', 0))))
+            lu = float(_val(q.get('LimitUp', q.get('limit_up', 0))))
+            ld = float(_val(q.get('LimitDown', q.get('limit_down', 0))))
+            if ref > 0: tick_data["Reference"] = ref
+            if lu > 0: tick_data["LimitUp"] = lu
+            if ld > 0: tick_data["LimitDown"] = ld
             quote_item = {"type": "Tick", "data": tick_data}
 
         # 使用 fastapi_loop 進行執行緒安全的操作
