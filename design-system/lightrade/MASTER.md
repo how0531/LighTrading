@@ -1,206 +1,214 @@
-# Design System Master File
+# LighTrade Design System — MASTER
 
-> **LOGIC:** When building a specific page, first check `design-system/pages/[page-name].md`.
-> If that file exists, its rules **override** this Master file.
-> If not, strictly follow the rules below.
+> **規則優先級：** 如果 `design-system/pages/[page-name].md` 存在，該檔案的規則覆蓋本文件。
 
 ---
 
-**Project:** LighTrade
-**Generated:** 2026-03-01 18:50:04
-**Category:** Fintech/Crypto
+**專案名稱：** LighTrade  
+**風格定位：** 專業金融交易終端 (Dawho × Bloomberg Terminal)  
+**版本：** V1.0.3  
+**CSS 實作檔：** `frontend/src/index.css`
 
 ---
 
-## Global Rules
+## 色彩系統
 
-### Color Palette
+### 背景層級
 
-| Role | Hex | CSS Variable |
-|------|-----|--------------|
-| Primary | `#0F172A` | `--color-primary` |
-| Secondary | `#1E293B` | `--color-secondary` |
-| CTA/Accent | `#22C55E` | `--color-cta` |
-| Background | `#020617` | `--color-background` |
-| Text | `#F8FAFC` | `--color-text` |
+| 角色       | Hex       | Tailwind Token | CSS 變數            | 用途                 |
+| ---------- | --------- | -------------- | ------------------- | -------------------- |
+| 最深背景   | `#101623` | `slate-950`    | `--color-slate-950` | `<body>`, 主畫面背景 |
+| 面板背景   | `#1C2331` | `slate-900`    | `--color-slate-900` | 所有 `.glass-panel`  |
+| Hover 狀態 | `#29344A` | `slate-800`    | `--color-slate-800` | 按鈕/列表 hover      |
+| 邊框       | `#3E4E6D` | `slate-700`    | `--color-slate-700` | 面板邊框, 分隔線     |
 
-**Color Notes:** Dark bg + green positive indicators
+### 語義色彩
 
-### Typography
+| 角色            | Hex       | Token          | 說明                              |
+| --------------- | --------- | -------------- | --------------------------------- |
+| **買入 / 上漲** | `#EF4444` | `buy-muted`    | ⚠️ 台灣慣例：紅色 = 漲            |
+| **賣出 / 下跌** | `#10B981` | `sell-muted`   | ⚠️ 台灣慣例：綠色 = 跌            |
+| **金色高亮**    | `#D4AF37` | `accent-amber` | 當前價、CTA 按鈕、LOAD 按鈕 hover |
+| **文字主色**    | `#F1F5F9` | —              | 一般文字                          |
+| **文字次要**    | `#94A3B8` | `slate-400`    | 標籤、說明文字                    |
 
-- **Heading Font:** Fira Code
-- **Body Font:** Fira Sans
-- **Mood:** dashboard, data, analytics, code, technical, precise
-- **Google Fonts:** [Fira Code + Fira Sans](https://fonts.google.com/share?selection.family=Fira+Code:wght@400;500;600;700|Fira+Sans:wght@300;400;500;600;700)
-
-**CSS Import:**
-```css
-@import url('https://fonts.googleapis.com/css2?family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap');
-```
-
-### Spacing Variables
-
-| Token | Value | Usage |
-|-------|-------|-------|
-| `--space-xs` | `4px` / `0.25rem` | Tight gaps |
-| `--space-sm` | `8px` / `0.5rem` | Icon gaps, inline spacing |
-| `--space-md` | `16px` / `1rem` | Standard padding |
-| `--space-lg` | `24px` / `1.5rem` | Section padding |
-| `--space-xl` | `32px` / `2rem` | Large gaps |
-| `--space-2xl` | `48px` / `3rem` | Section margins |
-| `--space-3xl` | `64px` / `4rem` | Hero padding |
-
-### Shadow Depths
-
-| Level | Value | Usage |
-|-------|-------|-------|
-| `--shadow-sm` | `0 1px 2px rgba(0,0,0,0.05)` | Subtle lift |
-| `--shadow-md` | `0 4px 6px rgba(0,0,0,0.1)` | Cards, buttons |
-| `--shadow-lg` | `0 10px 15px rgba(0,0,0,0.1)` | Modals, dropdowns |
-| `--shadow-xl` | `0 20px 25px rgba(0,0,0,0.15)` | Hero images, featured cards |
-
----
-
-## Component Specs
-
-### Buttons
+### 光暈效果
 
 ```css
-/* Primary Button */
-.btn-primary {
-  background: #22C55E;
-  color: white;
-  padding: 12px 24px;
-  border-radius: 8px;
-  font-weight: 600;
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-
-.btn-primary:hover {
-  opacity: 0.9;
-  transform: translateY(-1px);
-}
-
-/* Secondary Button */
-.btn-secondary {
-  background: transparent;
-  color: #0F172A;
-  border: 2px solid #0F172A;
-  padding: 12px 24px;
-  border-radius: 8px;
-  font-weight: 600;
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-```
-
-### Cards
-
-```css
-.card {
-  background: #020617;
-  border-radius: 12px;
-  padding: 24px;
-  box-shadow: var(--shadow-md);
-  transition: all 200ms ease;
-  cursor: pointer;
-}
-
-.card:hover {
-  box-shadow: var(--shadow-lg);
-  transform: translateY(-2px);
-}
-```
-
-### Inputs
-
-```css
-.input {
-  padding: 12px 16px;
-  border: 1px solid #E2E8F0;
-  border-radius: 8px;
-  font-size: 16px;
-  transition: border-color 200ms ease;
-}
-
-.input:focus {
-  border-color: #0F172A;
-  outline: none;
-  box-shadow: 0 0 0 3px #0F172A20;
-}
-```
-
-### Modals
-
-```css
-.modal-overlay {
-  background: rgba(0, 0, 0, 0.5);
-  backdrop-filter: blur(4px);
-}
-
-.modal {
-  background: white;
-  border-radius: 16px;
-  padding: 32px;
-  box-shadow: var(--shadow-xl);
-  max-width: 500px;
-  width: 90%;
-}
+.text-glow-green {
+  text-shadow: 0 0 10px rgba(71, 240, 184, 0.5);
+} /* 上漲閃爍 */
+.text-glow-red {
+  text-shadow: 0 0 10px rgba(203, 30, 30, 0.5);
+} /* 下跌閃爍 */
 ```
 
 ---
 
-## Style Guidelines
+## 字體系統
 
-**Style:** Dark Mode (OLED)
+| 字體          | 用途                          | 權重    |
+| ------------- | ----------------------------- | ------- |
+| **Barlow**    | 所有數字顯示（報價、量、PnL） | 400–800 |
+| **Fira Code** | 程式碼風格文字、標題          | 400–700 |
+| **Fira Sans** | UI 文字、按鈕、標籤           | 300–700 |
 
-**Keywords:** Dark theme, low light, high contrast, deep black, midnight blue, eye-friendly, OLED, night mode, power efficient
+**Google Fonts Import：**
 
-**Best For:** Night-mode apps, coding platforms, entertainment, eye-strain prevention, OLED devices, low-light
+```css
+@import url("https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600;700;800&family=Fira+Code:wght@400;500;600;700&family=Fira+Sans:wght@300;400;500;600;700&display=swap");
+```
 
-**Key Effects:** Minimal glow (text-shadow: 0 0 10px), dark-to-light transitions, low white emission, high readability, visible focus
+### 數字對齊（必須）
 
-### Page Pattern
+所有高頻更新的報價數字**必須使用**：
 
-**Pattern Name:** Horizontal Scroll Journey
+```css
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+```
 
-- **Conversion Strategy:** Immersive product discovery. High engagement. Keep navigation visible.
-28,Bento Grid Showcase,bento,  grid,  features,  modular,  apple-style,  showcase", 1. Hero, 2. Bento Grid (Key Features), 3. Detail Cards, 4. Tech Specs, 5. CTA, Floating Action Button or Bottom of Grid, Card backgrounds: #F5F5F7 or Glass. Icons: Vibrant brand colors. Text: Dark., Hover card scale (1.02), video inside cards, tilt effect, staggered reveal, Scannable value props. High information density without clutter. Mobile stack.
-29,Interactive 3D Configurator,3d,  configurator,  customizer,  interactive,  product", 1. Hero (Configurator), 2. Feature Highlight (synced), 3. Price/Specs, 4. Purchase, Inside Configurator UI + Sticky Bottom Bar, Neutral studio background. Product: Realistic materials. UI: Minimal overlay., Real-time rendering, material swap animation, camera rotate/zoom, light reflection, Increases ownership feeling. 360 view reduces return rates. Direct add-to-cart.
-30,AI-Driven Dynamic Landing,ai,  dynamic,  personalized,  adaptive,  generative", 1. Prompt/Input Hero, 2. Generated Result Preview, 3. How it Works, 4. Value Prop, Input Field (Hero) + 'Try it' Buttons, Adaptive to user input. Dark mode for compute feel. Neon accents., Typing text effects, shimmering generation loaders, morphing layouts, Immediate value demonstration. 'Show, don't tell'. Low friction start.
-- **CTA Placement:** Floating Sticky CTA or End of Horizontal Track
-- **Section Order:** 1. Intro (Vertical), 2. The Journey (Horizontal Track), 3. Detail Reveal, 4. Vertical Footer
-
----
-
-## Anti-Patterns (Do NOT Use)
-
-- ❌ Light backgrounds
-- ❌ No security indicators
-
-### Additional Forbidden Patterns
-
-- ❌ **Emojis as icons** — Use SVG icons (Heroicons, Lucide, Simple Icons)
-- ❌ **Missing cursor:pointer** — All clickable elements must have cursor:pointer
-- ❌ **Layout-shifting hovers** — Avoid scale transforms that shift layout
-- ❌ **Low contrast text** — Maintain 4.5:1 minimum contrast ratio
-- ❌ **Instant state changes** — Always use transitions (150-300ms)
-- ❌ **Invisible focus states** — Focus states must be visible for a11y
+> 不使用 tabular-nums 的報價數字會在更新時左右跳動，嚴重影響交易體驗。
 
 ---
 
-## Pre-Delivery Checklist
+## Glassmorphism 面板
 
-Before delivering any UI code, verify:
+所有面板統一使用 `.glass-panel`：
 
-- [ ] No emojis used as icons (use SVG instead)
-- [ ] All icons from consistent icon set (Heroicons/Lucide)
-- [ ] `cursor-pointer` on all clickable elements
-- [ ] Hover states with smooth transitions (150-300ms)
-- [ ] Light mode: text contrast 4.5:1 minimum
-- [ ] Focus states visible for keyboard navigation
-- [ ] `prefers-reduced-motion` respected
-- [ ] Responsive: 375px, 768px, 1024px, 1440px
-- [ ] No content hidden behind fixed navbars
-- [ ] No horizontal scroll on mobile
+```css
+.glass-panel {
+  background: rgba(15, 23, 42, 0.6);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(51, 65, 85, 0.3);
+  box-shadow: 0 4px 24px -2px rgba(0, 0, 0, 0.5);
+}
+```
+
+搭配 Tailwind class：`rounded-lg border border-slate-700/50`
+
+---
+
+## 交易 UI 專屬元件
+
+### DOM 五檔面板 (DOMPanel)
+
+| 元素     | 樣式規則                                                                    |
+| -------- | --------------------------------------------------------------------------- |
+| 賣/買價  | `font-mono tabular-nums text-sm font-bold`                                  |
+| 委託量   | `font-mono tabular-nums text-xs`                                            |
+| 當前價   | `text-accent-amber font-black text-xl`                                      |
+| 漲跌色   | Price > Reference → `text-buy-muted`；Price < Reference → `text-sell-muted` |
+| 價格閃爍 | 上漲 → `animate-flash-inc` (金色閃一下)；下跌 → `animate-flash-dec` (淡出)  |
+| 成交閃爍 | 有量更新時 → `animate-tick` (背景金色閃)                                    |
+
+### 報價閃爍動畫
+
+```css
+/* 上漲閃爍 — 金色放大 → 恢復 */
+.animate-flash-inc {
+  animation: text-flash-inc 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* 下跌閃爍 — 淡出 → 恢復 */
+.animate-flash-dec {
+  animation: text-flash-dec 0.25s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+
+/* 成交背景閃 — 金色背景 → 透明 */
+.animate-tick {
+  animation: bg-flash-tick 0.35s cubic-bezier(0.4, 0, 0.2, 1) forwards;
+}
+```
+
+### Header (頂部導覽列)
+
+| 元素        | 樣式                                                               |
+| ----------- | ------------------------------------------------------------------ |
+| LOGO        | `font-black tracking-[0.2em] italic font-mono text-lg`             |
+| 連線燈號    | ONLINE → `bg-[#10B981]` 帶 `shadow-glow`；OFFLINE → `bg-[#EF4444]` |
+| SYMBOL 輸入 | `bg-slate-900 border-slate-700 font-mono font-bold`                |
+| LOAD 按鈕   | `hover:bg-accent-amber hover:text-white`                           |
+
+### 帳戶面板
+
+| 元素         | 樣式                                                           |
+| ------------ | -------------------------------------------------------------- |
+| 損益正/負    | `text-buy-muted` / `text-sell-muted`                           |
+| 模擬模式標示 | `bg-amber-500/20 text-amber-400 text-[10px] rounded-full px-2` |
+
+---
+
+## 間距系統
+
+| Token | Value         | 用途             |
+| ----- | ------------- | ---------------- |
+| `xs`  | 4px / 0.25rem | 密集數據間距     |
+| `sm`  | 8px / 0.5rem  | 圖示間距         |
+| `md`  | 16px / 1rem   | 標準面板 padding |
+| `lg`  | 24px / 1.5rem | 區塊間距         |
+| `xl`  | 32px / 2rem   | 大區塊分隔       |
+
+---
+
+## 陰影層級
+
+| Level | Value                          | 用途       |
+| ----- | ------------------------------ | ---------- |
+| `sm`  | `0 1px 2px rgba(0,0,0,0.05)`   | 微浮起     |
+| `md`  | `0 4px 6px rgba(0,0,0,0.1)`    | 面板、按鈕 |
+| `lg`  | `0 10px 15px rgba(0,0,0,0.1)`  | 彈窗、下拉 |
+| `xl`  | `0 20px 25px rgba(0,0,0,0.15)` | 模態框     |
+
+---
+
+## 滾動條
+
+```css
+.custom-scrollbar::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+.custom-scrollbar::-webkit-scrollbar-track {
+  background: rgba(15, 23, 42, 0.5);
+}
+.custom-scrollbar::-webkit-scrollbar-thumb {
+  background: rgba(51, 65, 85, 0.8);
+  border-radius: 3px;
+}
+.custom-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: rgba(71, 85, 105, 1);
+}
+```
+
+---
+
+## 禁止模式 (Anti-Patterns)
+
+- ❌ **淺色背景**：嚴禁使用白色或淺色背景
+- ❌ **歐美紅綠慣例**：紅色 ≠ 下跌、綠色 ≠ 上漲（台灣是相反的）
+- ❌ **Emojis 當圖示**：使用 Lucide React SVG 圖示
+- ❌ **缺少 cursor:pointer**：所有可互動元素必須有
+- ❌ **瞬間狀態切換**：所有過渡必須加 `transition` (150–300ms)
+- ❌ **非 tabular-nums 的數字**：報價/損益欄位必須使用等寬數字
+- ❌ **固定寬度的文字**：報價數字不可用 `w-[80px]`，改用 `min-w-[80px]`
+
+---
+
+## 交付前檢查清單
+
+在交付任何 UI 程式碼前，驗證：
+
+- [ ] 所有色碼來自本文件的色彩系統
+- [ ] 紅色 = 買入/上漲，綠色 = 賣出/下跌
+- [ ] 報價數字使用 `tabular-nums` + `font-mono`
+- [ ] 面板使用 `.glass-panel` 類別
+- [ ] 所有可點擊元素有 `cursor-pointer`
+- [ ] Hover 狀態有 150–300ms transition
+- [ ] 圖示使用 Lucide React，不使用 emoji
+- [ ] 響應式斷點：375px / 768px / 1024px / 1440px
+- [ ] 無水平溢出滾動
+- [ ] 報價閃爍動畫不超過 350ms
