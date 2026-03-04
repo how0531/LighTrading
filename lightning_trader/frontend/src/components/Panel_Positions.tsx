@@ -17,7 +17,7 @@ interface Account {
 }
 
 const Panel_Positions: React.FC = () => {
-  const { isConnected, accountSummary, subscribe } = useTradingContext();
+  const { isConnected, accountSummary, subscribe, flattenPosition } = useTradingContext();
   const [positions, setPositions] = useState<Position[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<'ALL' | 'Stock' | 'Future'>('ALL');
@@ -148,19 +148,29 @@ const Panel_Positions: React.FC = () => {
               <th className="px-2 py-2 font-medium text-right border-b border-slate-700/50">數量</th>
               <th className="px-2 py-2 font-medium text-right border-b border-slate-700/50">均價</th>
               <th className="px-2 py-2 font-medium text-right border-b border-slate-700/50">損益</th>
+              <th className="px-2 py-2 font-medium text-center border-b border-slate-700/50 w-12">操作</th>
             </tr>
           </thead>
           <tbody>
             {positions.length === 0 ? (
               <tr>
-                <td colSpan={5} className="py-12 text-center text-slate-600 font-medium tracking-widest italic">尚無部位</td>
+                <td colSpan={6} className="py-12 text-center text-slate-600 font-medium tracking-widest italic">尚無部位</td>
               </tr>
             ) : (
               positions.map((pos, idx) => (
-                <tr key={`${pos.symbol}-${idx}`} className="bg-slate-700/20 hover:bg-slate-700/40 transition-colors">
-                  <td 
-                    className="px-2 py-2 font-mono text-slate-200 cursor-pointer hover:text-[#D4AF37] hover:underline transition-colors" 
-                    onClick={() => subscribe(pos.symbol)}
+                <tr
+                  key={`${pos.symbol}-${idx}`}
+                  className={`transition-colors ${pos.pnl > 0 ? 'bg-red-500/10 hover:bg-red-500/20' :
+                      pos.pnl < 0 ? 'bg-green-500/10 hover:bg-green-500/20' :
+                        'bg-slate-700/20 hover:bg-slate-700/40'
+                    }`}
+                >
+                  <td
+                    className="px-2 py-2 font-mono tabular-nums text-slate-200 cursor-pointer hover:text-[#D4AF37] hover:underline transition-colors"
+                    onClick={() => {
+                      subscribe(pos.symbol);
+                      alert('已切換至商品 ' + pos.symbol);
+                    }}
                     title={`點擊切換至 ${pos.symbol}`}
                   >{pos.symbol}</td>
                   <td className={`px-2 py-2 font-extrabold ${pos.direction === 'Buy' ? 'text-red-500' : 'text-green-500'}`}>
@@ -168,12 +178,25 @@ const Panel_Positions: React.FC = () => {
                       {pos.direction === 'Buy' ? '多' : '空'}
                     </span>
                   </td>
-                  <td className="px-2 py-2 text-right font-mono text-slate-300">{pos.qty}</td>
-                  <td className="px-2 py-2 text-right font-mono text-slate-400">{pos.price.toLocaleString()}</td>
-                  <td className={`px-2 py-2 text-right font-mono font-bold ${pos.pnl >= 0 ? 'text-red-500 shadow-red-500/10' : 'text-green-500 shadow-green-500/10'}`}>
+                  <td className="px-2 py-2 text-right font-mono tabular-nums text-slate-300">{pos.qty}</td>
+                  <td className="px-2 py-2 text-right font-mono tabular-nums text-slate-400">{pos.price.toLocaleString()}</td>
+                  <td className={`px-2 py-2 text-right font-mono tabular-nums font-bold ${pos.pnl >= 0 ? 'text-red-500 shadow-red-500/10' : 'text-green-500 shadow-green-500/10'}`}>
                     <span className={pos.pnl !== 0 ? 'drop-shadow-[0_0_8px_rgba(0,0,0,0.5)]' : ''}>
                       {pos.pnl > 0 ? '+' : ''}{pos.pnl.toLocaleString()}
                     </span>
+                  </td>
+                  <td className="px-2 py-2 text-center">
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation(); // 防止觸發列點擊事件
+                        if (window.confirm(`確定要以市價平倉 ${pos.symbol} (數量: ${pos.qty}) 嗎？\n\n警告：此操作將立即送出反向市價單！`)) {
+                          flattenPosition(pos.symbol);
+                        }
+                      }}
+                      className="bg-slate-700 hover:bg-amber-500 hover:text-black text-slate-300 rounded px-2 py-0.5 text-[10px] font-bold transition-all shadow-sm"
+                    >
+                      平倉
+                    </button>
                   </td>
                 </tr>
               ))

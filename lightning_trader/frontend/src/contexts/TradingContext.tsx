@@ -20,6 +20,8 @@ interface TradingContextType {
   accountSummary: AccountSummary; accounts: AccountInfo[]; activeAccount: string | null;
   workingOrders: WorkingOrder[]; setWorkingOrders: React.Dispatch<React.SetStateAction<WorkingOrder[]>>; refreshOrders: () => Promise<void>;
   subscribe: (symbol: string) => void; selectAccount: (accountId: string) => Promise<void>;
+  cancelOrder: (action: 'Buy' | 'Sell', price?: number) => Promise<void>;
+  flattenPosition: (symbol: string) => Promise<void>;
 }
 
 const TradingContext = createContext<TradingContextType | null>(null);
@@ -276,12 +278,35 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, [setTargetSymbol]);
 
+  const cancelOrder = useCallback(async (action: 'Buy' | 'Sell', price?: number) => {
+    try {
+      await apiClient.post('/cancel_all', {
+        symbol: targetSymbolRef.current,
+        action,
+        ...(price !== undefined && { price })
+      });
+      setTimeout(refreshOrders, 500);
+    } catch (err) {
+      console.error('Cancel order failed:', err);
+    }
+  }, [refreshOrders]);
+
+  const flattenPosition = useCallback(async (symbol: string) => {
+    try {
+      await apiClient.post('/flatten', { symbol });
+      setTimeout(refreshOrders, 500);
+    } catch (err) {
+      console.error('Flatten position failed:', err);
+    }
+  }, [refreshOrders]);
+
   return (
     <TradingContext.Provider value={{
       isConnected, isStale, targetSymbol: targetSymbolState, setTargetSymbol,
       quote, bidAsk, quoteHistory, accountSummary, accounts, activeAccount,
       workingOrders, setWorkingOrders, refreshOrders,
       subscribe, selectAccount,
+      cancelOrder, flattenPosition,
     }}>
       {children}
     </TradingContext.Provider>

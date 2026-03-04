@@ -2,10 +2,15 @@
 
 > **規則優先級：** 如果 `design-system/pages/[page-name].md` 存在，該檔案的規則覆蓋本文件。
 
+### 核心交易開發原則 (Core Trading Directives)（強制）
+1. **後端絕對真理 (Strict Backend Truth)**：所有訂單狀態、資金餘額、持倉數量，**必須且只能**由後端 API 或 WebSocket 推送更新。前端禁止實作 Optimistic UI（樂觀預期）去提前扣款或增加持倉，避免在極端行情下產生假資料。下單 API 回傳 200 僅代表「請求送出」，實際狀態必須等 WebSocket 訂單回報。
+2. **雙重防護同步 (Dual-Guard Synchronization)**：報價流走高頻 WebSocket，但訂單與持倉狀態必須實作「主動查詢 (Polling) + 被動接收 (WebSocket)」雙重機制。當 WebSocket 斷線重連後，必須第一時間主動呼叫 API 同步最新帳務狀態，絕不允許出現「漏接一筆回報導致部位算錯」的致命錯誤。
+3. **視覺降噪與聚焦 (Visual Action & Context)**：不要把所有能拿到的資料都塞進畫面。交易員在看盤時視野極度限縮，介面設計必須引導視覺焦點。高頻閃爍的數字只能是當前關注商品的報價；非當前商品的跳動必須降級（例如淡化顏色或只顯示箭頭）。錯誤訊息必須具備「可操作性（Actionable）」，不要只彈出「代碼 500」，要告訴交易員「保證金不足，目前缺額 XXX 元」。
+
 ---
 
 **專案名稱：** LighTrade  
-**版本：** V1.0.10  
+**版本：** V1.0.11  
 **目標：** 開發一套「為當沖極速交易而生」的桌面級金融看盤下單軟體。交易終端 (Dawho × Bloomberg Terminal)  
 **CSS 實作檔：** `frontend/src/index.css`
 

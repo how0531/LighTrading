@@ -45,7 +45,7 @@ const DashboardContent: React.FC = () => {
     return defaultLayouts;
   });
 
-  const handleLayoutChange = (currentLayout: any, allLayouts: any) => {
+  const handleLayoutChange = (_currentLayout: any, allLayouts: any) => {
     setLayouts(allLayouts);
     localStorage.setItem(LAYOUT_KEY, JSON.stringify(allLayouts));
   };
