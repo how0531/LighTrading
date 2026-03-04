@@ -1,12 +1,14 @@
 import React from 'react';
 import { useTradingContext } from '../contexts/TradingContext';
-import { Activity, Settings } from 'lucide-react';
+import { Activity, Settings, Lock, Unlock } from 'lucide-react';
 
 interface HeaderProps {
   onOpenSettings?: () => void;
+  isLayoutLocked?: boolean;
+  onToggleLayoutLock?: () => void;
 }
 
-const Header: React.FC<HeaderProps> = ({ onOpenSettings }) => {
+const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock }) => {
   const { isConnected, targetSymbol, subscribe } = useTradingContext();
   const [symInput, setSymInput] = React.useState(targetSymbol);
 
@@ -44,6 +46,14 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings }) => {
             </button>
           </div>
         </form>
+
+        <button 
+          onClick={onToggleLayoutLock}
+          className={`p-2 rounded-lg transition-all border ${isLayoutLocked ? 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-300' : 'bg-[#D4AF37]/20 text-[#D4AF37] border-[#D4AF37] hover:bg-[#D4AF37]/30 shadow-[0_0_8px_rgba(212,175,55,0.4)]'}`}
+          title={isLayoutLocked ? "解鎖版面配置" : "鎖定並儲存版面"}
+        >
+          {isLayoutLocked ? <Lock className="w-5 h-5" /> : <Unlock className="w-5 h-5" />}
+        </button>
 
         <button 
           onClick={onOpenSettings}

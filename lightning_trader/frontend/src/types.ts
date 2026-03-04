@@ -10,6 +10,7 @@ export interface QuoteData {
   LimitUp?: number;
   LimitDown?: number;
   TickTime: string;
+  TickType?: number;
   Action: string;
 }
 

@@ -17,7 +17,7 @@ interface Account {
 }
 
 const Panel_Positions: React.FC = () => {
-  const { isConnected, accountSummary } = useTradingContext();
+  const { isConnected, accountSummary, subscribe } = useTradingContext();
   const [positions, setPositions] = useState<Position[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<'ALL' | 'Stock' | 'Future'>('ALL');
@@ -58,9 +58,11 @@ const Panel_Positions: React.FC = () => {
   }, [isConnected]);
 
   // 2. 當選擇的帳號改變或 WebSocket 有帳務摘要更新時，更新持倉
+  // 使用 msg_count 作為 dependency，避免每個 tick 都觸發 HTTP 請求
+  const accountMsgCount = accountSummary.msg_count;
   useEffect(() => {
     fetchPositions(selectedAccountId || undefined);
-  }, [selectedAccountId, accountSummary]);
+  }, [selectedAccountId, accountMsgCount]);
 
   // 過濾後的帳號清單
   const filteredAccounts = useMemo(() => {
@@ -129,7 +131,7 @@ const Panel_Positions: React.FC = () => {
           >
             <option value="">所有帳號</option>
             {filteredAccounts.map(acc => (
-              <option key={acc.account_id} value={acc.account_id}>
+              <option key={acc.account_id} value={acc.account_name}>
                 {acc.account_name}
               </option>
             ))}
@@ -156,7 +158,11 @@ const Panel_Positions: React.FC = () => {
             ) : (
               positions.map((pos, idx) => (
                 <tr key={`${pos.symbol}-${idx}`} className="bg-slate-700/20 hover:bg-slate-700/40 transition-colors">
-                  <td className="px-2 py-2 font-mono text-slate-200">{pos.symbol}</td>
+                  <td 
+                    className="px-2 py-2 font-mono text-slate-200 cursor-pointer hover:text-[#D4AF37] hover:underline transition-colors" 
+                    onClick={() => subscribe(pos.symbol)}
+                    title={`點擊切換至 ${pos.symbol}`}
+                  >{pos.symbol}</td>
                   <td className={`px-2 py-2 font-extrabold ${pos.direction === 'Buy' ? 'text-red-500' : 'text-green-500'}`}>
                     <span className={`inline-block px-1 rounded ${pos.direction === 'Buy' ? 'bg-red-500/10' : 'bg-green-500/10'}`}>
                       {pos.direction === 'Buy' ? '多' : '空'}

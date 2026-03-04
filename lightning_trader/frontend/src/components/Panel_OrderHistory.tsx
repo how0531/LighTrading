@@ -38,9 +38,11 @@ const Panel_OrderHistory: React.FC = () => {
     }
   };
 
+  // 使用 msg_count 作為 dependency，避免每個 tick 都觸發 HTTP 請求
+  const accountMsgCount = accountSummary.msg_count;
   useEffect(() => {
     fetchHistory();
-  }, [accountSummary]);
+  }, [accountMsgCount]);
 
   return (
     <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700 h-full flex flex-col">
