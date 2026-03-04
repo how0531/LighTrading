@@ -730,7 +730,11 @@ const DOMPanel: React.FC = () => {
 
                           <span className="z-10 flex items-center justify-center tracking-wider min-w-[3rem] px-2 relative font-mono tabular-nums">
                             {formatPrice(p, targetSymbol)}
-                            {isCostLine && <span className="text-[10px] bg-amber-500/20 text-amber-500 px-1 rounded ml-1 absolute left-full whitespace-nowrap">[COST]</span>}
+                            {isCostLine && (
+                              <span className="text-[10px] bg-amber-500/20 text-amber-500 px-1 rounded ml-1 font-bold whitespace-nowrap border border-amber-500/30">
+                                [COST]
+                              </span>
+                            )}
                           </span>
 
                           {p === highPrice && !isC && <span className="text-[9px] text-red-500 font-bold z-10 absolute right-1">H</span>}
