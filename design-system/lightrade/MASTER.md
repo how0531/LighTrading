@@ -10,7 +10,7 @@
 ---
 
 **專案名稱：** LighTrade  
-**版本：** V1.0.11  
+**版本：** V1.0.12  
 **目標：** 開發一套「為當沖極速交易而生」的桌面級金融看盤下單軟體。交易終端 (Dawho × Bloomberg Terminal)  
 **CSS 實作檔：** `frontend/src/index.css`
 

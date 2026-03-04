@@ -490,13 +490,7 @@ const DOMPanel: React.FC = () => {
               </span>
             </div>
 
-            {/* 成本價位 (Cost) */}
-            <div className={`flex flex-col items-center px-3 py-1 rounded border ${currentPosition?.price ? 'bg-blue-900/20 border-blue-800/50' : 'bg-slate-800 border-slate-700'}`}>
-              <span className="text-[8px] opacity-50 uppercase font-bold text-center">Cost</span>
-              <span className={`text-sm font-mono font-black leading-none tabular-nums ${currentPosition?.price ? 'text-blue-400' : 'text-slate-500'}`}>
-                {currentPosition?.price ? formatPrice(currentPosition.price, targetSymbol) : '--'}
-              </span>
-            </div>
+
 
             <div className={`flex flex-col items-center px-3 py-1 rounded border ${realtimePnL >= 0 ? 'bg-emerald-900/20 border-emerald-800/50' : 'bg-red-900/20 border-red-800/50'}`}>
               <span className="text-[8px] opacity-50 uppercase font-bold text-center">PnL</span>
@@ -696,12 +690,7 @@ const DOMPanel: React.FC = () => {
 
                   return (
                     <tr key={p} data-price={pKey} className={`h-8 transition-none relative ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-[#D4AF37]/10 border-y border-[#D4AF37]/50 box-border') : 'border-b border-slate-800/80'} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''} ${isCostLine ? ((currentPosition?.pnl ?? 0) >= 0 ? 'bg-red-500/15' : 'bg-emerald-500/15') : ''}`}>
-                      {/* 橫跨整列的視覺化持倉成本線 */}
-                      {isCostLine && (
-                        <td colSpan={100} className="absolute inset-0 pointer-events-none z-0">
-                          <div className="absolute top-1/2 left-0 right-0 border-t border-dashed border-[#D4AF37]/50 transform -translate-y-1/2 shadow-[0_0_8px_rgba(212,175,55,0.4)]"></div>
-                        </td>
-                      )}
+
 
                       {/* 刪買 - 傳入 price 做樂觀刪除 */}
                       <td className="border-r border-slate-800 hover:bg-slate-700 cursor-pointer"
@@ -739,10 +728,10 @@ const DOMPanel: React.FC = () => {
                             )
                           )}
 
-                          {isCostLine && <div className="absolute inset-x-0 top-0 bottom-0 border-y border-blue-500/50 bg-blue-500/20 z-0"></div>}
-                          {isCostLine && <span className="text-[9px] px-1 bg-blue-600 text-white rounded-sm z-10 shadow-sm font-bold absolute left-6 border border-blue-400">COST</span>}
-
-                          <span className="z-10 tracking-wider inline-block min-w-[3rem] px-2 relative">{formatPrice(p, targetSymbol)}</span>
+                          <span className="z-10 flex items-center justify-center tracking-wider min-w-[3rem] px-2 relative font-mono tabular-nums">
+                            {formatPrice(p, targetSymbol)}
+                            {isCostLine && <span className="text-[10px] bg-amber-500/20 text-amber-500 px-1 rounded ml-1 absolute left-full whitespace-nowrap">[COST]</span>}
+                          </span>
 
                           {p === highPrice && !isC && <span className="text-[9px] text-red-500 font-bold z-10 absolute right-1">H</span>}
                           {p === lowPrice && !isC && <span className="text-[9px] text-emerald-500 font-bold z-10 absolute right-1">L</span>}
