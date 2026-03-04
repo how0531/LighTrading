@@ -4,6 +4,7 @@ from PyQt5.QtCore import QObject, pyqtSignal, QTimer
 from .config import Config
 import json
 import logging
+import time
 from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -39,17 +40,35 @@ class ShioajiClient(QObject):
         self.reconnect_timer = QTimer(self)
         self.reconnect_timer.timeout.connect(self.check_connection)
         self.reconnect_timer.start(10000) 
+        self.last_message_time = time.time()
         
         # 注意：自動登入已移至 main.py lifespan，避免雙重登入競態
         # 如果需要從 PyQt5 GUI 使用，可在 GUI 中手動呼叫 login()
 
     def check_connection(self):
         if getattr(self, '_is_reconnecting', False): return
+        
+        # 1. 檢查帳戶清單 API 存取
+        api_ok = False
         if self._is_connected:
             try:
                 self.api.list_accounts()
+                api_ok = True
             except Exception as e:
-                logger.warning(f"連線檢查失敗，準備重連: {e}")
+                logger.warning(f"連線檢查失敗 (API 異常)，準備重連: {e}")
+                
+        # 2. 檢查 Watchdog (最後收到行情封包的時間)
+        # 只有在有訂閱合約且處於連線狀態時才檢查，預設 60 秒沒收到任何封包即視為報價中斷
+        watchdog_timeout = 60
+        is_stale = False
+        if api_ok and self.current_contract and self._is_connected:
+            elapsed = time.time() - getattr(self, 'last_message_time', time.time())
+            if elapsed > watchdog_timeout:
+                logger.warning(f"Watchdog 觸發：超過 {watchdog_timeout} 秒未收到報價，疑似靜默斷線 (elapsed={elapsed:.1f}s)")
+                is_stale = True
+
+        if not api_ok or is_stale:
+            if self._is_connected:
                 self._is_connected = False
                 self._attempt_reconnect()
 
@@ -61,6 +80,15 @@ class ShioajiClient(QObject):
         if self.login():
             logger.info("重連成功")
             self._is_reconnecting = False
+            self.last_message_time = time.time() # 重置時間
+            
+            # 重新訂閱原合約
+            if self.current_contract:
+                logger.info(f"重新啟動合約訂閱: {self.current_contract.symbol}")
+                try:
+                    self.subscribe(self.current_contract.symbol)
+                except Exception as e:
+                    logger.error(f"還原合約訂閱失敗: {e}")
         else:
             logger.warning("重連失敗，10 秒後重試")
             QTimer.singleShot(10000, self._do_login_reconnect)
@@ -71,6 +99,7 @@ class ShioajiClient(QObject):
 
         def _on_tick_stk(exchange, tick):
             """股票 Tick 回呼"""
+            self.last_message_time = time.time()
             try:
                 symbol = self.current_contract.symbol if self.current_contract else str(tick.code)
                 q = {
@@ -91,6 +120,7 @@ class ShioajiClient(QObject):
 
         def _on_bidask_stk(exchange, bidask):
             """股票 BidAsk 回呼"""
+            self.last_message_time = time.time()
             try:
                 symbol = self.current_contract.symbol if self.current_contract else str(bidask.code)
                 bp = [float(p) for p in bidask.bid_price]
@@ -112,6 +142,7 @@ class ShioajiClient(QObject):
 
         def _on_tick_fop(exchange, tick):
             """期貨/選擇權 Tick 回呼"""
+            self.last_message_time = time.time()
             try:
                 symbol = self.current_contract.symbol if self.current_contract else str(tick.code)
                 q = {
@@ -132,6 +163,7 @@ class ShioajiClient(QObject):
 
         def _on_bidask_fop(exchange, bidask):
             """期貨/選擇權 BidAsk 回呼"""
+            self.last_message_time = time.time()
             try:
                 symbol = self.current_contract.symbol if self.current_contract else str(bidask.code)
                 bp = [float(p) for p in bidask.bid_price]
@@ -157,6 +189,34 @@ class ShioajiClient(QObject):
         self.api.quote.set_on_tick_fop_v1_callback(_on_tick_fop)
         self.api.quote.set_on_bidask_fop_v1_callback(_on_bidask_fop)
         logger.info("✅ 已註冊 v1 報價回呼 (STK + FOP Tick/BidAsk)")
+
+        # Fallback: 舊版 dict 報價回呼 (某些期貨 BidAsk 只有這個有反應)
+        def _on_quote_dict(topic, quote):
+            self.last_message_time = time.time()
+            try:
+                # 簡單轉換後交給 _direct_quote_callback
+                if isinstance(quote, dict):
+                    # 擷取原始的 Symbol
+                    original_symbol = quote.get("Symbol")
+                    if not original_symbol:
+                        parts = topic.split('/')
+                        if len(parts) >= 4:
+                            original_symbol = parts[3]
+                    
+                    if not original_symbol or not self.current_contract:
+                        return
+                        
+                    # 只有當報價的合約確實是我們當前訂閱的合約(包含 code 或 symbol 匹配)時，才進行覆寫與廣播
+                    if (original_symbol == self.current_contract.symbol or 
+                        original_symbol == self.current_contract.code):
+                        quote["Symbol"] = self.current_contract.symbol
+                        if self._direct_quote_callback:
+                            self._direct_quote_callback(quote)
+            except Exception as e:
+                logger.error(f"Fallback 報價回呼錯誤: {e}")
+
+        self.api.quote.set_quote_callback(_on_quote_dict)
+        logger.info("✅ 已註冊 Fallback 報價回呼 (set_quote_callback)")
 
         def on_order_status(state, msg: dict):
             self.signal_order_update.emit(msg)
@@ -299,6 +359,7 @@ class ShioajiClient(QObject):
     def subscribe(self, symbol: str) -> str:
         contract = self.get_contract(symbol)
         if not contract: return ""
+        logger.info(f"🎯 成功取得合約: symbol={getattr(contract, 'symbol', None)}, code={getattr(contract, 'code', None)}, name={getattr(contract, 'name', None)}")
         if self.current_contract:
             try:
                 self.api.quote.unsubscribe(self.current_contract, QuoteType.Tick)

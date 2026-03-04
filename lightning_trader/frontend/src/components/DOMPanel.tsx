@@ -54,10 +54,9 @@ const getMultiplier = (symbol: string): number => {
 const DOMPanel: React.FC = () => {
   const context = useTradingContext();
   const { 
-    quote, bidAsk, targetSymbol, accountSummary, 
+    quote, bidAsk, targetSymbol, accountSummary, isStale,
     accounts = [], activeAccount, selectAccount = async () => {} 
   } = context;
-
   const [orderValue, setOrderValue] = useState(1);
   const [orderType, setOrderType] = useState('ROD');
   const [calcAmount, setCalcAmount] = useState<number | ''>('');
@@ -114,7 +113,7 @@ const DOMPanel: React.FC = () => {
   // Debug Log: 追蹤資料進來的情況
   useEffect(() => {
     if (bData && bData.Symbol) {
-      console.log(`[DOMPanel] BidAsk updated for ${bData.Symbol}:`, bData);
+      // console.log(`[DOMPanel] BidAsk updated for ${bData.Symbol}:`, bData);
     }
   }, [bData]);
 
@@ -211,7 +210,7 @@ const DOMPanel: React.FC = () => {
     return currentPosition.backendPnl || 0;
   }, [currentPrice, refPrice, currentPosition, netQty, targetSymbol]);
 
-  // --- ★ 核心：漲停→跌停完整價格表 ---
+  // --- ★ 核心：以當前價為中心展開 500 檔價格 ---
   const fullPrices = useMemo(() => {
     // 需要至少有 reference price 才能算
     const base = currentPrice || refPrice;
@@ -221,15 +220,26 @@ const DOMPanel: React.FC = () => {
     const down = limitDown > 0 ? limitDown : round2(base * 0.9);
     const sym = targetSymbol || '';
 
-    const prices: number[] = [];
-    let p = up;
-    // 從漲停往下逐 tick 算到跌停（最多 500 檔防無限迴圈）
-    while (p >= down && prices.length < 500) {
-      prices.push(p);
-      const tick = getTickSize(p, sym);
-      p = round2(p - tick);
+    // 往上推 250 檔
+    const upper: number[] = [];
+    let pUp = base;
+    while (pUp <= up && upper.length < 250) {
+      const tick = getTickSize(pUp, sym);
+      pUp = round2(pUp + tick);
+      if (pUp <= up) upper.push(pUp);
     }
-    return prices;
+    upper.reverse();
+
+    // 往下推 250 檔 (包含 base 本身)
+    const lower: number[] = [base];
+    let pDown = base;
+    while (pDown >= down && lower.length < 250) {
+      const tick = getTickSize(pDown, sym);
+      pDown = round2(pDown - tick);
+      if (pDown >= down) lower.push(pDown);
+    }
+
+    return [...upper, ...lower];
   }, [currentPrice, refPrice, limitUp, limitDown, targetSymbol]);
 
   // --- 自動捲動到當前價（首次載入或手動觸發） ---
@@ -339,7 +349,7 @@ const DOMPanel: React.FC = () => {
 
   // --- 下單（含回饋，用 ref 追蹤 pending 避免 stale closure） ---
   const handlePlaceOrder = useCallback(async (price: number, action: 'Buy' | 'Sell') => {
-    if (isOrderPendingRef.current) return;
+    if (isOrderPendingRef.current || isStale) return;
     isOrderPendingRef.current = true;
     setOrderFeedback({ price, action, status: 'pending' });
     if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
@@ -490,6 +500,24 @@ const DOMPanel: React.FC = () => {
                         </span>
                     </div>
                 )}
+                
+                {/* 每日漲跌停限價 顯示 */}
+                {limitUp > 0 && (
+                    <div className="flex flex-col items-center px-2 py-1 rounded border border-red-900/50 bg-red-950/30">
+                        <span className="text-[8px] font-bold text-red-500/70 uppercase tracking-wider">漲停</span>
+                        <span className="text-[12px] font-mono font-black tabular-nums leading-none text-red-500">
+                            {formatPrice(limitUp, targetSymbol)}
+                        </span>
+                    </div>
+                )}
+                {limitDown > 0 && (
+                    <div className="flex flex-col items-center px-2 py-1 rounded border border-emerald-900/50 bg-emerald-950/30">
+                        <span className="text-[8px] font-bold text-emerald-500/70 uppercase tracking-wider">跌停</span>
+                        <span className="text-[12px] font-mono font-black tabular-nums leading-none text-emerald-500">
+                            {formatPrice(limitDown, targetSymbol)}
+                        </span>
+                    </div>
+                )}
                 <div className={`px-2 py-1 rounded-md border ${isSimulation ? 'border-yellow-600/50 bg-yellow-900/20' : 'border-emerald-600/50 bg-emerald-900/20'}`}>
                     <p className={`text-[10px] font-black ${isSimulation ? 'text-yellow-500' : 'text-emerald-500'}`}>{isSimulation ? 'SIM' : 'LIVE'}</p>
                 </div>
@@ -610,7 +638,7 @@ const DOMPanel: React.FC = () => {
               <th className="py-2 font-normal w-[10%] opacity-70">刪賣</th>
             </tr>
           </thead>
-          <tbody>
+          <tbody className={`transition-all duration-500 ${isStale ? 'opacity-60' : ''}`}>
             {(() => {
               // 大單判定移到迴圈外，只算一次
               const tradeVol = qData.Volume ?? 0;
@@ -663,7 +691,7 @@ const DOMPanel: React.FC = () => {
 
                   {/* 委買量 (含 Δ買) */}
                   <td className="relative border-r border-slate-800 text-red-400 font-medium bg-red-950/20 overflow-hidden">
-                      <div className="absolute inset-y-0.5 right-0 bg-gradient-to-l from-red-600/30 to-red-600/5 transition-all" style={{ width: `${bWidth}%` }}></div>
+                      <div className="absolute inset-y-0.5 right-0 bg-gradient-to-l from-red-600/5 to-red-600/30 transition-all" style={{ width: `${bWidth}%` }}></div>
                       <div className="relative z-10 flex justify-between items-center px-2">
                         <span className={`text-[9px] font-bold ${diffBv > 0 ? 'text-red-400' : 'text-slate-500'}`}>{diffBv !== 0 ? (diffBv > 0 ? `+${diffBv}` : diffBv) : ''}</span>
                         <span>{bv || ''}</span>
@@ -673,8 +701,8 @@ const DOMPanel: React.FC = () => {
                   {/* 價格 (含最新單筆成交量) */}
                   <td className={`font-black border-r border-slate-800 text-[13px] overflow-hidden ${isC ? 'bg-[#D4AF37] text-black shadow-[inset_0_0_12px_rgba(212,175,55,0.3)]' : isLimitUp ? 'text-red-400 bg-red-950/30' : isLimitDown ? 'text-emerald-400 bg-emerald-950/30' : (p > refPrice ? 'text-red-500 bg-slate-900/40' : p < refPrice ? 'text-emerald-500 bg-slate-900/40' : 'text-slate-300 bg-slate-900/40')}`}>
                       <div className="flex items-center justify-center gap-1 relative w-full h-full text-center">
-                          {isLimitUp && !isC && <span className="text-[8px] text-red-500 font-bold z-10 absolute left-1">▲</span>}
-                          {isLimitDown && !isC && <span className="text-[8px] text-emerald-500 font-bold z-10 absolute left-1">▼</span>}
+                          {isLimitUp && !isC && <div className="absolute top-0 right-0 text-[9px] leading-tight text-white bg-red-600 px-1 py-0.5 rounded-bl font-bold z-20 shadow-md transform">漲停</div>}
+                          {isLimitDown && !isC && <div className="absolute bottom-0 right-0 text-[9px] leading-tight text-white bg-emerald-600 px-1 py-0.5 rounded-tl font-bold z-20 shadow-md transform">跌停</div>}
                           
                           {/* 成交明細 (TickType: 1=外盤/紅/右，2=內盤/綠/左) */}
                           {isC && tradeVol > 0 && (
@@ -697,7 +725,7 @@ const DOMPanel: React.FC = () => {
                   
                   {/* 委賣量 (含 Δ賣) */}
                   <td className="relative border-r border-slate-800 text-emerald-400 font-medium bg-emerald-950/20 overflow-hidden">
-                      <div className="absolute inset-y-0.5 left-0 bg-gradient-to-r from-emerald-600/30 to-emerald-600/5 transition-all" style={{ width: `${aWidth}%` }}></div>
+                      <div className="absolute inset-y-0.5 left-0 bg-gradient-to-r from-emerald-600/5 to-emerald-600/30 transition-all" style={{ width: `${aWidth}%` }}></div>
                       <div className="relative z-10 flex justify-between items-center px-2">
                         <span>{av || ''}</span>
                         <span className={`text-[9px] font-bold ${diffAv > 0 ? 'text-emerald-400' : 'text-slate-500'}`}>{diffAv !== 0 ? (diffAv > 0 ? `+${diffAv}` : diffAv) : ''}</span>

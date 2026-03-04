@@ -12,7 +12,7 @@ interface AccountInfo {
   account_id: string; category: string; person_id: string; broker_id: string; account_name: string;
 }
 interface TradingContextType {
-  isConnected: boolean; targetSymbol: string; setTargetSymbol: (sym: string) => void;
+  isConnected: boolean; isStale: boolean; targetSymbol: string; setTargetSymbol: (sym: string) => void;
   quote: QuoteData | null; bidAsk: BidAskData | null; quoteHistory: QuoteData[];
   accountSummary: AccountSummary; accounts: AccountInfo[]; activeAccount: string | null;
   subscribe: (symbol: string) => void; selectAccount: (accountId: string) => Promise<void>;
@@ -23,6 +23,7 @@ const initialSummary: AccountSummary = { "當日交易": 0, "參考損益": 0, p
 
 export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
+  const [isStale, setIsStale] = useState(false);
   const [targetSymbolState, setTargetSymbolState] = useState('2330');
   const targetSymbolRef = useRef('2330');
 
@@ -42,6 +43,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const reconnectDelayRef = useRef(1000);
   const isUnmounted = useRef(false);
   const isSwitchingAccountRef = useRef(false);
+  const lastMessageTimeRef = useRef<number>(Date.now());
 
   // 穩定的 quote 緩衝區
   const latestQuoteRef = useRef<QuoteData | null>(null);
@@ -78,6 +80,24 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }, 100);
     return () => clearInterval(timer);
   }, []);
+
+  // 檢查是否假死 (Stale) - 每秒檢查一次
+  useEffect(() => {
+    const timer = setInterval(() => {
+      // 只有在已連線的狀態下才判斷是否假死
+      if (!isConnected) {
+        if (isStale) setIsStale(false);
+        return;
+      }
+      const elapsed = Date.now() - lastMessageTimeRef.current;
+      if (elapsed > 5000 && !isStale) {
+        setIsStale(true);
+      } else if (elapsed <= 5000 && isStale) {
+        setIsStale(false);
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [isConnected, isStale]);
 
   // 防禦性合併 Quote（僅更新非零欄位，保留 Snapshot 靜態資料）
   const mergeQuote = useCallback((incoming: Partial<QuoteData>) => {
@@ -124,24 +144,29 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const sym = targetSymbolRef.current;
       ws.send(JSON.stringify({ action: 'subscribe', symbol: sym }));
       console.log(`[WS] 連線成功，訂閱 ${sym}`);
+      lastMessageTimeRef.current = Date.now();
     };
 
     ws.onmessage = (event) => {
       try {
+        lastMessageTimeRef.current = Date.now();
+        if (isStale) setIsStale(false);
+
         const data = JSON.parse(event.data);
         const isMatch = (payload: any): boolean => {
           if (!payload?.Symbol) return true;
           const sym = String(payload.Symbol).trim().toUpperCase();
           const target = targetSymbolRef.current.trim().toUpperCase();
-          // 完全相等，或者期貨別名：如 TXFR1 匹配訂閱的 TXF、MXF 匹配 MXF*
-          return sym === target || sym.startsWith(target);
+          return sym === target;
         };
 
         if (data.type === 'Tick' && data.data && isMatch(data.data)) {
           mergeQuote(data.data as Partial<QuoteData>);
-        } else if (data.type === 'BidAsk' && data.data && isMatch(data.data)) {
-          latestBidAskRef.current = data.data as BidAskData;
-          bidaskDirtyRef.current = true;
+        } else if (data.type === 'BidAsk' && data.data) {
+          if (isMatch(data.data)) {
+            latestBidAskRef.current = data.data as BidAskData;
+            bidaskDirtyRef.current = true;
+          }
         } else if (data.type === 'AccountUpdate' && data.data) {
           pendingAccountRef.current = data.data;
         } else if (data.action === 'subscribe' && data.status === 'success') {
@@ -218,7 +243,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   return (
     <TradingContext.Provider value={{
-      isConnected, targetSymbol: targetSymbolState, setTargetSymbol,
+      isConnected, isStale, targetSymbol: targetSymbolState, setTargetSymbol,
       quote, bidAsk, quoteHistory, accountSummary, accounts, activeAccount,
       subscribe, selectAccount,
     }}>

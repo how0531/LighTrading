@@ -131,7 +131,7 @@ const Panel_Positions: React.FC = () => {
           >
             <option value="">所有帳號</option>
             {filteredAccounts.map(acc => (
-              <option key={acc.account_id} value={acc.account_id}>
+              <option key={acc.account_id} value={acc.account_name}>
                 {acc.account_name}
               </option>
             ))}

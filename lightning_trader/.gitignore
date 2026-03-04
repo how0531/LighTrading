@@ -17,3 +17,7 @@ backend/test_*.py
 backend/dump_*.py
 backend/intercept_*.py
 backend/print_*.py
+
+# Windows 保留裝置名稱
+nul
+*.stackdump

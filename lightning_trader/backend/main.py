@@ -552,9 +552,9 @@ async def get_order_history(account_id: str = None):
                 "action": "Buy" if t.order.action == Action.Buy else "Sell",
                 "price": float(t.order.price),
                 "qty": t.order.quantity,
-                "status": t.status.status.name,
-                "filled_qty": t.status.filled_quantity,
-                "filled_avg_price": float(t.status.filled_avg_price)
+                "status": t.status.status.name if hasattr(t.status, 'status') else getattr(t.status, 'name', 'Unknown'),
+                "filled_qty": getattr(t.status, 'deal_quantity', getattr(t.status, 'filled_quantity', 0)),
+                "filled_avg_price": float(getattr(t.status, 'deal_price', getattr(t.status, 'filled_avg_price', 0)))
             })
         # 依照時間反序排序 (最新在前面)
         trade_list.sort(key=lambda x: x['time'], reverse=True)
