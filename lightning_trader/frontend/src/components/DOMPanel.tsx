@@ -6,17 +6,26 @@ import { useSettings } from '../contexts/SettingsContext';
 import { splitOrders, randomDelay } from '../utils/splitOrder';
 import type { QuoteData, BidAskData } from '../types';
 
-// --- 台灣證交所正確 Tick 級距表 ---
+// --- 台灣與海外期權正確 Tick 級距表 ---
 const getTickSize = (price: number, symbol: string): number => {
   const sym = symbol.toUpperCase();
-  // 期貨合約：台指期(TXF/MXF)跳動單位固定 1 點
+  // 台指期
   if (sym.startsWith('TXF') || sym.startsWith('MXF') || sym.startsWith('TX') || sym.startsWith('MX')) return 1;
+  // 小道瓊(UD), 微道瓊(MYM) 跳動為 1
+  if (sym.startsWith('UD') || sym.startsWith('MYM')) return 1;
+  // 小那斯達克(NQ), 微那斯達克(MNQ) 跳動為 0.25 (為求 DOM 顯示簡化，可能需依需求調整，這裡先標 0.25)
+  if (sym.startsWith('NQ') || sym.startsWith('MNQ')) return 0.25;
+  // 小S&P(ES), 微S&P(MES) 跳動為 0.25
+  if (sym.startsWith('ES') || sym.startsWith('MES')) return 0.25;
+
   // 股票跳價級距（台灣證交所規定）
   if (price < 10) return 0.01;
   if (price < 50) return 0.05;
   if (price < 100) return 0.10;
   if (price < 500) return 0.50;
   if (price < 1000) return 1.00;
+  // 如果是 1000 以上的期貨但未列入上方名單，預設改為 1 避免 DOM 變形（台股很少上千，期貨常上千）
+  if (price >= 10000) return 1.00; 
   return 5.00;
 };
 
@@ -26,19 +35,31 @@ const round2 = (n: number): number => Math.round(n * 100) / 100;
 // 格式化價格小數位數
 const formatPrice = (price: number, symbol: string): string => {
   const sym = symbol.toUpperCase();
-  if (sym.startsWith('TXF') || sym.startsWith('MXF') || sym.startsWith('TX') || sym.startsWith('MX')) {
+  if (sym.startsWith('TXF') || sym.startsWith('MXF') || sym.startsWith('TX') || sym.startsWith('MX') || sym.startsWith('UD') || sym.startsWith('MYM')) {
     return price.toFixed(0);
+  }
+  if (sym.startsWith('NQ') || sym.startsWith('MNQ') || sym.startsWith('ES') || sym.startsWith('MES')) {
+    return price.toFixed(2);
   }
   if (price >= 1000) return price.toFixed(0);
   if (price >= 100) return price.toFixed(1);
   return price.toFixed(2);
 };
 
-// 商品乘數：股票=1000, 大台=200, 小台=50
+// 商品乘數：股票=1000, 大台=200, 小台=50, 海期依照不同商品變化
 const getMultiplier = (symbol: string): number => {
   const sym = symbol.toUpperCase();
   if (sym.startsWith('MXF') || sym.includes('小台')) return 50;
   if (sym.startsWith('TXF') || sym.includes('大台')) return 200;
+  // 海期微型
+  if (sym.startsWith('MYM') || sym.startsWith('MYM')) return 0.5; // 微道瓊 USD 0.5
+  if (sym.startsWith('MNQ')) return 2; // 微那斯達克 USD 2
+  if (sym.startsWith('MES')) return 5; // 微標普 USD 5
+  // 海期小型
+  if (sym.startsWith('UD')) return 5; // 小道瓊 USD 5
+  if (sym.startsWith('NQ')) return 20; // 小那斯達克 USD 20
+  if (sym.startsWith('ES')) return 50; // 小標普 USD 50
+  
   return 1000;
 };
 
