@@ -28,7 +28,7 @@ if not QCoreApplication.instance():
 from core.shioaji_client import ShioajiClient
 from core.config import Config
 from core import create_trading_engine, TradingEngine
-from shioaji.constant import Action, OrderType
+from shioaji.constant import Action, OrderType, StockPriceType, FuturesPriceType, StockOrderLot, StockOrderCond
 
 # 活躍的 WebSocket 連接 (使用 set 以獲得 O(1) 的 discard 效能)
 active_connections: set[WebSocket] = set()
@@ -214,9 +214,16 @@ def on_shioaji_quote(quote_data: dict):
             if lu > 0: tick_data["LimitUp"] = lu
             if ld > 0: tick_data["LimitDown"] = ld
             
-            # 對於 Fallback dict，只有成交（有價格/量或靜態資料變化）我們才發
+            # 對對於 Fallback dict，只有成交（有價格/量或靜態資料變化）我們才發
             if p_val > 0 or ref > 0 or v_val > 0:
                 items_to_send.append({"type": "Tick", "data": tick_data})
+                
+            # 發送給 EventBus 供洗價引擎 (SmartOrderEngine) 使用
+            if p_val > 0:
+                try:
+                    engine.event_bus.on_tick.emit(symbol, tick_data)
+                except Exception as e:
+                    logger.error(f"EventBus emit on_tick error: {e}")
 
         # 使用 fastapi_loop 進行執行緒安全的操作
         for quote_item in items_to_send:
@@ -267,10 +274,23 @@ def on_shioaji_trade_update(trade_data: dict):
     except Exception as e:
         logger.error(f"廣播交易回報時發生錯誤: {e}")
 
+def on_smart_order_update(order_data: dict):
+    """
+    接收 SmartOrderEngine 的智慧單更新。
+    """
+    try:
+        msg_item = {"type": "SmartOrderUpdate", "data": order_data}
+        if fastapi_loop:
+            fastapi_loop.call_soon_threadsafe(quotes_to_broadcast.put_nowait, msg_item)
+    except Exception as e:
+        logger.error(f"廣播智慧單回報時發生錯誤: {e}")
+
 # 帳戶/訂單訊號仍使用 Qt Signal（低頻，不影響效能）
 shioaji_client.signal_account_update.connect(on_shioaji_account_update)
 shioaji_client.signal_order_update.connect(on_shioaji_order_update)
 shioaji_client.signal_trade_update.connect(on_shioaji_trade_update)
+engine.event_bus.on_smart_order_added.connect(on_smart_order_update)
+engine.event_bus.on_smart_order_triggered.connect(on_smart_order_update)
 
 # 註冊直接回呼 (繞過 Qt signal，確保 uvicorn 環境下即時串流)
 shioaji_client._direct_quote_callback = on_shioaji_quote
@@ -439,6 +459,9 @@ class PlaceOrderRequest(BaseModel):
     action: str  # "Buy" 或 "Sell"
     qty: int
     order_type: str = "ROD"
+    price_type: str = "LMT"
+    order_cond: str = "Cash"
+    order_lot: str = "Common"
 
 
 @app.post("/api/login")
@@ -550,11 +573,25 @@ async def place_order(req: PlaceOrderRequest):
     下單後回傳已確認的活躍委託快照，確保前端同步。
     """
     action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
-    order_type_val = OrderType.ROD
-    if req.order_type.upper() == "IOC":
-        order_type_val = OrderType.IOC
-    elif req.order_type.upper() == "FOK":
-        order_type_val = OrderType.FOK
+    
+    order_type_map = {"ROD": OrderType.ROD, "IOC": OrderType.IOC, "FOK": OrderType.FOK}
+    order_type_val = order_type_map.get(req.order_type.upper(), OrderType.ROD)
+    
+    stock_price_type_map = {"LMT": StockPriceType.LMT, "MKT": StockPriceType.MKT, "MKP": StockPriceType.MKP}
+    futures_price_type_map = {"LMT": FuturesPriceType.LMT, "MKT": FuturesPriceType.MKT, "MKP": FuturesPriceType.MKP}
+    
+    order_cond_map = {"Cash": StockOrderCond.Cash, "MarginTrading": StockOrderCond.MarginTrading, "ShortSelling": StockOrderCond.ShortSelling}
+    order_cond_val = order_cond_map.get(req.order_cond, StockOrderCond.Cash)
+    
+    order_lot_map = {"Common": StockOrderLot.Common, "Odd": StockOrderLot.Odd, "IntradayOdd": StockOrderLot.IntradayOdd, "Fixing": StockOrderLot.Fixing}
+    order_lot_val = order_lot_map.get(req.order_lot, StockOrderLot.Common)
+    
+    # 判斷商品類型以決定 PriceType
+    price_type_val = None
+    if len(req.symbol) == 4 and req.symbol.isdigit(): # 簡單判斷股票
+        price_type_val = stock_price_type_map.get(req.price_type.upper(), StockPriceType.LMT)
+    else:
+        price_type_val = futures_price_type_map.get(req.price_type.upper(), FuturesPriceType.LMT)
 
     trade = await run_in_qt_thread(
         shioaji_client.place_order,
@@ -562,7 +599,10 @@ async def place_order(req: PlaceOrderRequest):
         price=req.price,
         action=action_val,
         qty=req.qty,
-        order_type=order_type_val
+        order_type=order_type_val,
+        price_type=price_type_val,
+        order_lot=order_lot_val,
+        order_cond=order_cond_val
     )
 
     if trade:
@@ -612,18 +652,46 @@ async def update_order(req: UpdateOrderRequest):
 @app.post("/api/add_smart_order")
 async def add_smart_order(req: SmartOrderRequest):
     """
-    新增智慧單 (本地監控)。
+    新增智慧單 (本地監控)，交由 SmartOrderEngine 洗價。
     """
-    action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
-    await run_in_qt_thread(
-        shioaji_client.add_smart_order,
-        symbol=req.symbol,
-        action=action_val,
-        qty=req.qty,
-        stop_price=req.stop_price,
-        trailing_offset=req.trailing_offset
-    )
+    action_val = "Buy" if req.action.lower() == "buy" else "Sell"
+    if req.trailing_offset > 0:
+        await run_in_qt_thread(
+            engine.smart_order_engine.add_trailing_stop,
+            symbol=req.symbol,
+            action=action_val,
+            qty=req.qty,
+            trailing_offset=req.trailing_offset
+        )
+    else:
+        # 基本停損：多頭停損(賣)條件為跌破 <= (price_lte)，空頭停損(買)條件為突破 >= (price_gte)
+        cond = "price_lte" if action_val == "Sell" else "price_gte"
+        await run_in_qt_thread(
+            engine.smart_order_engine.add_mit,
+            symbol=req.symbol,
+            action=action_val,
+            qty=req.qty,
+            trigger_price=req.stop_price,
+            condition=cond
+        )
     return {"status": "success", "message": "智慧單已設定"}
+
+@app.get("/api/smart_orders")
+async def get_smart_orders(symbol: str = None):
+    """取得本地端啟用的智慧單"""
+    return engine.smart_order_engine.get_active_orders(symbol)
+
+class CancelSmartOrderRequest(BaseModel):
+    order_id: str
+
+@app.post("/api/cancel_smart_order")
+async def cancel_smart_order(req: CancelSmartOrderRequest):
+    """取消指定的智慧單"""
+    success = engine.smart_order_engine.cancel(req.order_id)
+    if success:
+        return {"status": "success", "message": "智慧單已取消"}
+    else:
+        raise HTTPException(status_code=400, detail="找不到該智慧單或無法取消")
 
 @app.get("/api/volume_profile")
 async def get_volume_profile(symbol: str):
@@ -762,6 +830,7 @@ async def get_order_history(account_id: str = None):
                 "price": float(t.order.price),
                 "qty": t.order.quantity,
                 "status": t.status.status.name if hasattr(t.status, 'status') else getattr(t.status, 'name', 'Unknown'),
+                "failed_msg": getattr(t.status, 'msg', getattr(t.status, 'details', '')),
                 "filled_qty": getattr(t.status, 'deal_quantity', getattr(t.status, 'filled_quantity', 0)),
                 "filled_avg_price": float(
                     # 1. 優先查 deals 計算的均價（最準）

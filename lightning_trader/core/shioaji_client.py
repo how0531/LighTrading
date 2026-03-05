@@ -460,7 +460,7 @@ class ShioajiClient(QObject):
             logger.warning(f"subscribe_background {symbol} 失敗: {e}")
             return False
 
-    def place_order(self, symbol: str, price: float, action: Action, qty: int, order_type: OrderType = OrderType.ROD, price_type=None):
+    def place_order(self, symbol: str, price: float, action: Action, qty: int, order_type: OrderType = OrderType.ROD, price_type=None, order_lot=None, order_cond=None):
         contract = self.get_contract(symbol)
         if not contract:
             logger.warning(f"place_order: 找不到合約 {symbol}")
@@ -469,9 +469,30 @@ class ShioajiClient(QObject):
         if not account:
             logger.warning(f"place_order: 沒有可用帳號 (security_type={contract.security_type})")
             return None
+            
+        # 決定預設 price_type
         if price_type is None:
-            price_type = (StockPriceType.LMT if price > 0 else StockPriceType.MKT) if contract.security_type == 'STK' else (FuturesPriceType.LMT if price > 0 else FuturesPriceType.MKT)
-        order = self.api.Order(price=price if price > 0 else 0, quantity=qty, action=action, price_type=price_type, order_type=order_type, account=account)
+            if contract.security_type == 'STK':
+                price_type = StockPriceType.LMT if price > 0 else StockPriceType.MKT
+            else:
+                price_type = FuturesPriceType.LMT if price > 0 else FuturesPriceType.MKT
+
+        # 組合參數
+        order_kwargs = {
+            "price": price if price > 0 else 0,
+            "quantity": qty,
+            "action": action,
+            "price_type": price_type,
+            "order_type": order_type,
+            "account": account
+        }
+        
+        # 股票專屬參數
+        if contract.security_type == 'STK':
+            order_kwargs["order_lot"] = order_lot or StockOrderLot.Common
+            order_kwargs["order_cond"] = order_cond or StockOrderCond.Cash
+
+        order = self.api.Order(**order_kwargs)
         try:
             return self.api.place_order(contract, order)
         except Exception as e:
@@ -530,7 +551,12 @@ class ShioajiClient(QObject):
             logger.error(f"update_status 失敗: {e}")
 
     def update_order(self, symbol: str, action: Action, old_price: float, new_price: float, qty: int = None) -> bool:
-        """改單：找到符合的委託並修改價格"""
+        """改單：找到符合的委託並修改價格或減量
+        
+        Shioaji API 正確用法:
+          改價: api.update_order(trade=trade, price=new_price)
+          減量: api.update_order(trade=trade, qty=new_qty)
+        """
         try:
             trades = self.api.list_trades()
             for trade in trades:
@@ -538,11 +564,27 @@ class ShioajiClient(QObject):
                     trade.order.action == action and
                     float(trade.order.price) == old_price and
                     trade.status.status.name in ['PendingSubmit', 'PreSubmitted', 'Submitted']):
-                    trade.order.price = new_price
-                    if qty is not None:
-                        trade.order.quantity = qty
-                    self.api.update_order(trade)
-                    logger.info(f"改單成功: {symbol} {old_price} -> {new_price}")
+                    
+                    # 依據是否改價/減量，選擇適當的 API 呼叫
+                    price_changed = abs(new_price - old_price) > 0.001
+                    qty_changed = qty is not None and qty != trade.order.quantity
+                    
+                    if price_changed and qty_changed:
+                        # 同時改價與減量：先改價，再減量
+                        self.api.update_order(trade=trade, price=new_price)
+                        time.sleep(0.2)
+                        self.api.update_order(trade=trade, qty=qty)
+                        logger.info(f"改單(價+量)成功: {symbol} price {old_price} -> {new_price}, qty -> {qty}")
+                    elif price_changed:
+                        self.api.update_order(trade=trade, price=new_price)
+                        logger.info(f"改價成功: {symbol} {old_price} -> {new_price}")
+                    elif qty_changed:
+                        self.api.update_order(trade=trade, qty=qty)
+                        logger.info(f"減量成功: {symbol} qty -> {qty}")
+                    else:
+                        logger.warning(f"update_order: 價格與數量均無變更，跳過")
+                        return False
+                    
                     QTimer.singleShot(500, self.trigger_account_update)
                     return True
             logger.warning(f"update_order: 找不到符合的委託 {symbol} {action} @{old_price}")

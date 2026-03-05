@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { getOrderHistory } from '../api/client';
+import { getOrderHistory, apiClient } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
 
 interface Trade {
@@ -11,15 +11,37 @@ interface Trade {
   status: string;
   filled_qty: number;
   filled_avg_price: number;
+  failed_msg?: string;
 }
+
+const translateFailedMsg = (msg: string | undefined): string => {
+  if (!msg) return '系統退單';
+  const lowerMsg = msg.toLowerCase();
+  if (lowerMsg.includes('margin') || lowerMsg.includes('balance') || lowerMsg.includes('insufficient')) return '餘額不足';
+  if (lowerMsg.includes('inventory') || lowerMsg.includes('position')) return '庫存錯誤';
+  if (lowerMsg.includes('range') || lowerMsg.includes('price error')) return '價格限制';
+  if (lowerMsg.includes('session') || lowerMsg.includes('time')) return '非交易時間';
+  if (lowerMsg.includes('day trade') || lowerMsg.includes('control limit')) return '額度受限';
+  if (lowerMsg.includes('not supported') || lowerMsg.includes('invalid')) return '條件錯誤';
+  return '系統退單';
+};
 
 const getBadgeStyle = (status: string) => {
   const baseStyle = "border rounded px-1.5 py-0.5 text-[10px] whitespace-nowrap";
-  if (status === 'Filled') return `${baseStyle} bg-green-500/20 text-green-400 border-green-500/30`;
-  if (status === 'Cancelled') return `${baseStyle} bg-slate-500/20 text-slate-400 border-slate-500/30`;
-  if (['PendingSubmit', 'PreSubmitted', 'Submitted'].includes(status)) return `${baseStyle} bg-yellow-500/20 text-yellow-400 border-yellow-500/30`;
+  if (status === 'Filled') return `${baseStyle} bg-slate-600/30 text-slate-300 border-slate-600/50`;
+  if (status === 'Cancelled') return `${baseStyle} bg-slate-500/10 text-slate-500 border-slate-500/20`;
+  if (['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(status)) return `${baseStyle} bg-yellow-500/20 text-yellow-400 border-yellow-500/30`;
   if (['Failed', 'Rejected'].includes(status)) return `${baseStyle} bg-red-500/20 text-red-400 border-red-500/30`;
-  return `${baseStyle} bg-slate-500/20 text-slate-100 border-slate-500/30`;
+  return `${baseStyle} bg-slate-500/20 text-slate-400 border-slate-500/30`;
+};
+
+const formatStatusText = (status: string, failedMsg?: string): string => {
+  if (status === 'Filled') return '已成交';
+  if (status === 'Cancelled') return '已刪單';
+  if (['PendingSubmit', 'PreSubmitted', 'Submitted'].includes(status)) return '委託中';
+  if (status === 'PartFilled') return '部分成交';
+  if (['Failed', 'Rejected'].includes(status)) return translateFailedMsg(failedMsg);
+  return status;
 };
 
 const Panel_OrderHistory: React.FC = () => {
@@ -39,6 +61,33 @@ const Panel_OrderHistory: React.FC = () => {
       console.error("Failed to fetch order history:", err);
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const handleUpdateQty = async (t: Trade) => {
+    const remainingQty = t.qty - t.filled_qty;
+    const msg = `請輸入新的總委託數量\n(原委託量 ${t.qty}，已成交 ${t.filled_qty}，剩餘可減 ${remainingQty})\n\n💡 輸入的數字必須小於 ${t.qty} 且大於等於 ${t.filled_qty}`;
+    const input = window.prompt(msg, remainingQty.toString());
+    if (!input) return;
+    
+    const newQty = parseInt(input, 10);
+    if (isNaN(newQty) || newQty >= t.qty || newQty < t.filled_qty) {
+      alert(`❌ 輸入無效！\n數量必須小於原委託量 (${t.qty})，且大於等於已成交量 (${t.filled_qty})`);
+      return;
+    }
+
+    try {
+      await apiClient.post('/update_order', {
+        symbol: t.symbol,
+        action: t.action,
+        old_price: t.price,
+        new_price: t.price,
+        qty: newQty
+      });
+      setTimeout(fetchHistory, 500);
+    } catch (err: any) {
+      console.error("Failed to update order:", err);
+      alert(`減量失敗：${err?.response?.data?.detail || err.message}`);
     }
   };
 
@@ -117,18 +166,31 @@ const Panel_OrderHistory: React.FC = () => {
                   </td>
                   <td className="py-2 px-2 text-right">
                     <div className="flex items-center justify-end gap-2">
-                      <span className={getBadgeStyle(t.status)}>{t.status}</span>
-                      {['PendingSubmit', 'PreSubmitted', 'Submitted'].includes(t.status) && (
-                        <button
-                          onClick={() => {
-                            if (window.confirm(`確定要取消 ${t.symbol} 委託單嗎？`)) {
-                              cancelOrder(t.action, t.price);
-                            }
-                          }}
-                          className="bg-slate-700 hover:bg-red-500 hover:text-white text-slate-300 rounded px-2 py-0.5 text-[10px] transition-colors shadow-sm"
-                        >
-                          刪單
-                        </button>
+                      <span 
+                        className={getBadgeStyle(t.status)}
+                        title={['Failed', 'Rejected'].includes(t.status) && t.failed_msg ? `原始原因: ${t.failed_msg}` : undefined}
+                      >
+                        {formatStatusText(t.status, t.failed_msg)}
+                      </span>
+                      {['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(t.status) && (
+                        <>
+                          <button
+                            onClick={() => handleUpdateQty(t)}
+                            className="bg-slate-700 hover:bg-blue-500 hover:text-white text-slate-300 rounded px-2 py-0.5 text-[10px] transition-colors shadow-sm"
+                          >
+                            減量
+                          </button>
+                          <button
+                            onClick={() => {
+                              if (window.confirm(`確定要取消 ${t.symbol} 委託單嗎？`)) {
+                                cancelOrder(t.action, t.price);
+                              }
+                            }}
+                            className="bg-slate-700 hover:bg-red-500 hover:text-white text-slate-300 rounded px-2 py-0.5 text-[10px] transition-colors shadow-sm"
+                          >
+                            刪單
+                          </button>
+                        </>
                       )}
                     </div>
                   </td>

@@ -66,11 +66,15 @@ const getMultiplier = (symbol: string): number => {
 const DOMPanel: React.FC = () => {
   const {
     quote, bidAsk, targetSymbol, accountSummary, isStale,
-    workingOrders, setWorkingOrders,
+    workingOrders, setWorkingOrders, refreshOrders,
+    smartOrders, refreshSmartOrders,
     accounts = [], activeAccount, selectAccount = async () => { }
   } = useTradingContext();
   const [orderValue, setOrderValue] = useState(1);
   const [orderType, setOrderType] = useState('ROD');
+  const [priceType, setPriceType] = useState('LMT');
+  const [orderCond, setOrderCond] = useState('Cash');
+  const [orderLot, setOrderLot] = useState('Common');
   const [calcAmount, setCalcAmount] = useState<number | ''>('');
   const [isSyncing, setIsSyncing] = useState(false);
 
@@ -270,12 +274,10 @@ const DOMPanel: React.FC = () => {
     if (fullPrices.length > 0) {
       console.log(`[DOMPanel Debug] fullPrices range: ${fullPrices[0]} ~ ${fullPrices[fullPrices.length-1]}`);
       // 檢查是否有跳號
-      let jump = false;
       for(let i=1; i<fullPrices.length; i++) {
         const diff = Math.abs(fullPrices[i-1] - fullPrices[i]);
         if (diff > 5) {
            console.warn(`[DOMPanel Debug] 發現價格跳空! ${fullPrices[i-1]} -> ${fullPrices[i]}`);
-           jump = true;
         }
       }
     }
@@ -389,7 +391,7 @@ const DOMPanel: React.FC = () => {
         const lots = splitOrders(orderValue, splitCfg.minPerLot, splitCfg.maxPerLot);
         for (let i = 0; i < lots.length; i++) {
           finalRes = await apiClient.post('/place_order', {
-            symbol: targetSymbol, price, action, qty: lots[i], order_type: orderType
+            symbol: targetSymbol, price, action, qty: lots[i], order_type: orderType, price_type: priceType, order_cond: orderCond, order_lot: orderLot
           });
           if (i < lots.length - 1) {
             await randomDelay(splitCfg.minDelay, splitCfg.maxDelay);
@@ -397,7 +399,7 @@ const DOMPanel: React.FC = () => {
         }
       } else {
         finalRes = await apiClient.post('/place_order', {
-          symbol: targetSymbol, price, action, qty: orderValue, order_type: orderType
+          symbol: targetSymbol, price, action, qty: orderValue, order_type: orderType, price_type: priceType, order_cond: orderCond, order_lot: orderLot
         });
       }
       setOrderFeedback({ price, action, status: 'success' });
@@ -448,9 +450,74 @@ const DOMPanel: React.FC = () => {
     }
   }, [targetSymbol, workingOrders, setWorkingOrders]);
 
+  const handleDropOrder = useCallback(async (e: React.DragEvent<HTMLTableCellElement>, newPrice: number, dropAction: 'Buy' | 'Sell') => {
+    e.preventDefault();
+    try {
+      const dataStr = e.dataTransfer.getData('application/json');
+      if (!dataStr) return;
+      const { action, oldPriceStr } = JSON.parse(dataStr);
+      const oldPrice = parseFloat(oldPriceStr);
+      if (action !== dropAction) return; 
+      if (oldPrice === newPrice) return;
+
+      const pKey = Math.round(oldPrice * 100);
+      const code = targetSymbol.replace(/\D/g, '');
+      const matchedOrders = workingOrders.filter((o: WorkingOrder) =>
+        o.action === action &&
+        Math.round(o.price * 100) === pKey &&
+        (o.symbol === targetSymbol || (code && o.symbol.includes(code)))
+      );
+
+      if (matchedOrders.length > 0) {
+        if (matchedOrders.length > 1) {
+          if (!window.confirm(`價格 ${oldPrice} 有 ${matchedOrders.length} 筆委託，確定全部移至 ${newPrice} 嗎？`)) return;
+        }
+
+        let finalRes;
+        for (const o of matchedOrders) {
+           finalRes = await apiClient.post('/update_order', {
+             symbol: o.symbol,
+             action: o.action,
+             old_price: oldPrice,
+             new_price: newPrice,
+             qty: o.qty
+           });
+        }
+        
+        if (finalRes?.data?.working_orders) {
+           setWorkingOrders(finalRes.data.working_orders);
+        } else {
+           setTimeout(refreshOrders, 500);
+        }
+      }
+    } catch (err) {
+      console.error('[DOMPanel] handleDropOrder 失敗:', err);
+    }
+  }, [workingOrders, targetSymbol, setWorkingOrders, refreshOrders]);
+
   const handleFlatten = useCallback(async () => {
     try { await apiClient.post('/flatten', { symbol: targetSymbol }); } catch (e) { console.error('[DOMPanel] 平倉失敗:', e); }
   }, [targetSymbol]);
+
+  const handleAddStopOrder = useCallback(async (price: number, action: 'Buy' | 'Sell') => {
+    const label = action === 'Sell' ? '停損賣(走多)' : '停損買(走空)';
+    const input = window.prompt(`設定 ${label} 觸發價格\n(預設: ${price})`, price.toString());
+    if (input === null) return;
+    const stopPrice = parseFloat(input || price.toString());
+    if (isNaN(stopPrice) || stopPrice <= 0) { alert('設定無效'); return; }
+    const qtyInput = window.prompt('觸發數量', orderValue.toString());
+    if (qtyInput === null) return;
+    const parsedQty = parseInt(qtyInput || orderValue.toString(), 10);
+    if (isNaN(parsedQty) || parsedQty <= 0) { alert('數量無效'); return; }
+    try {
+      await apiClient.post('/add_smart_order', {
+        symbol: targetSymbol, action, qty: parsedQty, stop_price: stopPrice, trailing_offset: 0,
+      });
+      setTimeout(() => refreshSmartOrders(targetSymbol), 500);
+    } catch (err: any) {
+      alert(`智慧單設定失敗: ${err?.response?.data?.detail || err.message}`);
+    }
+  }, [targetSymbol, orderValue, refreshSmartOrders]);
 
   const handleReverse = useCallback(async () => {
     try { await apiClient.post('/reverse', { symbol: targetSymbol }); } catch (e) { console.error('[DOMPanel] 反手失敗:', e); }
@@ -607,17 +674,60 @@ const DOMPanel: React.FC = () => {
         <div className="px-4 py-2 border-b border-slate-800 bg-[#151b26] flex flex-wrap items-center gap-4">
           {/* 委託種類設定 */}
           <div className="flex flex-col gap-0.5">
-            <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">Type</span>
+            <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">Time ఇన్ Force</span>
             <select
               value={orderType}
               onChange={(e) => setOrderType(e.target.value)}
               className="bg-[#101623] border border-slate-700 hover:border-slate-600 rounded text-[11px] font-bold py-1 px-1.5 text-slate-200 outline-none cursor-pointer focus:ring-1 focus:ring-slate-500"
             >
               <option value="ROD">ROD</option>
-              <option value="IOC">IOC</option>
-              <option value="FOK">FOK</option>
+              <option value="IOC">IOC (立即成交否則取消)</option>
+              <option value="FOK">FOK (全部成交否則取消)</option>
             </select>
           </div>
+
+          {/* 價格種類設定 */}
+          <div className="flex flex-col gap-0.5">
+            <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">Price Type</span>
+            <select
+              value={priceType}
+              onChange={(e) => setPriceType(e.target.value)}
+              className="bg-[#101623] border border-slate-700 hover:border-slate-600 rounded text-[11px] font-bold py-1 px-1.5 text-[#D4AF37] outline-none cursor-pointer focus:ring-1 focus:ring-slate-500"
+            >
+              <option value="LMT">LMT (限價)</option>
+              <option value="MKT">MKT (市價)</option>
+              <option value="MKP">MKP (範圍市價)</option>
+            </select>
+          </div>
+
+          {/* 股票專屬設定：信用交易與盤中零股 (僅當 Symbol 看起來像台股代碼時顯示) */}
+          {targetSymbol && targetSymbol.length >= 4 && !isNaN(Number(targetSymbol)) && (
+            <>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">Credit</span>
+                <select
+                  value={orderCond}
+                  onChange={(e) => setOrderCond(e.target.value)}
+                  className="bg-[#101623] border border-slate-700 hover:border-slate-600 rounded text-[11px] font-bold py-1 px-1.5 text-slate-300 outline-none cursor-pointer focus:ring-1 focus:ring-slate-500"
+                >
+                  <option value="Cash">現股</option>
+                  <option value="MarginTrading">融資</option>
+                  <option value="ShortSelling">融券</option>
+                </select>
+              </div>
+              <div className="flex flex-col gap-0.5">
+                <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">Lot Size</span>
+                <select
+                  value={orderLot}
+                  onChange={(e) => setOrderLot(e.target.value)}
+                  className="bg-[#101623] border border-slate-700 hover:border-slate-600 rounded text-[11px] font-bold py-1 px-1.5 text-slate-300 outline-none cursor-pointer focus:ring-1 focus:ring-slate-500"
+                >
+                  <option value="Common">整股 (1張)</option>
+                  <option value="IntradayOdd">盤中零股 (1股)</option>
+                </select>
+              </div>
+            </>
+          )}
 
           {/* 金額換算 */}
           <div className="flex flex-col gap-1">
@@ -752,20 +862,47 @@ const DOMPanel: React.FC = () => {
                     ? (orderFeedback!.status === 'success' ? 'bg-emerald-500/40' : orderFeedback!.status === 'error' ? 'bg-yellow-500/40' : 'bg-emerald-500/20 animate-pulse')
                     : '';
 
+                  // ★ 智慧單觸發線檢測
+                  const smartBuyLine = smartOrders.some(o =>
+                    o.is_active && o.action === 'Buy' && Math.abs(o.trigger_price - p) < getTickSize(p, targetSymbol) * 0.4
+                  );
+                  const smartSellLine = smartOrders.some(o =>
+                    o.is_active && o.action === 'Sell' && Math.abs(o.trigger_price - p) < getTickSize(p, targetSymbol) * 0.4
+                  );
+
                   return (
-                    <tr key={p} data-price={pKey} className={`h-8 transition-none relative ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-[#D4AF37]/10 border-y border-[#D4AF37]/50 box-border') : 'border-b border-slate-800/80'} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''} ${isCostLine ? 'border-y-2 border-dashed border-amber-500/50' : ''} ${pnlZoneBg}`}>
+                    <tr key={p} data-price={pKey} className={`h-8 transition-none relative ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-[#D4AF37]/10 border-y border-[#D4AF37]/50 box-border') : 'border-b border-slate-800/80'} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''} ${isCostLine ? 'border-y-2 border-dashed border-amber-500/50' : ''} ${smartBuyLine || smartSellLine ? 'border-y border-dashed border-purple-500/60' : ''} ${pnlZoneBg}`}>
 
 
-                      {/* 刪買 - 傳入 price 做樂觀刪除 */}
+                      {/* 刪買 - 左鍵: 對應價格別单; Shift+左鍵: 設定買追海觸價單 */}
                       <td className="border-r border-slate-800 hover:bg-slate-700 cursor-pointer"
-                        onClick={() => myBuyQty > 0 && handleCancelOrder('Buy', p)}>
-                        {myBuyQty > 0 && <span className="font-bold text-[10px] text-red-400 hover:text-white transition-colors">✕</span>}
+                        onClick={(e) => {
+                          if (e.shiftKey) { handleAddStopOrder(p, 'Buy'); return; }
+                          myBuyQty > 0 && handleCancelOrder('Buy', p);
+                        }}>
+                        {smartBuyLine && <span className="text-purple-400 text-[9px] font-bold select-none">⚡</span>}
+                        {!smartBuyLine && myBuyQty > 0 && <span className="font-bold text-[10px] text-red-400 hover:text-white transition-colors">✕</span>}
                       </td>
 
                       {/* 買進 */}
                       <td className={`bg-red-950/40 text-red-500 font-bold cursor-pointer hover:bg-red-900/60 border-r border-slate-800 transition-colors ${fbBuyClass}`}
-                        onClick={() => handlePlaceOrder(p, 'Buy')}>
-                        {myBuyQty > 0 && <span className="bg-red-600 text-white px-1.5 py-0.5 rounded text-[10px] shadow-sm">{myBuyQty}</span>}
+                        onClick={() => handlePlaceOrder(p, 'Buy')}
+                        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                        onDrop={(e) => handleDropOrder(e, p, 'Buy')}
+                      >
+                        {myBuyQty > 0 && (
+                          <span 
+                            draggable
+                            onDragStart={(e) => {
+                               e.dataTransfer.setData('application/json', JSON.stringify({ action: 'Buy', oldPriceStr: p.toString() }));
+                               e.stopPropagation();
+                            }}
+                            className="bg-red-600 text-white px-1.5 py-0.5 rounded text-[10px] shadow-sm cursor-grab active:cursor-grabbing inline-block"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {myBuyQty}
+                          </span>
+                        )}
                       </td>
 
                       {/* 委買量 (含 Δ買) */}
@@ -817,14 +954,33 @@ const DOMPanel: React.FC = () => {
 
                       {/* 賣出 */}
                       <td className={`bg-emerald-950/40 text-emerald-500 font-bold cursor-pointer hover:bg-emerald-900/60 border-r border-slate-800 transition-colors ${fbSellClass}`}
-                        onClick={() => handlePlaceOrder(p, 'Sell')}>
-                        {mySellQty > 0 && <span className="bg-emerald-600 text-white px-1.5 py-0.5 rounded text-[10px] shadow-sm">{mySellQty}</span>}
+                        onClick={() => handlePlaceOrder(p, 'Sell')}
+                        onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
+                        onDrop={(e) => handleDropOrder(e, p, 'Sell')}
+                      >
+                        {mySellQty > 0 && (
+                          <span 
+                            draggable
+                            onDragStart={(e) => {
+                               e.dataTransfer.setData('application/json', JSON.stringify({ action: 'Sell', oldPriceStr: p.toString() }));
+                               e.stopPropagation();
+                            }}
+                            className="bg-emerald-600 text-white px-1.5 py-0.5 rounded text-[10px] shadow-sm cursor-grab active:cursor-grabbing inline-block"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            {mySellQty}
+                          </span>
+                        )}
                       </td>
 
-                      {/* 刪賣 - 傳入 price 做樂觀刪除 */}
+                      {/* 刪賣 - 左鍵: 對應價格別單; Shift+左鍵: 設定賣追海觸價單 */}
                       <td className="hover:bg-slate-700 cursor-pointer"
-                        onClick={() => mySellQty > 0 && handleCancelOrder('Sell', p)}>
-                        {mySellQty > 0 && <span className="font-bold text-[10px] text-emerald-400 hover:text-white transition-colors">✕</span>}
+                        onClick={(e) => {
+                          if (e.shiftKey) { handleAddStopOrder(p, 'Sell'); return; }
+                          mySellQty > 0 && handleCancelOrder('Sell', p);
+                        }}>
+                        {smartSellLine && <span className="text-purple-400 text-[9px] font-bold select-none">⚡</span>}
+                        {!smartSellLine && mySellQty > 0 && <span className="font-bold text-[10px] text-emerald-400 hover:text-white transition-colors">✕</span>}
                       </td>
                     </tr>
                   );

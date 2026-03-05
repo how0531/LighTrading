@@ -29,6 +29,12 @@ interface AccountInfo {
 export interface WorkingOrder {
   symbol: string; action: 'Buy' | 'Sell'; price: number; qty: number; filled_qty: number; status: string; order_id?: string;
 }
+export interface SmartOrderData {
+  id: string; symbol: string; order_type: string; action: string; qty: number;
+  trigger_price: number; trigger_condition: string; trailing_offset: number;
+  take_profit_price: number; stop_loss_price: number;
+  is_active: boolean; is_triggered: boolean; created_at: string; triggered_at?: string;
+}
 interface TradingContextType {
   isConnected: boolean; isStale: boolean; targetSymbol: string; setTargetSymbol: (sym: string) => void;
   quote: QuoteData | null; bidAsk: BidAskData | null; quoteHistory: QuoteData[];
@@ -41,6 +47,9 @@ interface TradingContextType {
   realtimePositions: RealtimePosition[];
   totalRealtimePnl: number;
   totalRealizedPnl: number;  // ★ 已實現損益（從後端 PnLUpdate 接收）
+  // 智慧單
+  smartOrders: SmartOrderData[];
+  refreshSmartOrders: (symbol?: string) => Promise<void>;
 }
 
 const TradingContext = createContext<TradingContextType | null>(null);
@@ -72,6 +81,16 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [realtimePositions, setRealtimePositions] = useState<RealtimePosition[]>([]);
   const [totalRealtimePnl, setTotalRealtimePnl] = useState(0);
   const [totalRealizedPnl, setTotalRealizedPnl] = useState(0);
+  // 智慧單狀態
+  const [smartOrders, setSmartOrders] = useState<SmartOrderData[]>([]);
+
+  const refreshSmartOrders = useCallback(async (symbol?: string) => {
+    try {
+      const url = symbol ? `/smart_orders?symbol=${encodeURIComponent(symbol)}` : '/smart_orders';
+      const res = await apiClient.get(url);
+      setSmartOrders(res.data || []);
+    } catch { /* 靜默 */ }
+  }, []);
 
   // 抚取現在活躍委託單（就算無 WebSocket 也能同步）
   const refreshOrders = useCallback(async () => {
@@ -261,6 +280,18 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           // 外部平台下單/改單/刪單會觸發此事件。為確保資料一致性，不自己拼湊狀態，
           // 而是延遲 0.5s 等 Shioaji 內部狀態同步後，直接拉取 REST 最新快照。
           setTimeout(refreshOrders, 500);
+        } else if (data.type === 'SmartOrderUpdate' && data.data) {
+          // 智慧單狀態更新（新增/觸發/已取消）
+          setSmartOrders(prev => {
+            const incoming: SmartOrderData = data.data;
+            const idx = prev.findIndex(o => o.id === incoming.id);
+            if (idx >= 0) {
+              const next = [...prev];
+              next[idx] = incoming;
+              return next.filter(o => o.is_active);
+            }
+            return incoming.is_active ? [...prev, incoming] : prev;
+          });
         } else if (data.type === 'TradeUpdate' && data.data) {
           // 成交回報也觸發一次 REST 同步，確保填協數量正確
           setTimeout(refreshOrders, 800);
@@ -374,6 +405,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       subscribe, selectAccount,
       cancelOrder, flattenPosition,
       realtimePositions, totalRealtimePnl, totalRealizedPnl,
+      smartOrders, refreshSmartOrders,
     }}>
       {children}
     </TradingContext.Provider>
