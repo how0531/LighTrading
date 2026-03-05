@@ -427,6 +427,29 @@ class ShioajiClient(QObject):
         QTimer.singleShot(500, self.trigger_account_update)
         return contract.symbol
 
+    def subscribe_background(self, symbol: str) -> bool:
+        """
+        背景訂閱商品報價（僅更新 _latest_prices 快取，不影響 current_contract）。
+        用於 pnl_broadcaster 訂閱所有持倉商品的即時價格，不干擾 DOM 面板主訂閱。
+        """
+        contract = self.get_contract(symbol)
+        if not contract:
+            logger.warning(f"subscribe_background: 找不到合約 {symbol}")
+            return False
+        try:
+            # 先用 snapshot 填入初始價格
+            snaps = self.api.snapshots([contract])
+            if snaps and snaps[0].close > 0:
+                self._latest_prices[symbol] = float(snaps[0].close)
+                logger.info(f"  📌 背景訂閱 {symbol} snapshot={snaps[0].close}")
+            # 訂閱 Tick（僅 Tick，BidAsk 不需要）
+            self.api.quote.subscribe(contract, QuoteType.Tick)
+            logger.info(f"  ✅ 背景訂閱 {symbol} 成功")
+            return True
+        except Exception as e:
+            logger.warning(f"subscribe_background {symbol} 失敗: {e}")
+            return False
+
     def place_order(self, symbol: str, price: float, action: Action, qty: int, order_type: OrderType = OrderType.ROD, price_type=None):
         contract = self.get_contract(symbol)
         if not contract:

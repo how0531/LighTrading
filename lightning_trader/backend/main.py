@@ -296,14 +296,25 @@ async def pnl_broadcaster():
     使用 shioaji_client._latest_prices 快取 (由 on_tick 岳時更新)。
     """
     logger.info("★ PnL 廣播器已啟動")
+    _cached_positions: list = []
+    _pos_cache_time: float = 0.0
+    POS_CACHE_TTL = 10.0  # 每 10 秒才重新查詢一次持倉
     while True:
         try:
             await asyncio.sleep(1)
             if not shioaji_client._is_connected or not active_connections:
                 continue
 
-            # 取持倉（低頻操作，冒用 list_positions 的結果）
-            positions = await run_in_qt_thread(shioaji_client.list_positions)
+            # 持倉快取：每 10 秒才重新查詢，小减 API 呼叫壓力
+            import time as _time
+            now = _time.monotonic()
+            if now - _pos_cache_time > POS_CACHE_TTL:
+                fresh = await run_in_qt_thread(shioaji_client.list_positions)
+                if fresh:
+                    _cached_positions = fresh
+                    _pos_cache_time = now
+
+            positions = _cached_positions
             if not positions:
                 continue
 
@@ -369,7 +380,8 @@ async def subscribe_position_contracts():
         logger.info(f"★ 自動訂閱持倉商品報價: {symbols}")
         for sym in symbols:
             try:
-                await run_in_qt_thread(shioaji_client.subscribe, sym)
+                # ★ 改用 subscribe_background：不取消前一個訂閱，不覆蓋 current_contract
+                await run_in_qt_thread(shioaji_client.subscribe_background, sym)
                 logger.info(f"  ✓ 已訂閱: {sym}")
             except Exception as e:
                 logger.warning(f"  ✗ 訂閱 {sym} 失敗: {e}")
