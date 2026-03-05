@@ -40,6 +40,7 @@ interface TradingContextType {
   // 即時損益（前端隨 tick 計算）
   realtimePositions: RealtimePosition[];
   totalRealtimePnl: number;
+  totalRealizedPnl: number;  // ★ 已實現損益（從後端 PnLUpdate 接收）
 }
 
 const TradingContext = createContext<TradingContextType | null>(null);
@@ -67,9 +68,10 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // 委託單狀態（部分由 WebSocket OrderUpdate 即時更新，部分由 REST 初始化）
   const [workingOrders, setWorkingOrders] = useState<WorkingOrder[]>([]);
 
-  // 即時損益狀態（前端隨 tick 計算，100ms 節流同步到 React state）
+  // 即時損益狀態（後端 WS PnLUpdate 推播）
   const [realtimePositions, setRealtimePositions] = useState<RealtimePosition[]>([]);
   const [totalRealtimePnl, setTotalRealtimePnl] = useState(0);
+  const [totalRealizedPnl, setTotalRealizedPnl] = useState(0);
 
   // 抚取現在活躍委託單（就算無 WebSocket 也能同步）
   const refreshOrders = useCallback(async () => {
@@ -248,6 +250,12 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           }
         } else if (data.type === 'AccountUpdate' && data.data) {
           pendingAccountRef.current = data.data;
+        } else if (data.type === 'PnLUpdate' && data.data) {
+          // ★ 後端即時 PnL 推播：直接更新 state（後端已計算好所有持倉）
+          const { positions: rtPos, total_pnl, total_realized } = data.data;
+          setRealtimePositions((rtPos as RealtimePosition[]) || []);
+          setTotalRealtimePnl(total_pnl ?? 0);
+          if (total_realized !== undefined) setTotalRealizedPnl(total_realized);
         } else if (data.type === 'OrderUpdate' && data.data) {
           // 即時更新委託單狀態（由 Shioaji callback 推送）
           // 外部平台下單/改單/刪單會觸發此事件。為確保資料一致性，不自己拼湊狀態，
@@ -365,7 +373,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       workingOrders, setWorkingOrders, refreshOrders,
       subscribe, selectAccount,
       cancelOrder, flattenPosition,
-      realtimePositions, totalRealtimePnl,
+      realtimePositions, totalRealtimePnl, totalRealizedPnl,
     }}>
       {children}
     </TradingContext.Provider>

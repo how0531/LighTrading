@@ -57,9 +57,10 @@ async def lifespan(app):
     global fastapi_loop
     fastapi_loop = asyncio.get_running_loop()
     
-    # 啟動 Qt 事件迴圈處理與報價廣播器
+    # 啟動 Qt 事件迴圈處理、報價廣播器、PnL 廣播器
     qt_task = asyncio.create_task(qt_event_loop())
     broadcast_task = asyncio.create_task(quote_broadcaster())
+    pnl_task = asyncio.create_task(pnl_broadcaster())
     
     # 自動登入用 background task，避免在 lifespan 中阻塞
     async def _auto_login():
@@ -70,14 +71,22 @@ async def lifespan(app):
                 success = await run_in_qt_thread(shioaji_client.login)
                 if success:
                     logger.info("✅ Shioaji 自動登入成功")
+                    # 自動訂閱持倉商品（給 PnL 廣播器使用）
+                    await asyncio.sleep(1)  # 等待帳號資料載入完成
+                    await subscribe_position_contracts()
                 else:
                     logger.warning("⚠️ Shioaji 自動登入失敗，請檢查 .env 設定")
             except Exception as e:
                 logger.error(f"❌ 自動登入發生例外: {e}")
     
     login_task = asyncio.create_task(_auto_login())
-    
+
     yield
+
+    # 關閉時清理背景任務
+    qt_task.cancel()
+    broadcast_task.cancel()
+    pnl_task.cancel()
     
     login_task.cancel()
     qt_task.cancel()
@@ -263,6 +272,110 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# ========================
+# ★ PnL 廣播器
+# ========================
+_PNL_MULTIPLIERS = {
+    'TXF': 200, 'MXF': 50,   # 大台、小台
+    'EXF': 4000,              # 台指期
+    'GTF': 200,               # 国庛300
+}
+
+def _get_multiplier(symbol: str) -> int:
+    """"根據商品代號回傳每點價值"""
+    sym = symbol.upper()
+    for prefix, mult in _PNL_MULTIPLIERS.items():
+        if sym.startswith(prefix):
+            return mult
+    # 預設為股票：1000 元/張
+    return 1000
+
+async def pnl_broadcaster():
+    """
+    每秒計算所有持倉的即時 PnL 並透過 WebSocket 廣播。
+    使用 shioaji_client._latest_prices 快取 (由 on_tick 岳時更新)。
+    """
+    logger.info("★ PnL 廣播器已啟動")
+    while True:
+        try:
+            await asyncio.sleep(1)
+            if not shioaji_client._is_connected or not active_connections:
+                continue
+
+            # 取持倉（低頻操作，冒用 list_positions 的結果）
+            positions = await run_in_qt_thread(shioaji_client.list_positions)
+            if not positions:
+                continue
+
+            latest_prices = shioaji_client._latest_prices
+            realtime_positions = []
+            total_pnl = 0
+            total_realized = 0
+
+            for pos in positions:
+                symbol   = pos.get('symbol', '')
+                qty      = pos.get('qty', 0) or pos.get('raw_qty', 0)
+                cost     = pos.get('price', 0)    # 均凷成本價
+                pnl_from_broker = pos.get('pnl', 0)  # 券商提供的未實現
+                direction = pos.get('direction', 'Buy')
+                multiplier = _get_multiplier(symbol)
+
+                # 從峽取即時價格
+                cur_price = latest_prices.get(symbol, 0)
+                if cur_price > 0 and cost > 0 and qty > 0:
+                    sign = 1 if direction == 'Buy' else -1
+                    pnl_per_unit = (cur_price - cost) * sign
+                    rt_pnl = round(pnl_per_unit * qty * multiplier)
+                else:
+                    pnl_per_unit = 0
+                    rt_pnl = pnl_from_broker  # 沒有即時價就用券商的數字
+
+                total_pnl += rt_pnl
+                total_realized += pos.get('pnl_realized', 0)
+                realtime_positions.append({
+                    **pos,
+                    'realtimePnl': rt_pnl,
+                    'pnlPerUnit': pnl_per_unit,
+                    'currentPrice': cur_price,
+                })
+
+            msg = json.dumps({
+                'type': 'PnLUpdate',
+                'data': {
+                    'positions': realtime_positions,
+                    'total_pnl': total_pnl,
+                    'total_realized': total_realized,
+                }
+            })
+            for conn in list(active_connections):
+                try:
+                    await conn.send_text(msg)
+                except Exception:
+                    active_connections.discard(conn)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"PnL 廣播器错誤: {e}")
+            await asyncio.sleep(2)
+
+async def subscribe_position_contracts():
+    """
+    登入後自動訂閱所有持倉商品的即時報價，以便 pnl_broadcaster 取得即時價格。
+    """
+    try:
+        positions = await run_in_qt_thread(shioaji_client.list_positions)
+        symbols = list({p['symbol'] for p in positions if p.get('symbol')})
+        logger.info(f"★ 自動訂閱持倉商品報價: {symbols}")
+        for sym in symbols:
+            try:
+                await run_in_qt_thread(shioaji_client.subscribe, sym)
+                logger.info(f"  ✓ 已訂閱: {sym}")
+            except Exception as e:
+                logger.warning(f"  ✗ 訂閱 {sym} 失敗: {e}")
+    except Exception as e:
+        logger.error(f"subscribe_position_contracts 失敗: {e}")
+
 async def quote_broadcaster():
     """
     從 ShioajiClient 的報價佇列中取出報價，並廣播給所有已連接的 WebSocket 客戶端。
@@ -320,6 +433,8 @@ async def login(req: LoginRequest):
     )
     
     if success:
+        # 登入後自動訂閱持倉商品（給即時 PnL 廣播器使用）
+        asyncio.create_task(subscribe_position_contracts())
         return {"status": "success", "message": "登入成功"}
     else:
         raise HTTPException(status_code=400, detail="登入失敗，請檢查 API 參數或網路狀態。")

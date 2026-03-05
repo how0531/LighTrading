@@ -44,6 +44,8 @@ class ShioajiClient(QObject):
         
         # 注意：自動登入已移至 main.py lifespan，避免雙重登入競態
         # 如果需要從 PyQt5 GUI 使用，可在 GUI 中手動呼叫 login()
+        # ★ 多商品即時報價快取（供後端 PnL 計算用）
+        self._latest_prices: Dict[str, float] = {}
 
     def check_connection(self):
         if getattr(self, '_is_reconnecting', False): return
@@ -101,7 +103,7 @@ class ShioajiClient(QObject):
             """股票 Tick 回呼"""
             self.last_message_time = time.time()
             try:
-                symbol = self.current_contract.symbol if self.current_contract else str(tick.code)
+                symbol = str(tick.code)  # ★ 用 tick.code 支援多商品報價識別
                 q = {
                     "Symbol": symbol,
                     "Price": float(tick.close),
@@ -113,8 +115,10 @@ class ShioajiClient(QObject):
                     "TickType": int(tick.tick_type),
                     "TickTime": str(tick.datetime),
                 }
-                if q["Price"] > 0 and self._direct_quote_callback:
-                    self._direct_quote_callback(q)
+                if q["Price"] > 0:
+                    self._latest_prices[symbol] = q["Price"]  # ★ 更新最新價快取
+                    if self._direct_quote_callback:
+                        self._direct_quote_callback(q)
             except Exception as e:
                 logger.error(f"_on_tick_stk 錯誤: {e}")
 
@@ -144,7 +148,7 @@ class ShioajiClient(QObject):
             """期貨/選擇權 Tick 回呼"""
             self.last_message_time = time.time()
             try:
-                symbol = self.current_contract.symbol if self.current_contract else str(tick.code)
+                symbol = str(tick.code)  # ★ 用 tick.code 支援多商品報價識別
                 q = {
                     "Symbol": symbol,
                     "Price": float(tick.close),
@@ -156,8 +160,10 @@ class ShioajiClient(QObject):
                     "TickType": int(tick.tick_type),
                     "TickTime": str(tick.datetime),
                 }
-                if q["Price"] > 0 and self._direct_quote_callback:
-                    self._direct_quote_callback(q)
+                if q["Price"] > 0:
+                    self._latest_prices[symbol] = q["Price"]  # ★ 更新最新價快取
+                    if self._direct_quote_callback:
+                        self._direct_quote_callback(q)
             except Exception as e:
                 logger.error(f"_on_tick_fop 錯誤: {e}")
 

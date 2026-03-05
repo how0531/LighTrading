@@ -10,7 +10,7 @@ interface BalanceData {
 }
 
 const Panel_AccountBalance: React.FC = () => {
-  const { isConnected, totalRealtimePnl, accountSummary } = useTradingContext();
+  const { isConnected, totalRealtimePnl, totalRealizedPnl } = useTradingContext();
   const [balance, setBalance] = useState<BalanceData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -40,8 +40,8 @@ const Panel_AccountBalance: React.FC = () => {
     ? (balance.margin_available / balance.margin_required * 100)
     : 999;
 
-  // 已實現損益（後端提供）
-  const realizedPnl = accountSummary["參考損益"] || 0;
+  // 已實現損益（從後端 PnLUpdate 接收）
+  const realizedPnl = totalRealizedPnl;
   // 未實現損益（前端即時計算）
   const unrealizedPnl = totalRealtimePnl;
   // 當日合計
