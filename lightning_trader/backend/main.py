@@ -728,7 +728,14 @@ async def get_order_history(account_id: str = None):
                 "qty": t.order.quantity,
                 "status": t.status.status.name if hasattr(t.status, 'status') else getattr(t.status, 'name', 'Unknown'),
                 "filled_qty": getattr(t.status, 'deal_quantity', getattr(t.status, 'filled_quantity', 0)),
-                "filled_avg_price": float(getattr(t.status, 'deal_price', getattr(t.status, 'filled_avg_price', 0)))
+                "filled_avg_price": float(
+                    # 1. 優先查 Deal callback 快取（最準確）
+                    shioaji_client._deal_prices.get(
+                        getattr(t.order, 'ordno', '') or getattr(t.order, 'seqno', ''),
+                        # 2. Fallback: trade.status 的屬性（新版 Shioaji 可能有）
+                        getattr(t.status, 'deal_price', getattr(t.status, 'filled_avg_price', 0)) or 0
+                    )
+                )
             })
         # 依照時間反序排序 (最新在前面)
         trade_list.sort(key=lambda x: x['time'], reverse=True)

@@ -46,6 +46,8 @@ class ShioajiClient(QObject):
         # 如果需要從 PyQt5 GUI 使用，可在 GUI 中手動呼叫 login()
         # ★ 多商品即時報價快取（供後端 PnL 計算用）
         self._latest_prices: Dict[str, float] = {}
+        # ★ 成交均價快取：ordno → deal_price（從 order callback Deal 事件擷取）
+        self._deal_prices: Dict[str, float] = {}
 
     def check_connection(self):
         if getattr(self, '_is_reconnecting', False): return
@@ -225,6 +227,14 @@ class ShioajiClient(QObject):
         logger.info("✅ 已註冊 Fallback 報價回呼 (set_quote_callback)")
 
         def on_order_status(state, msg: dict):
+            # ★ 政抓 Deal 事件，提取成交均價並快取存儲
+            state_name = str(state).lower()
+            if 'deal' in state_name:
+                ordno = msg.get('ordno', '') or msg.get('seqno', '')
+                deal_price = msg.get('price', 0)
+                if ordno and deal_price:
+                    self._deal_prices[ordno] = float(deal_price)
+                    logger.debug(f"★ 成交均價快取: ordno={ordno} price={deal_price}")
             self.signal_order_update.emit(msg)
             QTimer.singleShot(500, self.trigger_account_update)
 
