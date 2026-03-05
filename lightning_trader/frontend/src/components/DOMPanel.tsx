@@ -186,19 +186,33 @@ const DOMPanel: React.FC = () => {
     return currentPosition.backendPnl || 0;
   }, [currentPrice, refPrice, currentPosition, netQty, targetSymbol]);
 
-  // --- ★ 核心：以當前價為中心展開 500 檔價格 ---
-  const fullPrices = useMemo(() => {
-    // 需要至少有 reference price 才能算
-    const base = currentPrice || refPrice;
-    if (base <= 0) return [];
+  // --- ★ 核心：以參考價為中心展開 500 檔價格（穩定化，不隨每個 tick 重算）---
+  const [priceBase, setPriceBase] = useState(0);
 
-    const up = limitUp > 0 ? limitUp : round2(base * 1.1);
-    const down = limitDown > 0 ? limitDown : round2(base * 0.9);
+  // 只在 refPrice 初次有值、或首次收到 currentPrice 時更新 priceBase
+  useEffect(() => {
+    if (refPrice > 0) {
+      setPriceBase(prev => prev === 0 || prev !== refPrice ? refPrice : prev);
+    } else if (currentPrice > 0 && priceBase === 0) {
+      setPriceBase(currentPrice);
+    }
+  }, [refPrice, currentPrice, priceBase]);
+
+  // 換商品時重置
+  useEffect(() => {
+    setPriceBase(0);
+  }, [targetSymbol]);
+
+  const fullPrices = useMemo(() => {
+    if (priceBase <= 0) return [];
+
+    const up = limitUp > 0 ? limitUp : round2(priceBase * 1.1);
+    const down = limitDown > 0 ? limitDown : round2(priceBase * 0.9);
     const sym = targetSymbol || '';
 
     // 往上推 250 檔
     const upper: number[] = [];
-    let pUp = base;
+    let pUp = priceBase;
     while (pUp <= up && upper.length < 250) {
       const tick = getTickSize(pUp, sym);
       pUp = round2(pUp + tick);
@@ -207,8 +221,8 @@ const DOMPanel: React.FC = () => {
     upper.reverse();
 
     // 往下推 250 檔 (包含 base 本身)
-    const lower: number[] = [base];
-    let pDown = base;
+    const lower: number[] = [priceBase];
+    let pDown = priceBase;
     while (pDown >= down && lower.length < 250) {
       const tick = getTickSize(pDown, sym);
       pDown = round2(pDown - tick);
@@ -216,7 +230,7 @@ const DOMPanel: React.FC = () => {
     }
 
     return [...upper, ...lower];
-  }, [currentPrice, refPrice, limitUp, limitDown, targetSymbol]);
+  }, [priceBase, limitUp, limitDown, targetSymbol]);
 
   // --- 自動捲動到當前價（首次載入或手動觸發） ---
   const scrollToCurrentPrice = useCallback(() => {
@@ -354,7 +368,8 @@ const DOMPanel: React.FC = () => {
       if (finalRes?.data?.working_orders) {
         setWorkingOrders(finalRes.data.working_orders);
       }
-    } catch {
+    } catch (e) {
+      console.error('[DOMPanel] 快速下單失敗:', e);
       setOrderFeedback({ price, action, status: 'error' });
     }
     isOrderPendingRef.current = false;
@@ -397,11 +412,11 @@ const DOMPanel: React.FC = () => {
   }, [targetSymbol, workingOrders, setWorkingOrders]);
 
   const handleFlatten = useCallback(async () => {
-    try { await apiClient.post('/flatten', { symbol: targetSymbol }); } catch { /* */ }
+    try { await apiClient.post('/flatten', { symbol: targetSymbol }); } catch (e) { console.error('[DOMPanel] 平倉失敗:', e); }
   }, [targetSymbol]);
 
   const handleReverse = useCallback(async () => {
-    try { await apiClient.post('/reverse', { symbol: targetSymbol }); } catch { /* */ }
+    try { await apiClient.post('/reverse', { symbol: targetSymbol }); } catch (e) { console.error('[DOMPanel] 反手失敗:', e); }
   }, [targetSymbol]);
 
   // --- 金額換算張數 (使用 ref 取得最新價格避免頻繁重建) ---
@@ -419,7 +434,7 @@ const DOMPanel: React.FC = () => {
 
   const handleManualSync = async () => {
     setIsSyncing(true);
-    try { if (activeAccount) await selectAccount(activeAccount); } catch { /* */ }
+    try { if (activeAccount) await selectAccount(activeAccount); } catch (e) { console.error('[DOMPanel] 切換帳號失敗:', e); }
     finally {
       if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
       syncTimerRef.current = setTimeout(() => setIsSyncing(false), 1000);
@@ -664,6 +679,18 @@ const DOMPanel: React.FC = () => {
                   const isLimitUp = limitUp > 0 && p === limitUp;
                   const isLimitDown = limitDown > 0 && p === limitDown;
 
+                  // ★ 盈虧區間漸層：成本線與當前價之間的列
+                  let pnlZoneBg = '';
+                  if (currentPosition && currentPrice > 0 && !isC && !isCostLine) {
+                    const costPrice = currentPosition.price;
+                    const isInPnlZone = (currentPrice > costPrice)
+                      ? (p < currentPrice && p > costPrice)  // 獲利區
+                      : (p > currentPrice && p < costPrice); // 虧損區
+                    if (isInPnlZone) {
+                      pnlZoneBg = currentPrice > costPrice ? 'bg-red-500/5' : 'bg-emerald-500/5';
+                    }
+                  }
+
                   const pKey = Math.round(p * 100);
                   const bv = bidMap.get(pKey) ?? null;
                   const av = askMap.get(pKey) ?? null;
@@ -689,7 +716,7 @@ const DOMPanel: React.FC = () => {
                     : '';
 
                   return (
-                    <tr key={p} data-price={pKey} className={`h-8 transition-none relative ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-[#D4AF37]/10 border-y border-[#D4AF37]/50 box-border') : 'border-b border-slate-800/80'} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''} ${isCostLine ? ((currentPosition?.pnl ?? 0) >= 0 ? 'bg-red-500/15' : 'bg-emerald-500/15') : ''}`}>
+                    <tr key={p} data-price={pKey} className={`h-8 transition-none relative ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-[#D4AF37]/10 border-y border-[#D4AF37]/50 box-border') : 'border-b border-slate-800/80'} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''} ${isCostLine ? 'border-y-2 border-dashed border-amber-500/50' : ''} ${pnlZoneBg}`}>
 
 
                       {/* 刪買 - 傳入 price 做樂觀刪除 */}

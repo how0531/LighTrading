@@ -575,6 +575,11 @@ async def get_account_balance():
 async def get_order_history(account_id: str = None):
     """獲取當日委託/成交紀錄"""
     try:
+        # ★ 強制同步券商主機最新委託狀態（修復外部平台下單不同步的問題）
+        try:
+            await run_in_qt_thread(shioaji_client.api.update_status)
+        except Exception:
+            pass  # update_status 失敗不影響查詢，靜默略過
         # TODO: 未來可進一步在 shioaji_client 內實現 account_id 過濾 trades
         trades = await run_in_qt_thread(shioaji_client.get_order_history)
         trade_list = []

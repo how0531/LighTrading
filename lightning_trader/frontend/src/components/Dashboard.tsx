@@ -3,6 +3,8 @@ import Header from './Header';
 import DOMPanel from './DOMPanel';
 import Panel_Positions from './Panel_Positions';
 import Panel_OrderHistory from './Panel_OrderHistory';
+import Panel_AccountBalance from './Panel_AccountBalance';
+import Panel_TradeHistory from './Panel_TradeHistory';
 import SettingsModal from './SettingsModal';
 import { TradingProvider } from '../contexts/TradingContext';
 import { Responsive, WidthProvider } from 'react-grid-layout';
@@ -14,22 +16,28 @@ const ResponsiveGridLayout = WidthProvider(Responsive);
 const defaultLayouts = {
   lg: [
     { i: 'dom', x: 0, y: 0, w: 7, h: 22 },
-    { i: 'pos', x: 7, y: 0, w: 5, h: 10 },
-    { i: 'hist', x: 7, y: 10, w: 5, h: 12 }
+    { i: 'bal', x: 7, y: 0, w: 5, h: 8 },
+    { i: 'pos', x: 7, y: 8, w: 5, h: 8 },
+    { i: 'hist', x: 7, y: 16, w: 3, h: 8 },
+    { i: 'trade', x: 10, y: 16, w: 2, h: 8 },
   ],
   md: [
     { i: 'dom', x: 0, y: 0, w: 6, h: 22 },
-    { i: 'pos', x: 6, y: 0, w: 4, h: 10 },
-    { i: 'hist', x: 6, y: 10, w: 4, h: 12 }
+    { i: 'bal', x: 6, y: 0, w: 4, h: 8 },
+    { i: 'pos', x: 6, y: 8, w: 4, h: 8 },
+    { i: 'hist', x: 6, y: 16, w: 2, h: 8 },
+    { i: 'trade', x: 8, y: 16, w: 2, h: 8 },
   ],
   sm: [
     { i: 'dom', x: 0, y: 0, w: 6, h: 20 },
-    { i: 'pos', x: 0, y: 20, w: 6, h: 10 },
-    { i: 'hist', x: 0, y: 30, w: 6, h: 12 }
+    { i: 'bal', x: 0, y: 20, w: 6, h: 7 },
+    { i: 'pos', x: 0, y: 27, w: 6, h: 8 },
+    { i: 'hist', x: 0, y: 35, w: 3, h: 8 },
+    { i: 'trade', x: 3, y: 35, w: 3, h: 8 },
   ]
 };
 
-const LAYOUT_KEY = 'lighTrade_layout';
+const LAYOUT_KEY = 'lighTrade_layout_v2';
 
 const DashboardContent: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
@@ -45,7 +53,7 @@ const DashboardContent: React.FC = () => {
     return defaultLayouts;
   });
 
-  const handleLayoutChange = (_currentLayout: any, allLayouts: any) => {
+  const handleLayoutChange = (_currentLayout: Array<{i: string; x: number; y: number; w: number; h: number}>, allLayouts: Record<string, Array<{i: string; x: number; y: number; w: number; h: number}>>) => {
     setLayouts(allLayouts);
     localStorage.setItem(LAYOUT_KEY, JSON.stringify(allLayouts));
   };
@@ -75,6 +83,11 @@ const DashboardContent: React.FC = () => {
             {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
             <div className="flex-1 h-full overflow-hidden flex flex-col"><DOMPanel /></div>
           </div>
+
+          <div key="bal" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+            {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+            <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_AccountBalance /></div>
+          </div>
           
           <div key="pos" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
             {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
@@ -84,6 +97,11 @@ const DashboardContent: React.FC = () => {
           <div key="hist" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
             {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
             <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_OrderHistory /></div>
+          </div>
+
+          <div key="trade" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+            {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+            <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_TradeHistory /></div>
           </div>
         </ResponsiveGridLayout>
       </div>
@@ -105,3 +123,4 @@ const Dashboard: React.FC = () => {
 };
 
 export default Dashboard;
+

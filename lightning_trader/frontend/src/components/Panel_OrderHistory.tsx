@@ -26,18 +26,31 @@ const Panel_OrderHistory: React.FC = () => {
   const { accountSummary, cancelOrder } = useTradingContext();
   const [trades, setTrades] = useState<Trade[]>([]);
   const [isLoading, setIsLoading] = useState(true);
+  const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
+  const [syncAge, setSyncAge] = useState(0); // 距離上次同步的秒數
 
   const fetchHistory = async () => {
     setIsLoading(true);
     try {
       const data = await getOrderHistory();
       setTrades(data || []);
+      setLastSyncTime(new Date());
     } catch (err) {
       console.error("Failed to fetch order history:", err);
     } finally {
       setIsLoading(false);
     }
   };
+
+  // 每秒更新同步年齡（距離上次同步的秒數）
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (lastSyncTime) {
+        setSyncAge(Math.floor((Date.now() - lastSyncTime.getTime()) / 1000));
+      }
+    }, 1000);
+    return () => clearInterval(timer);
+  }, [lastSyncTime]);
 
   // 使用 msg_count 作為 dependency，避免每個 tick 都觸發 HTTP 請求
   const accountMsgCount = accountSummary.msg_count;
@@ -50,7 +63,14 @@ const Panel_OrderHistory: React.FC = () => {
   return (
     <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700 h-full flex flex-col">
       <div className="flex justify-between items-center mb-4">
-        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider">今日委託 (Order History)</h3>
+        <div className="flex items-center gap-2">
+          <h3 className="text-sm font-bold text-slate-400 uppercase tracking-wider">今日委託 (Order History)</h3>
+          {lastSyncTime && (
+            <span className={`text-[9px] font-mono tabular-nums ${syncAge > 5 ? 'text-yellow-400' : 'text-slate-500'}`}>
+              {syncAge > 5 && '⚠️ '}{lastSyncTime.toLocaleTimeString()}
+            </span>
+          )}
+        </div>
         <button
           onClick={fetchHistory}
           className="text-xs bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition-colors"

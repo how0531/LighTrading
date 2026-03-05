@@ -5,6 +5,21 @@ import { apiClient } from '../api/client';
 interface AccountPosition {
   symbol: string; qty: number; direction: 'Buy' | 'Sell'; price: number; pnl: number; account?: string; raw_qty?: number;
 }
+
+// 即時損益持倉（含前端隨 tick 重算的 realtimePnl）
+export interface RealtimePosition extends AccountPosition {
+  realtimePnl: number;       // 前端即時計算的損益
+  pnlPerUnit: number;        // 每口/每張盈虧點數
+  currentPrice: number;      // 計算時使用的最新價
+}
+
+// 商品乘數：股票=1000, 大台=200, 小台=50
+const getMultiplier = (symbol: string): number => {
+  const sym = symbol.toUpperCase();
+  if (sym.startsWith('MXF') || sym.includes('小台')) return 50;
+  if (sym.startsWith('TXF') || sym.includes('大台')) return 200;
+  return 1000;
+};
 interface AccountSummary {
   "當日交易": number; "參考損益": number; positions: AccountPosition[]; is_simulation?: boolean; active_stock?: string; active_future?: string; person_id?: string; msg_count?: number;
 }
@@ -22,6 +37,9 @@ interface TradingContextType {
   subscribe: (symbol: string) => void; selectAccount: (accountId: string) => Promise<void>;
   cancelOrder: (action: 'Buy' | 'Sell', price?: number) => Promise<void>;
   flattenPosition: (symbol: string) => Promise<void>;
+  // 即時損益（前端隨 tick 計算）
+  realtimePositions: RealtimePosition[];
+  totalRealtimePnl: number;
 }
 
 const TradingContext = createContext<TradingContextType | null>(null);
@@ -42,11 +60,16 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [bidAsk, setBidAsk] = useState<BidAskData | null>(null);
   const [quoteHistory, setQuoteHistory] = useState<QuoteData[]>([]);
   const [accountSummary, setAccountSummary] = useState<AccountSummary>(initialSummary);
+  const accountSummaryRef = useRef<AccountSummary>(initialSummary); // 用於即時損益計算，避免 setAccountSummary updater 反模式
   const [accounts, setAccounts] = useState<AccountInfo[]>([]);
   const [activeAccount, setActiveAccount] = useState<string | null>(null);
 
   // 委託單狀態（部分由 WebSocket OrderUpdate 即時更新，部分由 REST 初始化）
   const [workingOrders, setWorkingOrders] = useState<WorkingOrder[]>([]);
+
+  // 即時損益狀態（前端隨 tick 計算，100ms 節流同步到 React state）
+  const [realtimePositions, setRealtimePositions] = useState<RealtimePosition[]>([]);
+  const [totalRealtimePnl, setTotalRealtimePnl] = useState(0);
 
   // 抚取現在活躍委託單（就算無 WebSocket 也能同步）
   const refreshOrders = useCallback(async () => {
@@ -79,7 +102,41 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const timer = setInterval(() => {
       if (quoteDirtyRef.current && latestQuoteRef.current) {
         quoteDirtyRef.current = false;
-        setQuote({ ...latestQuoteRef.current });
+        const latestQ = { ...latestQuoteRef.current };
+        setQuote(latestQ);
+
+        // ★ 即時損益計算：每次 quote 更新時重算所有持倉的即時 PnL
+        const latestPrice = latestQ.Price;
+        if (latestPrice > 0) {
+          const positions = accountSummaryRef.current.positions || [];
+          if (positions.length === 0) {
+            setRealtimePositions([]);
+            setTotalRealtimePnl(0);
+          } else {
+            const targetSym = targetSymbolRef.current.toUpperCase();
+            const targetCode = targetSym.replace(/\D/g, '');
+            let totalPnl = 0;
+            const rtPositions: RealtimePosition[] = positions.map(pos => {
+              const posSym = (pos.symbol || '').toUpperCase();
+              // 只有與當前訂閱商品匹配的持倉才用即時價格計算
+              const isMatch = posSym === targetSym || (targetCode && posSym.includes(targetCode));
+              if (isMatch && pos.price > 0) {
+                const multiplier = getMultiplier(pos.symbol);
+                const direction = pos.direction === 'Buy' ? 1 : -1;
+                const pnlPerUnit = (latestPrice - pos.price) * direction;
+                const realtimePnl = Math.round(pnlPerUnit * pos.qty * multiplier);
+                totalPnl += realtimePnl;
+                return { ...pos, realtimePnl, pnlPerUnit, currentPrice: latestPrice };
+              } else {
+                // 非當前商品：使用後端提供的 pnl
+                totalPnl += (pos.pnl || 0);
+                return { ...pos, realtimePnl: pos.pnl || 0, pnlPerUnit: 0, currentPrice: 0 };
+              }
+            });
+            setRealtimePositions(rtPositions);
+            setTotalRealtimePnl(totalPnl);
+          }
+        }
       }
       if (bidaskDirtyRef.current && latestBidAskRef.current) {
         bidaskDirtyRef.current = false;
@@ -93,6 +150,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (pendingAccountRef.current !== null) {
         const summary = pendingAccountRef.current;
         pendingAccountRef.current = null;
+        accountSummaryRef.current = summary; // 同步更新 ref（給即時損益計算用）
         setAccountSummary(summary);
         if (!isSwitchingAccountRef.current && summary.active_stock) {
           setActiveAccount(summary.active_stock);
@@ -253,7 +311,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     try {
       await apiClient.post('/set_active_account', { account_id: fullId });
       setTimeout(() => { isSwitchingAccountRef.current = false; }, 2000);
-    } catch (err) { isSwitchingAccountRef.current = false; }
+    } catch (err) { console.error('[TradingContext] 帳號切換失敗:', err); isSwitchingAccountRef.current = false; }
   }, []);
 
   const subscribe = useCallback((symbol: string) => {
@@ -307,6 +365,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       workingOrders, setWorkingOrders, refreshOrders,
       subscribe, selectAccount,
       cancelOrder, flattenPosition,
+      realtimePositions, totalRealtimePnl,
     }}>
       {children}
     </TradingContext.Provider>

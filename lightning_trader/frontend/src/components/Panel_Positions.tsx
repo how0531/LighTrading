@@ -17,7 +17,7 @@ interface Account {
 }
 
 const Panel_Positions: React.FC = () => {
-  const { isConnected, accountSummary, subscribe, flattenPosition } = useTradingContext();
+  const { isConnected, accountSummary, subscribe, flattenPosition, realtimePositions, totalRealtimePnl } = useTradingContext();
   const [positions, setPositions] = useState<Position[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<'ALL' | 'Stock' | 'Future'>('ALL');
@@ -131,7 +131,7 @@ const Panel_Positions: React.FC = () => {
           >
             <option value="">所有帳號</option>
             {filteredAccounts.map(acc => (
-              <option key={acc.account_id} value={acc.account_name}>
+              <option key={acc.account_id} value={acc.account_id}>
                 {acc.account_name}
               </option>
             ))}
@@ -147,7 +147,7 @@ const Panel_Positions: React.FC = () => {
               <th className="px-2 py-2 font-medium border-b border-slate-700/50">方向</th>
               <th className="px-2 py-2 font-medium text-right border-b border-slate-700/50">數量</th>
               <th className="px-2 py-2 font-medium text-right border-b border-slate-700/50">均價</th>
-              <th className="px-2 py-2 font-medium text-right border-b border-slate-700/50">損益</th>
+              <th className="px-2 py-2 font-medium text-right border-b border-slate-700/50">即時損益</th>
               <th className="px-2 py-2 font-medium text-center border-b border-slate-700/50 w-12">操作</th>
             </tr>
           </thead>
@@ -157,11 +157,15 @@ const Panel_Positions: React.FC = () => {
                 <td colSpan={6} className="py-12 text-center text-slate-600 font-medium tracking-widest italic">尚無部位</td>
               </tr>
             ) : (
-              positions.map((pos, idx) => (
+              positions.map((pos, idx) => {
+                // 查找即時損益：優先使用 realtimePositions 中的即時 PnL
+                const rtPos = realtimePositions.find(rp => rp.symbol === pos.symbol);
+                const displayPnl = rtPos ? rtPos.realtimePnl : pos.pnl;
+                return (
                 <tr
                   key={`${pos.symbol}-${idx}`}
-                  className={`transition-colors ${pos.pnl > 0 ? 'bg-red-500/10 hover:bg-red-500/20' :
-                      pos.pnl < 0 ? 'bg-green-500/10 hover:bg-green-500/20' :
+                  className={`transition-colors ${displayPnl > 0 ? 'bg-red-500/10 hover:bg-red-500/20' :
+                      displayPnl < 0 ? 'bg-green-500/10 hover:bg-green-500/20' :
                         'bg-slate-700/20 hover:bg-slate-700/40'
                     }`}
                 >
@@ -180,9 +184,9 @@ const Panel_Positions: React.FC = () => {
                   </td>
                   <td className="px-2 py-2 text-right font-mono tabular-nums text-slate-300">{pos.qty}</td>
                   <td className="px-2 py-2 text-right font-mono tabular-nums text-slate-400">{pos.price.toLocaleString()}</td>
-                  <td className={`px-2 py-2 text-right font-mono tabular-nums font-bold ${pos.pnl >= 0 ? 'text-red-500 shadow-red-500/10' : 'text-green-500 shadow-green-500/10'}`}>
-                    <span className={pos.pnl !== 0 ? 'drop-shadow-[0_0_8px_rgba(0,0,0,0.5)]' : ''}>
-                      {pos.pnl > 0 ? '+' : ''}{pos.pnl.toLocaleString()}
+                  <td className={`px-2 py-2 text-right font-mono tabular-nums font-bold ${displayPnl >= 0 ? 'text-red-500 shadow-red-500/10' : 'text-green-500 shadow-green-500/10'}`}>
+                    <span className={displayPnl !== 0 ? 'drop-shadow-[0_0_8px_rgba(0,0,0,0.5)]' : ''}>
+                      {displayPnl > 0 ? '+' : ''}{displayPnl.toLocaleString()}
                     </span>
                   </td>
                   <td className="px-2 py-2 text-center">
@@ -199,11 +203,22 @@ const Panel_Positions: React.FC = () => {
                     </button>
                   </td>
                 </tr>
-              ))
+                );
+              })
             )}
           </tbody>
         </table>
       </div>
+
+      {/* 即時總損益匯總 */}
+      {positions.length > 0 && (
+        <div className={`px-3 py-2 mt-1 rounded border flex justify-between items-center text-[11px] font-mono tabular-nums ${totalRealtimePnl >= 0 ? 'border-red-800/40 bg-red-950/20' : 'border-emerald-800/40 bg-emerald-950/20'}`}>
+          <span className="text-slate-400 font-bold">即時總損益</span>
+          <span className={`font-black text-sm ${totalRealtimePnl >= 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+            {totalRealtimePnl > 0 ? '+' : ''}{totalRealtimePnl.toLocaleString()}
+          </span>
+        </div>
+      )}
 
       {isLoading && (
         <div className="absolute inset-0 bg-slate-900/20 backdrop-blur-[1px] flex items-center justify-center rounded-lg pointer-events-none">
