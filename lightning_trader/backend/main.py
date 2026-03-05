@@ -710,6 +710,19 @@ async def get_order_history(account_id: str = None):
         # TODO: 未來可進一步在 shioaji_client 內實現 account_id 過濾 trades
         trades = await run_in_qt_thread(shioaji_client.get_order_history)
         trade_list = []
+        # ★ 診斷：dump 第一筆 trade 的全部屬性
+        if trades:
+            t0 = trades[0]
+            logger.info(f"🔍 trade[0].status attrs: {[a for a in dir(t0.status) if not a.startswith('_')]}")
+            logger.info(f"🔍 trade[0].order attrs: {[a for a in dir(t0.order) if not a.startswith('_')]}")
+            try:
+                logger.info(f"🔍 trade[0].status vars: {vars(t0.status)}")
+            except Exception:
+                logger.info(f"🔍 trade[0].status repr: {t0.status}")
+            try:
+                logger.info(f"🔍 trade[0].order vars: {vars(t0.order)}")
+            except Exception:
+                logger.info(f"🔍 trade[0].order repr: {t0.order}")
         for t in trades:
             # 支援篩選功能（如果傳入則過濾）
             if account_id and t.order.account.account_id != account_id:
@@ -720,6 +733,15 @@ async def get_order_history(account_id: str = None):
             if not raw_symbol:
                 raw_symbol = getattr(t.contract, 'code', '')
 
+            # ★ 正確計算成交均價：從 t.status.deals 取出
+            deals = getattr(t.status, 'deals', [])
+            calc_avg_price = 0.0
+            if deals and isinstance(deals, list) and len(deals) > 0:
+                total_val = sum(getattr(d, 'price', 0) * getattr(d, 'quantity', 0) for d in deals)
+                total_q = sum(getattr(d, 'quantity', 0) for d in deals)
+                if total_q > 0:
+                    calc_avg_price = total_val / total_q
+
             trade_list.append({
                 "time": format_datetime(getattr(t.status, 'modified_at', datetime.now())),
                 "symbol": raw_symbol,
@@ -729,10 +751,12 @@ async def get_order_history(account_id: str = None):
                 "status": t.status.status.name if hasattr(t.status, 'status') else getattr(t.status, 'name', 'Unknown'),
                 "filled_qty": getattr(t.status, 'deal_quantity', getattr(t.status, 'filled_quantity', 0)),
                 "filled_avg_price": float(
-                    # 1. 優先查 Deal callback 快取（最準確）
+                    # 1. 優先查 deals 計算的均價（最準）
+                    calc_avg_price or 
+                    # 2. 查 Deal callback 快取
                     shioaji_client._deal_prices.get(
                         getattr(t.order, 'ordno', '') or getattr(t.order, 'seqno', ''),
-                        # 2. Fallback: trade.status 的屬性（新版 Shioaji 可能有）
+                        # 3. Fallback: trade.status 其他可能屬性
                         getattr(t.status, 'deal_price', getattr(t.status, 'filled_avg_price', 0)) or 0
                     )
                 )
