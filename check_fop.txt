@@ -1,0 +1,1 @@
+TickFOPv1 keys: ['code', 'datetime', 'open', 'underlying_price', 'bid_side_total_vol', 'ask_side_total_vol', 'avg_price', 'close', 'high', 'low', 'amount', 'total_amount', 'volume', 'total_volume', 'tick_type', 'chg_type', 'price_chg', 'pct_chg', 'simtrade']

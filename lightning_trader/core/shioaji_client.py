@@ -158,7 +158,7 @@ class ShioajiClient(QObject):
                     "Open": float(tick.open),
                     "High": float(tick.high),
                     "Low": float(tick.low),
-                    "AvgPrice": float(tick.avg_price),
+                    "AvgPrice": float(getattr(tick, "avg_price", 0)), # 期貨無 avg_price
                     "TickType": int(tick.tick_type),
                     "TickTime": str(tick.datetime),
                 }

@@ -266,6 +266,22 @@ const DOMPanel: React.FC = () => {
   }, [currentPrice]);
 
   useEffect(() => {
+    console.log(`[DOMPanel Debug] fullPrices length: ${fullPrices.length}, base: ${priceBase}`);
+    if (fullPrices.length > 0) {
+      console.log(`[DOMPanel Debug] fullPrices range: ${fullPrices[0]} ~ ${fullPrices[fullPrices.length-1]}`);
+      // 檢查是否有跳號
+      let jump = false;
+      for(let i=1; i<fullPrices.length; i++) {
+        const diff = Math.abs(fullPrices[i-1] - fullPrices[i]);
+        if (diff > 5) {
+           console.warn(`[DOMPanel Debug] 發現價格跳空! ${fullPrices[i-1]} -> ${fullPrices[i]}`);
+           jump = true;
+        }
+      }
+    }
+  }, [fullPrices, priceBase]);
+
+  useEffect(() => {
     if (currentPrice > 0 && fullPrices.length > 0 && !hasScrolled.current) {
       hasScrolled.current = true;
       if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
