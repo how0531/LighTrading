@@ -165,13 +165,14 @@ def on_shioaji_quote(quote_data: dict):
                 return v[0] if len(v) > 0 else default
             return v if v is not None else default
         
-        # 判斷是 BidAsk 還是 Tick：檢查大小寫 key
-        is_bidask = any(k in q for k in ["AskPrice", "BidPrice", "ask_price", "bid_price"])
-        logger.debug(f"📡 on_shioaji_quote: is_bidask={is_bidask}, keys={list(q.keys())[:5]}")
+        # 判斷是包含 BidAsk 還是包含 Tick
+        has_bidask = any(k in q for k in ["AskPrice", "BidPrice", "ask_price", "bid_price"])
+        has_tick = any(k in q for k in ["Close", "close", "Price"])
         
         symbol = q.get("Symbol", "")
+        items_to_send = []
         
-        if is_bidask:
+        if has_bidask:
             bidask_data = {
                 "Symbol": symbol,
                 "AskPrice": [float(p) for p in q.get('AskPrice', q.get('ask_price', []))],
@@ -182,13 +183,21 @@ def on_shioaji_quote(quote_data: dict):
                 "DiffAskVol": q.get('DiffAskVol', q.get('diff_ask_vol', [])),
                 "Time": format_datetime(q.get('Time', q.get('datetime', q.get('ts', ''))))
             }
-            quote_item = {"type": "BidAsk", "data": bidask_data}
-        else:
+            # 如果全空，不要送（舊版有時是全空的清單）
+            if any(bidask_data["AskPrice"]) or any(bidask_data["BidPrice"]):
+                items_to_send.append({"type": "BidAsk", "data": bidask_data})
+
+        if has_tick:
             # Tick: 官方格式的 Close 是 list, Mock 格式的 Price 是純量
+            p_val = float(_val(q.get('Close', q.get('close', q.get('Price', 0)))))
+            v_val = int(_val(q.get('Volume', q.get('volume', 0))))
+            
+            # 若不是純正的 Tick dict (像是只帶 Reference 卻沒 Close)，且不是 V1 餵進來的
+            # 保守起見還是組一個 Tick，但前端 mergeQuote 會過濾 Price=0 的 Tick
             tick_data = {
                 "Symbol": symbol,
-                "Price": float(_val(q.get('Close', q.get('close', q.get('Price', 0))))),
-                "Volume": int(_val(q.get('Volume', q.get('volume', 0)))),
+                "Price": p_val,
+                "Volume": v_val,
                 "Open": float(_val(q.get('Open', q.get('open', 0)))),
                 "High": float(_val(q.get('High', q.get('high', 0)))),
                 "Low": float(_val(q.get('Low', q.get('low', 0)))),
@@ -204,18 +213,22 @@ def on_shioaji_quote(quote_data: dict):
             if ref > 0: tick_data["Reference"] = ref
             if lu > 0: tick_data["LimitUp"] = lu
             if ld > 0: tick_data["LimitDown"] = ld
-            quote_item = {"type": "Tick", "data": tick_data}
+            
+            # 對於 Fallback dict，只有成交（有價格/量或靜態資料變化）我們才發
+            if p_val > 0 or ref > 0 or v_val > 0:
+                items_to_send.append({"type": "Tick", "data": tick_data})
 
         # 使用 fastapi_loop 進行執行緒安全的操作
-        if fastapi_loop:
-            fastapi_loop.call_soon_threadsafe(quotes_to_broadcast.put_nowait, quote_item)
-        else:
-            try:
-                loop = asyncio.get_event_loop()
-                if loop.is_running():
-                    loop.call_soon_threadsafe(quotes_to_broadcast.put_nowait, quote_item)
-            except:
-                pass
+        for quote_item in items_to_send:
+            if fastapi_loop:
+                fastapi_loop.call_soon_threadsafe(quotes_to_broadcast.put_nowait, quote_item)
+            else:
+                try:
+                    loop = asyncio.get_event_loop()
+                    if loop.is_running():
+                        loop.call_soon_threadsafe(quotes_to_broadcast.put_nowait, quote_item)
+                except:
+                    pass
             
     except Exception as e:
         logger.error(f"處理 Shioaji 報價並放入佇列時發生錯誤: {e}")
