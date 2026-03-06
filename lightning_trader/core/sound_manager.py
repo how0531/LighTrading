@@ -8,8 +8,8 @@ import logging
 from typing import Dict, Optional
 from pathlib import Path
 
-from PyQt5.QtCore import QObject, QUrl
-from PyQt5.QtMultimedia import QSoundEffect
+
+
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +27,7 @@ DEFAULT_SOUNDS = {
 UNMUTABLE_SOUNDS = {"alert", "disconnect"}
 
 
-class SoundManager(QObject):
+class SoundManager:
     """
     音效管理器
 
@@ -38,7 +38,6 @@ class SoundManager(QObject):
     """
 
     def __init__(self, event_bus, sound_dir: Optional[str] = None):
-        super().__init__()
         self.event_bus = event_bus
         self.sound_dir = Path(sound_dir) if sound_dir else self._default_sound_dir()
         self._effects: Dict[str, QSoundEffect] = {}

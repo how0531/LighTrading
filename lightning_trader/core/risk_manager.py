@@ -14,7 +14,7 @@ from enum import Enum
 from typing import Tuple, Optional, Dict
 from dataclasses import dataclass
 
-from PyQt5.QtCore import QObject, QTimer
+
 
 logger = logging.getLogger(__name__)
 
@@ -82,7 +82,7 @@ class RiskConfig:
     trading_enabled: bool = True
 
 
-class RiskManager(QObject):
+class RiskManager:
     """
     統一風控引擎
 
@@ -98,7 +98,6 @@ class RiskManager(QObject):
     """
 
     def __init__(self, event_bus, config: Optional[RiskConfig] = None):
-        super().__init__()
         self.event_bus = event_bus
         self.config = config or RiskConfig()
 
@@ -115,10 +114,8 @@ class RiskManager(QObject):
         self.event_bus.on_fill.connect(self._on_fill)
         self.event_bus.on_position_update.connect(self._on_position_update)
 
-        # 定期巡檢
-        self._check_timer = QTimer(self)
-        self._check_timer.timeout.connect(self._periodic_check)
-        self._check_timer.start(5000)
+        # 移除 QTimer，改為由外部 (如事件迴圈) 或被動觸發
+        self._last_check_time = time.time()
 
         logger.info("RiskManager 已初始化")
 
@@ -134,9 +131,11 @@ class RiskManager(QObject):
 
     def _on_position_update(self, pos_data: dict):
         self._daily_unrealized_pnl = pos_data.get("total_unrealized_pnl", 0)
-        self._daily_realized_pnl = pos_data.get("total_realized_pnl", 0)
         for p in pos_data.get("positions", []):
             self._current_positions[p["symbol"]] = p["net_qty"]
+            
+        # 順便觸發日虧損檢查
+        self._periodic_check()
 
     def _periodic_check(self):
         """定期風控巡檢 — 日虧損觸發時自動停止交易"""

@@ -39,9 +39,12 @@ const defaultLayouts = {
 
 const LAYOUT_KEY = 'lighTrade_layout_v2';
 
+
+
 const DashboardContent: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isLayoutLocked, setIsLayoutLocked] = useState(true);
+  const [isFocusMode, setIsFocusMode] = useState(true); // 預設為專注模式
 
   const [layouts, setLayouts] = useState(() => {
     try {
@@ -64,47 +67,57 @@ const DashboardContent: React.FC = () => {
         onOpenSettings={() => setIsSettingsOpen(true)} 
         isLayoutLocked={isLayoutLocked}
         onToggleLayoutLock={() => setIsLayoutLocked(!isLayoutLocked)}
+        isFocusMode={isFocusMode}
+        onToggleFocusMode={() => setIsFocusMode(!isFocusMode)}
       />
 
-      <div className="flex-1 overflow-auto -mx-4 px-4 pb-12 min-h-0">
-        <ResponsiveGridLayout
-          className="layout"
-          layouts={layouts}
-          breakpoints={{ lg: 1200, md: 996, sm: 768, xs: 480, xxs: 0 }}
-          cols={{ lg: 12, md: 10, sm: 6, xs: 4, xxs: 2 }}
-          rowHeight={30}
-          onLayoutChange={handleLayoutChange}
-          isDraggable={!isLayoutLocked}
-          isResizable={!isLayoutLocked}
-          draggableHandle=".drag-handle"
-          margin={[16, 16]}
-        >
-          <div key="dom" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
-            {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
-            <div className="flex-1 h-full overflow-hidden flex flex-col"><DOMPanel /></div>
+      {isFocusMode ? (
+        <div className="flex-1 -mx-4 px-4 pb-6 flex flex-col min-h-0">
+          <div className="flex-1 overflow-hidden flex flex-col rounded-lg bg-[#101623] border border-slate-700/50 shadow-2xl">
+            <DOMPanel />
           </div>
+        </div>
+      ) : (
+        <div className="flex-1 overflow-auto -mx-4 px-4 pb-12 min-h-0">
+          <ResponsiveGridLayout
+            className="layout"
+            layouts={layouts}
+            breakpoints={{ lg: 1200, md: 996, sm: 768, xs: 480, xxs: 0 }}
+            cols={{ lg: 12, md: 10, sm: 6, xs: 4, xxs: 2 }}
+            rowHeight={30}
+            onLayoutChange={handleLayoutChange}
+            isDraggable={!isLayoutLocked}
+            isResizable={!isLayoutLocked}
+            draggableHandle=".drag-handle"
+            margin={[16, 16]}
+          >
+            <div key="dom" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 overflow-hidden flex flex-col"><DOMPanel /></div>
+            </div>
 
-          <div key="bal" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
-            {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
-            <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_AccountBalance /></div>
-          </div>
-          
-          <div key="pos" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
-            {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
-            <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_Positions /></div>
-          </div>
-          
-          <div key="hist" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
-            {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
-            <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_OrderHistory /></div>
-          </div>
+            <div key="bal" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_AccountBalance /></div>
+            </div>
+            
+            <div key="pos" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_Positions /></div>
+            </div>
+            
+            <div key="hist" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_OrderHistory /></div>
+            </div>
 
-          <div key="trade" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
-            {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
-            <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_TradeHistory /></div>
-          </div>
-        </ResponsiveGridLayout>
-      </div>
+            <div key="trade" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_TradeHistory /></div>
+            </div>
+          </ResponsiveGridLayout>
+        </div>
+      )}
 
       <SettingsModal 
         isOpen={isSettingsOpen} 

@@ -16,7 +16,7 @@ from typing import List, Optional, Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from PyQt5.QtCore import QObject, QTimer
+
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +79,7 @@ class SmartOrder:
         }
 
 
-class SmartOrderEngine(QObject):
+class SmartOrderEngine:
     """
     智慧委託引擎
 
@@ -96,7 +96,6 @@ class SmartOrderEngine(QObject):
             event_bus: EventBus 實例
             place_order_fn: 實際下單函數，簽名為 (symbol, price, action, qty) -> trade
         """
-        super().__init__()
         self.event_bus = event_bus
         self._place_order = place_order_fn
         self._smart_orders: List[SmartOrder] = []

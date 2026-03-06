@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Any
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from PyQt5.QtCore import QObject
+
 
 logger = logging.getLogger(__name__)
 
@@ -76,7 +76,7 @@ class OrderEntry:
         return self.qty - self.filled_qty
 
 
-class OrderManager(QObject):
+class OrderManager:
     """
     訂單管理器
 
@@ -90,7 +90,6 @@ class OrderManager(QObject):
     """
 
     def __init__(self, event_bus):
-        super().__init__()
         self.event_bus = event_bus
         self._orders: Dict[str, OrderEntry] = {}
         self._fill_count = 0    # 今日成交筆數

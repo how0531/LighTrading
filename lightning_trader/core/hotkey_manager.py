@@ -7,7 +7,7 @@ HotkeyManager — 快捷鍵管理器
 import logging
 from typing import Dict, Callable, Optional
 from dataclasses import dataclass
-from PyQt5.QtCore import QObject, QSettings
+
 
 logger = logging.getLogger(__name__)
 
@@ -64,7 +64,7 @@ class HotkeyBinding:
     enabled: bool = True
 
 
-class HotkeyManager(QObject):
+class HotkeyManager:
     """
     快捷鍵管理器
 
@@ -76,7 +76,6 @@ class HotkeyManager(QObject):
     """
 
     def __init__(self, event_bus):
-        super().__init__()
         self.event_bus = event_bus
         self._bindings: Dict[str, HotkeyBinding] = {}
         self._handlers: Dict[str, Callable] = {}
@@ -86,22 +85,17 @@ class HotkeyManager(QObject):
         logger.info(f"HotkeyManager 已初始化, {len(self._bindings)} 組快捷鍵")
 
     def _load_bindings(self):
-        """從 QSettings 載入自訂快捷鍵，未找到則用預設值"""
-        settings = QSettings("LighTrading", "Hotkeys")
+        """從記憶體或預設值載入自訂快捷鍵"""
         for key, action in DEFAULT_HOTKEYS.items():
-            saved_key = settings.value(f"hotkey/{action}", key)
             self._bindings[action] = HotkeyBinding(
-                key=saved_key,
+                key=key,
                 action=action,
                 description=ACTION_DESCRIPTIONS.get(action, action),
             )
 
     def save_bindings(self):
-        """儲存自訂快捷鍵到 QSettings"""
-        settings = QSettings("LighTrading", "Hotkeys")
-        for action, binding in self._bindings.items():
-            settings.setValue(f"hotkey/{action}", binding.key)
-        logger.info("快捷鍵設定已儲存")
+        """目前為無頭後端，儲存邏輯由前端 LocalStorage 處理"""
+        pass
 
     # ──── 註冊處理函數 ────
 

@@ -7,7 +7,7 @@ PositionTracker — 即時部位追蹤器
 import logging
 from typing import Dict, Optional
 from dataclasses import dataclass, field
-from PyQt5.QtCore import QObject, QTimer
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -46,7 +46,7 @@ class PositionEntry:
             self.unrealized_pnl = 0.0
 
 
-class PositionTracker(QObject):
+class PositionTracker:
     """
     即時部位追蹤器
 
@@ -58,7 +58,6 @@ class PositionTracker(QObject):
     """
 
     def __init__(self, event_bus):
-        super().__init__()
         self.event_bus = event_bus
         self._positions: Dict[str, PositionEntry] = {}
         self._update_count = 0    # 變更計數器（供前端 dependency 用）
@@ -68,11 +67,9 @@ class PositionTracker(QObject):
         self.event_bus.on_tick.connect(self._on_tick)
         self.event_bus.on_account_update.connect(self._on_account_sync)
 
-        # 定期發射部位摘要（每 2 秒匯總一次，避免高頻事件淹沒 UI）
-        self._emit_timer = QTimer(self)
-        self._emit_timer.timeout.connect(self._emit_positions)
-        self._emit_timer.start(2000)
+        # 移除 QTimer，改為依賴 _dirty 狀態，在需要時被動匯總或由後端主動輪詢
         self._dirty = False
+        self._last_emit_time = time.time()
 
         logger.info("PositionTracker 已初始化")
 
@@ -140,6 +137,12 @@ class PositionTracker(QObject):
             if price > 0:
                 self._positions[symbol].update_mark_price(price)
                 self._dirty = True
+        
+        # 被動節流發射 (每 2 秒最多一次)
+        now = time.time()
+        if self._dirty and (now - self._last_emit_time) > 2.0:
+            self._emit_positions()
+            self._last_emit_time = now
 
     def _on_account_sync(self, account_data: dict):
         """收到後端帳務同步時，合併部位資料"""

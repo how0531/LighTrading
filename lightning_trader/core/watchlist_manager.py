@@ -9,7 +9,7 @@ from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from PyQt5.QtCore import QObject, QSettings
+
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +50,7 @@ class Watchlist:
         }
 
 
-class WatchlistManager(QObject):
+class WatchlistManager:
     """
     自選股管理器
 
@@ -74,7 +74,6 @@ class WatchlistManager(QObject):
     }
 
     def __init__(self, event_bus):
-        super().__init__()
         self.event_bus = event_bus
         self._watchlists: Dict[str, Watchlist] = {}
         self._active_list: str = "default"

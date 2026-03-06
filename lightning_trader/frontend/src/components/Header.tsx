@@ -1,15 +1,17 @@
 import React from 'react';
 import { useTradingContext } from '../contexts/TradingContext';
-import { Activity, Settings, Lock, Unlock } from 'lucide-react';
+import { Activity, Settings, Lock, Unlock, Maximize, Minimize } from 'lucide-react';
 
 interface HeaderProps {
   onOpenSettings?: () => void;
   isLayoutLocked?: boolean;
   onToggleLayoutLock?: () => void;
+  isFocusMode?: boolean;
+  onToggleFocusMode?: () => void;
 }
 
-const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock }) => {
-  const { isConnected, targetSymbol, subscribe } = useTradingContext();
+const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode }) => {
+  const { isConnected, targetSymbol, subscribe, totalRealtimePnl } = useTradingContext();
   const [symInput, setSymInput] = React.useState(targetSymbol);
 
   const handleSub = (e: React.FormEvent) => {
@@ -31,6 +33,14 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
       </div>
 
       <div className="flex items-center gap-4">
+        {/* 新增: 帳戶總即時損益 */}
+        <div className="hidden md:flex flex-col items-end mr-4">
+          <span className="text-[10px] text-slate-500 font-bold tracking-widest uppercase mb-0.5">總即時損益</span>
+          <span className={`text-sm font-black font-mono tabular-nums ${totalRealtimePnl >= 0 ? 'text-red-400 drop-shadow-[0_0_8px_rgba(248,113,113,0.3)]' : 'text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.3)]'}`}>
+            {totalRealtimePnl > 0 ? '+' : ''}{totalRealtimePnl.toLocaleString()}
+          </span>
+        </div>
+
         <form onSubmit={handleSub} className="flex items-center gap-3">
           <label className="text-xs text-slate-400 uppercase tracking-wider font-semibold hidden md:block font-mono">Active Symbol</label>
           <div className="flex bg-slate-900 rounded border border-slate-700 overflow-hidden focus-within:border-[#D4AF37] transition-all shadow-inner">
@@ -46,6 +56,14 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
             </button>
           </div>
         </form>
+
+        <button 
+          onClick={onToggleFocusMode}
+          className={`p-2 rounded-lg transition-all border ${isFocusMode ? 'bg-[#D4AF37]/20 text-[#D4AF37] border-[#D4AF37] hover:bg-[#D4AF37]/30 shadow-[0_0_8px_rgba(212,175,55,0.4)]' : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-300'}`}
+          title={isFocusMode ? "退出專注模式 (展開帳務)" : "專注模式 (隱藏帳務)"}
+        >
+          {isFocusMode ? <Minimize className="w-5 h-5" /> : <Maximize className="w-5 h-5" />}
+        </button>
 
         <button 
           onClick={onToggleLayoutLock}

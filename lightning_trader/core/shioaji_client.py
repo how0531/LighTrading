@@ -1,7 +1,8 @@
 import shioaji as sj
 from shioaji.constant import StockPriceType, FuturesPriceType, OrderType, Action, QuoteType
-from PyQt5.QtCore import QObject, pyqtSignal, QTimer
+import threading
 from .config import Config
+from .event_bus import Signal
 import json
 import logging
 import time
@@ -9,19 +10,18 @@ from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
-class ShioajiClient(QObject):
+class ShioajiClient:
     """
-    專業級 Shioaji 核心客戶端 - 完整報價與部位同步版
+    專業級 Shioaji 核心客戶端 - 完整報價與部位同步版 (無 PyQt5 依賴)
     """
-    signal_quote_tick = pyqtSignal(object)       
-    signal_quote_bidask = pyqtSignal(object)     
-    signal_login_status = pyqtSignal(bool, str)  
-    signal_order_update = pyqtSignal(object)     
-    signal_trade_update = pyqtSignal(object)     
-    signal_account_update = pyqtSignal(dict)     
-
     def __init__(self, event_bus=None):
-        super().__init__()
+        self.signal_quote_tick = Signal()       
+        self.signal_quote_bidask = Signal()     
+        self.signal_login_status = Signal()  
+        self.signal_order_update = Signal()     
+        self.signal_trade_update = Signal()     
+        self.signal_account_update = Signal()     
+
         self.event_bus = event_bus
         self.is_simulation = Config.SIMULATION
         logger.info(f"🚀 [Init] ShioajiClient 啟動. 初始環境 SIMULATION={self.is_simulation}")
@@ -37,10 +37,17 @@ class ShioajiClient(QObject):
         self._setup_callbacks()
         self.smart_orders: List[Dict[str, Any]] = []
         self.volume_profile: Dict[str, Any] = {} 
-        self.reconnect_timer = QTimer(self)
-        self.reconnect_timer.timeout.connect(self.check_connection)
-        self.reconnect_timer.start(10000) 
         self.last_message_time = time.time()
+        self._start_reconnect_timer()
+
+    def _start_reconnect_timer(self):
+        self._reconnect_timer = threading.Timer(10.0, self._on_reconnect_timer_tick)
+        self._reconnect_timer.daemon = True
+        self._reconnect_timer.start()
+
+    def _on_reconnect_timer_tick(self):
+        self.check_connection()
+        self._start_reconnect_timer()
         
         # 注意：自動登入已移至 main.py lifespan，避免雙重登入競態
         # 如果需要從 PyQt5 GUI 使用，可在 GUI 中手動呼叫 login()
@@ -78,7 +85,7 @@ class ShioajiClient(QObject):
 
     def _attempt_reconnect(self):
         self._is_reconnecting = True
-        QTimer.singleShot(5000, self._do_login_reconnect)
+        threading.Timer(5.0, self._do_login_reconnect).start()
 
     def _do_login_reconnect(self):
         if self.login():
@@ -95,7 +102,7 @@ class ShioajiClient(QObject):
                     logger.error(f"還原合約訂閱失敗: {e}")
         else:
             logger.warning("重連失敗，10 秒後重試")
-            QTimer.singleShot(10000, self._do_login_reconnect)
+            threading.Timer(10.0, self._do_login_reconnect).start()
 
     def _setup_callbacks(self):
         # === Shioaji v1 回呼（新版 SDK 預設格式） ===
@@ -236,7 +243,7 @@ class ShioajiClient(QObject):
                     self._deal_prices[ordno] = float(deal_price)
                     logger.debug(f"★ 成交均價快取: ordno={ordno} price={deal_price}")
             self.signal_order_update.emit(msg)
-            QTimer.singleShot(500, self.trigger_account_update)
+            threading.Timer(0.5, self.trigger_account_update).start()
 
         self.api.set_order_callback(on_order_status)
 
@@ -264,7 +271,7 @@ class ShioajiClient(QObject):
             self._setup_callbacks()
             logger.info("✅ Shioaji 登入成功，回呼已重新註冊")
             self.signal_login_status.emit(True, "登入成功")
-            QTimer.singleShot(1000, self.trigger_account_update)
+            threading.Timer(1.0, self.trigger_account_update).start()
             if self.current_contract: self.subscribe(self.current_contract.symbol)
             return True
         except Exception as e:
@@ -434,7 +441,7 @@ class ShioajiClient(QObject):
         except Exception as e:
             logger.warning(f"取得 Snapshot 失敗: {e}")
         
-        QTimer.singleShot(500, self.trigger_account_update)
+        threading.Timer(0.5, self.trigger_account_update).start()
         return contract.symbol
 
     def subscribe_background(self, symbol: str) -> bool:
@@ -585,7 +592,7 @@ class ShioajiClient(QObject):
                         logger.warning(f"update_order: 價格與數量均無變更，跳過")
                         return False
                     
-                    QTimer.singleShot(500, self.trigger_account_update)
+                    threading.Timer(0.5, self.trigger_account_update).start()
                     return True
             logger.warning(f"update_order: 找不到符合的委託 {symbol} {action} @{old_price}")
             return False
@@ -606,7 +613,7 @@ class ShioajiClient(QObject):
                     cancel_count += 1
             if cancel_count > 0:
                 logger.info(f"cancel_all: 已送出 {cancel_count} 筆刪單 ({symbol} {'Buy' if action == Action.Buy else 'Sell'})")
-                QTimer.singleShot(500, self.trigger_account_update)
+                threading.Timer(0.5, self.trigger_account_update).start()
             return cancel_count
         except Exception as e:
             logger.error(f"cancel_all 失敗: {e}")
@@ -626,7 +633,7 @@ class ShioajiClient(QObject):
                     cancel_count += 1
             if cancel_count > 0:
                 logger.info(f"cancel_orders_by_action_price: 已刪 {cancel_count} 筆 ({symbol} @{price})")
-                QTimer.singleShot(500, self.trigger_account_update)
+                threading.Timer(0.5, self.trigger_account_update).start()
             return cancel_count
         except Exception as e:
             logger.error(f"cancel_orders_by_action_price 失敗: {e}")
