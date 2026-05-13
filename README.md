@@ -93,11 +93,36 @@ cd lightning_trader/frontend && npm run dev
 
 瀏覽器開 http://localhost:5173 即可。
 
-### Docker
+### Docker（推薦：一鍵啟動為網頁 app）
+
+把專案當成個人單機網頁 app 用，最簡單的方式：
 
 ```bash
-docker-compose up
+# 1. 複製範本並填入永豐金憑證
+cp .env.example .env
+# (編輯 .env 設定 API_KEY / SECRET_KEY)
+
+# 2. build + 起兩個 container（首次約 3-5 分鐘）
+docker compose up -d
+
+# 3. 瀏覽器開
+open http://localhost:5173   # macOS
+xdg-open http://localhost:5173   # Linux
 ```
+
+收工。Frontend (nginx) 跑在 5173、backend (uvicorn) 在內部網路。
+所有 `/api`、`/ws` 都由 nginx 同站台轉發給 backend，前端只需要連 localhost:5173 一個 port。
+
+**重要**：
+
+- **架構限制 — 只能個人用**：backend 是 Shioaji 單例設計，整個 process 共用一個券商連線。多人共用一個部署會互相覆蓋帳號狀態。要給多人，需要 per-user sandbox 重構。
+- **Apple Silicon (M1/M2/M3)**：shioaji 只發 x86_64 wheel，build 時加 `--platform linux/amd64`：
+  ```bash
+  DOCKER_DEFAULT_PLATFORM=linux/amd64 docker compose up -d --build
+  ```
+- **更新版本**：`docker compose pull && docker compose up -d --build`
+- **看 log**：`docker compose logs -f backend`
+- **停止**：`docker compose down`（不刪資料）／`docker compose down -v`（含資料）
 
 ---
 

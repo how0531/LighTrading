@@ -253,7 +253,10 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const existing = wsRef.current;
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
 
-    const wsUrl = `ws://${window.location.hostname}:8000/ws/quotes`;
+    // 與 /api 相同策略：用 same-origin，由 vite dev proxy 或 nginx 轉發到 backend。
+    // https 站台自動升級成 wss。
+    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
+    const wsUrl = `${wsScheme}://${window.location.host}/ws/quotes`;
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {

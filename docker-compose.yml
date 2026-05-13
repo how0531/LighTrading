@@ -1,47 +1,52 @@
-# docker-compose for LighTrade dev environment
+# LighTrade 個人單機部署
 #
-# 注意：shioaji wheel 不在 PyPI 公開索引，需要從永豐金提供的私有索引或本機 wheel 安裝。
-# 預設這份 compose 只跑 frontend dev + backend skeleton（不含 shioaji 連線）。
-# 真實交易請在主機端 venv 安裝 shioaji 後直接執行 backend/main.py。
+# 一個 docker-compose up -d 就跑完整套：
+#   - backend  (FastAPI + Shioaji)  → :8000 (內部)
+#   - frontend (React build + nginx)→ :5173 → 瀏覽器開 http://localhost:5173
+#
+# 啟動前確認 ./.env 已填好 API_KEY / SECRET_KEY（請參考 .env.example）。
 
 services:
   backend:
-    image: python:3.11-slim
+    build:
+      context: .
+      dockerfile: lightning_trader/backend/Dockerfile
     container_name: lightrade-backend
-    working_dir: /app/lightning_trader
-    volumes:
-      - ./:/app
-      - lightrade-pip-cache:/root/.cache/pip
-    environment:
-      - PYTHONUNBUFFERED=1
-      - PYTHONPATH=/app/lightning_trader
+    restart: unless-stopped
     env_file:
       - .env
-    ports:
-      - "8000:8000"
-    command: >
-      bash -c "
-        pip install --quiet fastapi 'uvicorn[standard]' pydantic python-dotenv pytest &&
-        echo '⚠️ shioaji 未安裝；只能跑離線測試。' &&
-        echo '   真實連線請在主機端執行 backend/main.py' &&
-        tail -f /dev/null
-      "
+    environment:
+      - PYTHONUNBUFFERED=1
+      - LIGHTRADE_ALLOWED_ORIGINS=http://localhost:5173,http://127.0.0.1:5173
+    volumes:
+      # Shioaji 偶爾會寫 log / 快取，外掛出來方便檢視
+      - lightrade-data:/app/lightning_trader/data
+    networks:
+      - lightrade-net
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/api/health"]
+      interval: 15s
+      timeout: 3s
+      start_period: 20s
+      retries: 3
 
   frontend:
-    image: node:20-alpine
+    build:
+      context: ./lightning_trader/frontend
+      dockerfile: Dockerfile
     container_name: lightrade-frontend
-    working_dir: /app
-    volumes:
-      - ./lightning_trader/frontend:/app
-      - lightrade-node-modules:/app/node_modules
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_started
     ports:
-      - "5173:5173"
-    command: >
-      sh -c "
-        npm ci &&
-        npm run dev -- --host 0.0.0.0
-      "
+      - "5173:80"
+    networks:
+      - lightrade-net
+
+networks:
+  lightrade-net:
+    driver: bridge
 
 volumes:
-  lightrade-pip-cache:
-  lightrade-node-modules:
+  lightrade-data:

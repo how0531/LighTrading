@@ -1,0 +1,17 @@
+# 避免 build context 太大
+**/node_modules
+**/.pytest_cache
+**/__pycache__
+**/*.pyc
+**/.venv
+.git
+.github
+docker-compose.yml
+README.md
+*.log
+.env
+.env.local
+.env.*.local
+shioaji.log
+**/dist
+**/coverage
