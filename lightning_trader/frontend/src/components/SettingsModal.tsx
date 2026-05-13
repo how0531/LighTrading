@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors, ShieldAlert, RotateCcw } from 'lucide-react';
+import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors, ShieldAlert, RotateCcw, FileDown } from 'lucide-react';
 import { useSettings } from '../contexts/SettingsContext';
 import type { Settings, HotkeyItem } from '../contexts/SettingsContext';
 import { apiClient, normalizeApiError } from '../api/client';
@@ -57,6 +57,54 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     } catch (e) {
       const err = normalizeApiError(e);
       toast.error(err.user_msg || '更新風控失敗');
+    }
+  };
+
+  const downloadDailyReport = async () => {
+    try {
+      const res = await apiClient.get('/daily_report');
+      const r = res.data as {
+        date: string;
+        generated_at: string;
+        error?: string;
+        summary: null | {
+          trades_count: number; fills_count: number;
+          realized_pnl_estimate: number; buy_lots: number; sell_lots: number;
+          top_symbol: string | null;
+        };
+        by_symbol: Array<{
+          symbol: string; fills: number; buy_lots: number; sell_lots: number;
+          net_lots: number; avg_buy: number; avg_sell: number; est_pnl: number;
+        }>;
+      };
+      if (r.error) {
+        toast.error(`日報失敗：${r.error}`);
+        return;
+      }
+      // 組 CSV
+      const header = 'symbol,fills,buy_lots,sell_lots,net_lots,avg_buy,avg_sell,est_pnl\n';
+      const rows = r.by_symbol.map((s) =>
+        [s.symbol, s.fills, s.buy_lots, s.sell_lots, s.net_lots, s.avg_buy, s.avg_sell, s.est_pnl].join(',')
+      ).join('\n');
+      const summaryComment = r.summary
+        ? `# date=${r.date}, generated_at=${r.generated_at}\n# trades=${r.summary.trades_count}, fills=${r.summary.fills_count}, est_realized_pnl=${r.summary.realized_pnl_estimate}, top=${r.summary.top_symbol ?? ''}\n`
+        : `# date=${r.date}, generated_at=${r.generated_at}\n# (no data)\n`;
+      const csv = summaryComment + header + rows + '\n';
+      // 觸發下載
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `lightrade-daily-${r.date}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      const pnl = r.summary?.realized_pnl_estimate ?? 0;
+      toast.success(`日報已下載：${r.by_symbol.length} 商品 / 估算 PnL ${pnl.toLocaleString()}`);
+    } catch (e) {
+      const err = normalizeApiError(e);
+      toast.error(err.user_msg || '取得日報失敗');
     }
   };
 
@@ -279,6 +327,13 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                           title="抓取 /api/health + /api/metrics 並複製到剪貼簿，方便回報問題"
                         >
                           <ShieldAlert className="w-3.5 h-3.5" /> 複製系統診斷
+                        </button>
+                        <button
+                          onClick={downloadDailyReport}
+                          className="flex items-center gap-2 px-3 py-1.5 bg-emerald-700/40 hover:bg-emerald-700/60 text-emerald-200 rounded text-xs font-bold border border-emerald-700/50 transition-colors cursor-pointer"
+                          title="下載當日交易彙整 CSV"
+                        >
+                          <FileDown className="w-3.5 h-3.5" /> 下載當日 CSV
                         </button>
                       </div>
                     </section>

@@ -154,13 +154,14 @@ app.add_middleware(
 )
 
 # 掛載路由模組
-from backend.routers import orders, accounts, smart, user_settings, risk, health
+from backend.routers import orders, accounts, smart, user_settings, risk, health, reports
 app.include_router(orders.router)
 app.include_router(accounts.router)
 app.include_router(smart.router)
 app.include_router(user_settings.router)
 app.include_router(risk.router)
 app.include_router(health.router)
+app.include_router(reports.router)
 
 
 # ─── Frontend Static Serving (same-origin for Electron) ─────
