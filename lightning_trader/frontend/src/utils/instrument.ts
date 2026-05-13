@@ -51,3 +51,18 @@ export function isStockSymbol(symbol: string): boolean {
   const sym = (symbol || '').trim();
   return sym.length === 4 && /^\d{4}$/.test(sym);
 }
+
+/**
+ * 商品代號比對：
+ *   - 完全相同 → 命中
+ *   - target 全為純數字（台股代號）→ 允許 substring（例如 '2330' 命中 'TSE2330'）
+ *   - 否則（期貨/選擇權）必須精確匹配，避免 'TXFR1' 用 digit '1' 誤匹配 'MXFR1'
+ */
+export function symbolMatches(target: string, candidate: string): boolean {
+  if (!target || !candidate) return false;
+  const t = target.toUpperCase();
+  const c = candidate.toUpperCase();
+  if (t === c) return true;
+  if (/^\d{4,}$/.test(t)) return c.includes(t);
+  return false;
+}

@@ -4,6 +4,7 @@ import { useSettings } from '../contexts/SettingsContext';
 import { apiClient, normalizeApiError } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
 import { splitOrders, randomDelay } from '../utils/splitOrder';
+import { symbolMatches } from '../utils/instrument';
 import type { WorkingOrder } from '../contexts/TradingContext';
 import { getMultiplier } from '../types';
 
@@ -105,9 +106,8 @@ export function useDOMLogic() {
   const workingBuyMap = useMemo(() => {
     const m = new Map<number, number>();
     if (!targetSymbol) return m;
-    const code = targetSymbol.replace(/\D/g, '');
     workingOrders
-      .filter((o: WorkingOrder) => o.action === 'Buy' && (o.symbol === targetSymbol || (code && o.symbol.includes(code))))
+      .filter((o: WorkingOrder) => o.action === 'Buy' && symbolMatches(targetSymbol, o.symbol))
       .forEach((o: WorkingOrder) => {
         const key = Math.round(o.price * 100);
         m.set(key, (m.get(key) || 0) + (o.qty - o.filled_qty));
@@ -118,9 +118,8 @@ export function useDOMLogic() {
   const workingSellMap = useMemo(() => {
     const m = new Map<number, number>();
     if (!targetSymbol) return m;
-    const code = targetSymbol.replace(/\D/g, '');
     workingOrders
-      .filter((o: WorkingOrder) => o.action === 'Sell' && (o.symbol === targetSymbol || (code && o.symbol.includes(code))))
+      .filter((o: WorkingOrder) => o.action === 'Sell' && symbolMatches(targetSymbol, o.symbol))
       .forEach((o: WorkingOrder) => {
         const key = Math.round(o.price * 100);
         m.set(key, (m.get(key) || 0) + (o.qty - o.filled_qty));
@@ -158,9 +157,8 @@ export function useDOMLogic() {
   // --- 右上角顯示目前持倉 ---
   const currentPosition = useMemo(() => {
     if (!targetSymbol || !accountSummary?.positions) return null;
-    const code = targetSymbol.replace(/\D/g, '');
-    return accountSummary.positions.find((p: any) =>
-      p.symbol === targetSymbol || (code && p.symbol.includes(code))
+    return accountSummary.positions.find((p: { symbol: string }) =>
+      symbolMatches(targetSymbol, p.symbol)
     ) || null;
   }, [accountSummary.positions, targetSymbol]);
 

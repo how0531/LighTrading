@@ -37,12 +37,15 @@ export function computeLocalPnL(
   }
 
   const tgt = (targetSymbol || '').toUpperCase();
-  const tgtCode = tgt.replace(/\D/g, '');
+  // 只在 target 全為純數字（台股 4 碼）時，才用 digit-substring 做寬鬆匹配
+  // （例如 target '2330' → 匹配 'TSE2330'）。
+  // 期貨/選擇權代號（TXFR1 等）必須走精確比對，避免 'TXFR1'→'1' 誤匹配 'MXFR1'。
+  const tgtIsAllDigits = /^\d{4,}$/.test(tgt);
 
   let totalPnl = 0;
   const out: RealtimePosition[] = positions.map((pos) => {
     const posSym = (pos.symbol || '').toUpperCase();
-    const matches = posSym === tgt || (!!tgtCode && posSym.includes(tgtCode));
+    const matches = posSym === tgt || (tgtIsAllDigits && posSym.includes(tgt));
     if (matches && pos.price > 0) {
       const multiplier = getMultiplier(pos.symbol);
       const direction = pos.direction === 'Buy' ? 1 : -1;
