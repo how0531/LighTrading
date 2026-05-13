@@ -1,0 +1,71 @@
+{
+  "name": "lightrade-desktop",
+  "version": "0.1.0",
+  "description": "LighTrade desktop application (Electron shell)",
+  "main": "main.js",
+  "author": {
+    "name": "LighTrade",
+    "email": "noreply@lightrade.local"
+  },
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "ELECTRON_DEV=1 electron .",
+    "build": "electron-builder",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:linux": "electron-builder --linux"
+  },
+  "devDependencies": {
+    "electron": "^32.0.0",
+    "electron-builder": "^25.0.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.0.0"
+  },
+  "build": {
+    "appId": "com.lightrade.app",
+    "productName": "LighTrade",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "icons/**",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": "../lightning_trader/backend/dist/lightrade-backend",
+        "to": "backend/lightrade-backend"
+      },
+      {
+        "from": "../lightning_trader/frontend/dist",
+        "to": "frontend-dist"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.finance",
+      "target": ["dmg"],
+      "hardenedRuntime": false
+    },
+    "win": {
+      "target": ["nsis"]
+    },
+    "linux": {
+      "target": ["AppImage"],
+      "category": "Finance"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "publish": {
+      "provider": "github",
+      "owner": "how0531",
+      "repo": "LighTrading"
+    }
+  }
+}

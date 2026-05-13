@@ -14,9 +14,10 @@ import threading
 import json
 import asyncio
 import logging
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import uvicorn
 
@@ -162,6 +163,60 @@ app.include_router(risk.router)
 app.include_router(health.router)
 
 
+# ─── Frontend Static Serving (same-origin for Electron) ─────
+# 生產（打包）優先讀 LIGHTRADE_FRONTEND_DIST；開發回退到 ../frontend/dist
+_static_dir_env = os.environ.get("LIGHTRADE_FRONTEND_DIST")
+if _static_dir_env:
+    _static_dir = os.path.abspath(_static_dir_env)
+else:
+    _static_dir = os.path.abspath(
+        os.path.join(os.path.dirname(__file__), "..", "frontend", "dist")
+    )
+
+if os.path.isdir(_static_dir):
+    _assets_dir = os.path.join(_static_dir, "assets")
+    if os.path.isdir(_assets_dir):
+        # Vite 產生的雜湊化資產
+        app.mount(
+            "/assets",
+            StaticFiles(directory=_assets_dir),
+            name="assets",
+        )
+    _index_html = os.path.join(_static_dir, "index.html")
+    logger.info(f"📦 已啟用前端靜態服務：{_static_dir}")
+
+    # 已知靜態副檔名 —— 找不到就回真實 404，不要 fallback 到 index.html
+    _STATIC_EXTS = (
+        ".js", ".css", ".map", ".ico", ".png", ".jpg", ".jpeg", ".gif",
+        ".svg", ".webp", ".woff", ".woff2", ".ttf", ".eot", ".json",
+        ".txt", ".wasm",
+    )
+
+    @app.get("/{full_path:path}")
+    async def spa_fallback(full_path: str):
+        """SPA fallback：非 API/WS 路徑回傳 index.html，讓 React Router 處理。"""
+        # 不攔截 api/ ws/ —— 讓對應 router 自行 404
+        if full_path.startswith("api/") or full_path.startswith("ws/"):
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        # 直接命中根目錄檔案（例如 favicon.ico, robots.txt）
+        candidate = os.path.join(_static_dir, full_path)
+        if full_path and os.path.isfile(candidate):
+            return FileResponse(candidate)
+
+        # 已知靜態副檔名但找不到 —— 回真實 404
+        lower = full_path.lower()
+        if lower.endswith(_STATIC_EXTS):
+            raise HTTPException(status_code=404, detail="Not Found")
+
+        # 其餘交給 React Router
+        if os.path.isfile(_index_html):
+            return FileResponse(_index_html)
+        raise HTTPException(status_code=404, detail="Not Found")
+else:
+    logger.info(f"ℹ️ 未找到前端 dist 目錄（{_static_dir}），略過靜態掛載")
+
+
 # ─── WebSocket（唯一留在 main 的端點）─────────────────────
 
 @app.websocket("/ws/quotes")
@@ -213,4 +268,9 @@ async def websocket_quotes(websocket: WebSocket):
 # ─── 主程式入口 ──────────────────────────────────────────────
 
 if __name__ == "__main__":
-    uvicorn.run(app, host="127.0.0.1", port=8000, log_level="info")
+    _host = os.environ.get("LIGHTRADE_HOST", "127.0.0.1")
+    try:
+        _port = int(os.environ.get("LIGHTRADE_PORT", "8000"))
+    except ValueError:
+        _port = 8000
+    uvicorn.run(app, host=_host, port=_port, log_level="info")

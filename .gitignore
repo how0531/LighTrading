@@ -41,6 +41,10 @@ yarn-error.log
 # Frontend build
 lightning_trader/frontend/dist/
 
+# PyInstaller backend bundle output
+lightning_trader/backend/dist/
+lightning_trader/backend/build/
+
 # Test scratch
 test_external_order.py
 test_place.py

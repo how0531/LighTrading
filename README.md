@@ -124,6 +124,76 @@ xdg-open http://localhost:5173   # Linux
 - **看 log**：`docker compose logs -f backend`
 - **停止**：`docker compose down`（不刪資料）／`docker compose down -v`（含資料）
 
+### 桌面應用程式（Electron + 自動更新）
+
+打包成 macOS / Windows / Linux 原生可執行檔，內含 backend、frontend、Python runtime，雙擊就能用、可背景自動更新。
+
+#### 結構
+
+```
+Electron Main Process
+  ├── spawn lightrade-backend (PyInstaller 打包 FastAPI + shioaji)
+  ├── wait /api/health 200
+  └── BrowserWindow → http://127.0.0.1:8000  (backend 同 origin 服務 frontend dist)
+```
+
+#### 本機開發跑 Electron
+
+```bash
+# Terminal 1：跑 backend（沿用 venv 或 docker）
+cd lightning_trader/backend && python main.py
+
+# Terminal 2：跑 frontend dev server
+cd lightning_trader/frontend && npm run dev
+
+# Terminal 3：跑 Electron（dev 模式，連到上面 backend）
+cd electron
+npm install
+ELECTRON_DEV=1 npm run dev
+```
+
+#### 本機打包成桌面 app
+
+```bash
+# 1. Build frontend
+cd lightning_trader/frontend && npm ci && npm run build
+
+# 2. Build backend 為單檔 binary（PyInstaller --onedir）
+cd ../backend
+pip install -r requirements_backend.txt -r requirements_build.txt
+./build_backend.sh
+# → 產出 lightning_trader/backend/dist/lightrade-backend/
+
+# 3. Build Electron 安裝包
+cd ../../electron && npm ci && npm run build
+# → electron/release/ 內：
+#     - macOS:   LighTrade-0.1.0.dmg
+#     - Windows: LighTrade Setup 0.1.0.exe
+#     - Linux:   LighTrade-0.1.0.AppImage
+```
+
+#### 自動更新與發布
+
+push 一個 git tag（例：`v0.1.0`）就會觸發 `.github/workflows/desktop-build.yml`：
+
+```bash
+git tag v0.1.0
+git push origin v0.1.0
+```
+
+CI 會跨 macOS-13 (Intel) / Windows / Linux runner 各 build 一份，上傳到該 tag 對應的 GitHub Release。使用者的 Electron app 啟動時會 `electron-updater` 比對版本，有新版會跳通知。
+
+#### 桌面版限制
+
+| 平台 | 狀況 |
+|---|---|
+| Windows x64 | ✅ 主力支援 |
+| Linux x64 | ✅ AppImage |
+| macOS Intel | ✅ 用 `macos-13` runner build，shioaji wheel 直裝 |
+| macOS Apple Silicon | ⚠️ 透過 Rosetta 跑 x86_64 binary（首次啟動慢一些；shioaji 無原生 arm64 wheel） |
+
+桌面版仍是「單一帳號的工具」——backend 是 Shioaji 單例設計，一台機器跑一個 process，對應一組永豐金憑證。憑證從 `.env` 或登入畫面輸入，不會寫進 binary。
+
 ---
 
 ## 開發
