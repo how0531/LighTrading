@@ -130,10 +130,11 @@ app.add_middleware(
 )
 
 # 掛載路由模組
-from backend.routers import orders, accounts, smart
+from backend.routers import orders, accounts, smart, user_settings
 app.include_router(orders.router)
 app.include_router(accounts.router)
 app.include_router(smart.router)
+app.include_router(user_settings.router)
 
 
 # ─── WebSocket（唯一留在 main 的端點）─────────────────────

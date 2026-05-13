@@ -1,18 +1,5 @@
 import React from 'react';
-
-// 針對數字顯示精度
-const formatPrice = (price: number, symbol: string): string => {
-  const sym = symbol.toUpperCase();
-  if (sym.startsWith('TXF') || sym.startsWith('MXF') || sym.startsWith('TX') || sym.startsWith('MX') || sym.startsWith('UD') || sym.startsWith('MYM')) {
-    return price.toFixed(0);
-  }
-  if (sym.startsWith('NQ') || sym.startsWith('MNQ') || sym.startsWith('ES') || sym.startsWith('MES')) {
-    return price.toFixed(2);
-  }
-  if (price >= 1000) return price.toFixed(0);
-  if (price >= 100) return price.toFixed(1);
-  return price.toFixed(2);
-};
+import { formatPrice } from '../../utils/instrument';
 
 interface DOMHeaderProps {
   qData: any;
