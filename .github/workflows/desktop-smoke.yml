@@ -51,8 +51,11 @@ jobs:
 
       - name: Syntax check (yaml)
         run: |
+          # PyYAML 不在 setup-python 預裝清單；單純驗 YAML 結構不值得拖整套 pip install
+          pip install --quiet pyyaml
           python -c "import yaml; yaml.safe_load(open('.github/workflows/desktop-build.yml'))"
           python -c "import yaml; yaml.safe_load(open('.github/workflows/desktop-smoke.yml'))"
+          python -c "import yaml; yaml.safe_load(open('.github/workflows/ci.yml'))"
 
       - name: Frontend tsc + build + vitest
         run: |
