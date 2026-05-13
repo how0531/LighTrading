@@ -105,6 +105,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const watchlistDirtyRef = useRef<Record<string, MiniQuote>>({});
   const watchSymbolsRef = useRef<Set<string>>(new Set());
   const watchRetryCountRef = useRef<number>(0);   // Sprint 12 R2：watch error ack retry 計數
+  const watchRejectedRef = useRef<Set<string>>(new Set()); // R4：記住已警告過的 rejected，避免每次重連都重複 toast
 
   const refreshSmartOrders = useCallback(async (symbol?: string) => {
     try {
@@ -405,6 +406,18 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         } else if (data.action === 'watch' && data.status === 'success') {
           // 成功了就重置 retry 計數
           watchRetryCountRef.current = 0;
+          // Sprint 12 R4：被拒絕的 symbol 提示使用者，但只在第一次警告
+          // —— 重連、自動 retry、UI re-render 都不該重複跳 toast 騷擾。
+          const rejected = Array.isArray(data.rejected) ? data.rejected as string[] : [];
+          const newRejected = rejected.filter((s) => !watchRejectedRef.current.has(s));
+          if (newRejected.length > 0) {
+            newRejected.forEach((s) => watchRejectedRef.current.add(s));
+            toast.warn(`自選清單忽略 ${newRejected.length} 個無效商品：${newRejected.join(', ')}`);
+          }
+          // 同時把已成功訂閱的 symbol 從「已警告」集合移除（給使用者修正後重新試的可能）
+          if (Array.isArray(data.symbols)) {
+            for (const s of data.symbols as string[]) watchRejectedRef.current.delete(s);
+          }
         }
       } catch (err) { console.error('[WS error]', err); }
     };

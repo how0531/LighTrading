@@ -269,17 +269,22 @@ async def websocket_quotes(websocket: WebSocket):
                         continue
                     syms = [s for s in msg["symbols"] if isinstance(s, str) and s.strip()]
                     accepted = []
+                    rejected = []
                     for s in syms[:30]:   # 上限 30 個避免訂太多
                         try:
                             ok = await shared.run_in_qt_thread(shared.shioaji_client.subscribe_background, s)
-                            if ok:
-                                accepted.append(s.upper())
+                            (accepted if ok else rejected).append(s.upper())
                         except Exception as e:
                             logger.warning(f"watch 背景訂閱 {s} 失敗: {e}")
+                            rejected.append(s.upper())
+                    # 超過 30 的也視為 rejected，讓前端能提示
+                    if len(syms) > 30:
+                        rejected.extend(s.upper() for s in syms[30:])
                     await websocket.send_text(json.dumps({
                         "status": "success",
                         "action": "watch",
                         "symbols": accepted,
+                        "rejected": rejected,
                     }))
             except json.JSONDecodeError:
                 pass
