@@ -14,6 +14,8 @@ import threading
 import json
 import asyncio
 import logging
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,8 +23,55 @@ from fastapi.staticfiles import StaticFiles
 from contextlib import asynccontextmanager
 import uvicorn
 
-# 配置日誌記錄
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+
+def _setup_logging() -> None:
+    """
+    Sprint 21 (BACKLOG B8)：每日輪替的 backend log。
+    - file: ~/.lightrade/logs/backend.log，midnight 輪替，保留 14 天
+    - 同時保留 stderr console handler（給 dev / Electron sidecar stdout 鏡像）
+    - 環境變數 LIGHTRADE_LOG_DIR 覆寫資料夾；空字串 = 不啟用 file handler（測試友好）
+    """
+    fmt = logging.Formatter(
+        "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    root = logging.getLogger()
+    root.setLevel(logging.INFO)
+
+    # 先清掉 basicConfig 預設加的 handler，避免重複輸出
+    for h in list(root.handlers):
+        root.removeHandler(h)
+
+    # Console handler（stderr）—— 永遠保留
+    ch = logging.StreamHandler()
+    ch.setFormatter(fmt)
+    ch.setLevel(logging.INFO)
+    root.addHandler(ch)
+
+    # File handler（輪替）
+    log_dir_raw = os.environ.get("LIGHTRADE_LOG_DIR")
+    if log_dir_raw == "":
+        return  # 顯式空字串 = 跳過 file handler
+    log_dir = Path(log_dir_raw) if log_dir_raw else (Path.home() / ".lightrade" / "logs")
+    try:
+        log_dir.mkdir(parents=True, exist_ok=True)
+        fh = TimedRotatingFileHandler(
+            log_dir / "backend.log",
+            when="midnight",
+            interval=1,
+            backupCount=14,
+            encoding="utf-8",
+            utc=False,
+        )
+        fh.setFormatter(fmt)
+        fh.setLevel(logging.INFO)
+        root.addHandler(fh)
+    except Exception as e:
+        # log dir 不可寫就 fallback 到純 console，不擋 backend 啟動
+        root.warning(f"無法建立 file log handler 於 {log_dir}: {e}")
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 # 確保能在 backend 目錄中正確 import core 模組
