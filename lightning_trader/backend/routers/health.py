@@ -84,4 +84,14 @@ async def metrics():
         "pnl_broadcaster": {
             "cached_positions": pos_cache_size,
         },
+        # Sprint 19：下單→成交端到端延遲（ring buffer 最近 200 筆 P50/P95/Max）
+        "latency": _latency_payload(),
     }
+
+
+def _latency_payload() -> dict:
+    try:
+        from backend.services import latency_tracker
+        return latency_tracker.get_metrics()
+    except Exception:
+        return {"count": 0, "p50_ms": None, "p95_ms": None, "max_ms": None}

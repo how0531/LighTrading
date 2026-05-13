@@ -109,7 +109,7 @@ def on_shioaji_account_update(summary_data: dict):
 
 
 def on_shioaji_order_update(order_msg: dict):
-    """訂單狀態推播"""
+    """訂單狀態推播 + Sprint 19 latency 量測"""
     try:
         msg_item = {
             "type": "OrderUpdate",
@@ -119,6 +119,19 @@ def on_shioaji_order_update(order_msg: dict):
         }
         if shared.fastapi_loop:
             shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg_item)
+
+        # Sprint 19：state 為 deal/fill 時計算延遲
+        try:
+            state = str(order_msg.get("state", "") or order_msg.get("operation", "")).lower()
+            if "deal" in state or "fill" in state:
+                order_id = order_msg.get("ordno") or order_msg.get("seqno") \
+                           or (order_msg.get("order", {}) or {}).get("ordno") \
+                           or (order_msg.get("order", {}) or {}).get("seqno")
+                if order_id:
+                    from backend.services import latency_tracker
+                    latency_tracker.on_fill(order_id)
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"廣播訂單狀態更新時發生錯誤: {e}")
 

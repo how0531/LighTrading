@@ -146,6 +146,17 @@ async def place_order(req: PlaceOrderRequest, request: Request):
         order_lot=order_lot_val, order_cond=order_cond_val
     )
 
+    # Sprint 19：開始量測下單→成交延遲
+    if trade is not None:
+        try:
+            from backend.services import latency_tracker
+            order_id = getattr(getattr(trade, "order", None), "id", None) \
+                       or getattr(getattr(trade, "order", None), "seqno", None) \
+                       or getattr(trade, "id", None)
+            latency_tracker.on_place(order_id)
+        except Exception:
+            pass
+
     if trade:
         snapshot = await _get_working_orders_snapshot()
         return {"status": "success", "message": "下單成功", "data": snapshot}
