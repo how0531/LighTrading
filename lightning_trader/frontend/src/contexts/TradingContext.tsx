@@ -104,6 +104,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [watchlistQuotes, setWatchlistQuotes] = useState<Record<string, MiniQuote>>({});
   const watchlistDirtyRef = useRef<Record<string, MiniQuote>>({});
   const watchSymbolsRef = useRef<Set<string>>(new Set());
+  const watchRetryCountRef = useRef<number>(0);   // Sprint 12 R2：watch error ack retry 計數
 
   const refreshSmartOrders = useCallback(async (symbol?: string) => {
     try {
@@ -294,6 +295,13 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       ws.send(JSON.stringify({ action: 'subscribe', symbol: sym }));
       console.log(`[WS] 連線成功，訂閱 ${sym}`);
       lastMessageTimeRef.current = Date.now();
+      // Sprint 12 R2：重發 watchlist。backend 不持久化 subscribe_background，
+      // 斷線重連會丟掉所有 watch 訂閱；ws.onopen 主動補回。
+      const watched = Array.from(watchSymbolsRef.current);
+      if (watched.length > 0) {
+        ws.send(JSON.stringify({ action: 'watch', symbols: watched }));
+        console.log(`[WS] 重發 watchlist (${watched.length})`);
+      }
       // ★ 重連後立即強制三合一同步：確保斷線期間外部下單的單也會出現
       syncAll();
       // 區分首次連線 vs 重連：重連時主動告知使用者「已重新連線」
@@ -380,6 +388,23 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setTimeout(refreshOrders, 800);
         } else if (data.action === 'subscribe' && data.status === 'success') {
           if (data.symbol) setTargetSymbol(data.symbol);
+        } else if (data.action === 'watch' && data.status === 'error') {
+          // Sprint 12 R2：backend 還沒登入 → 3 秒後 retry 一次（最多 5 次）
+          if (watchRetryCountRef.current < 5 && watchSymbolsRef.current.size > 0) {
+            watchRetryCountRef.current += 1;
+            setTimeout(() => {
+              const wsNow = wsRef.current;
+              if (wsNow && wsNow.readyState === WebSocket.OPEN) {
+                wsNow.send(JSON.stringify({
+                  action: 'watch',
+                  symbols: Array.from(watchSymbolsRef.current),
+                }));
+              }
+            }, 3000);
+          }
+        } else if (data.action === 'watch' && data.status === 'success') {
+          // 成功了就重置 retry 計數
+          watchRetryCountRef.current = 0;
         }
       } catch (err) { console.error('[WS error]', err); }
     };

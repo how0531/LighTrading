@@ -260,6 +260,12 @@ async def websocket_quotes(websocket: WebSocket):
                     # Sprint 12：watchlist — 用 subscribe_background 訂閱所有 symbols
                     # 不切換 current_contract，背景流會把 Tick 也丟給這個 WS 連線
                     if not shared.shioaji_client._is_connected:
+                        # 回 error ack 讓前端能 retry（之前是靜默 ignore，登入競態時 user 看不到報價）
+                        await websocket.send_text(json.dumps({
+                            "status": "error",
+                            "action": "watch",
+                            "message": "尚未登入，請稍後再試",
+                        }))
                         continue
                     syms = [s for s in msg["symbols"] if isinstance(s, str) and s.strip()]
                     accepted = []
