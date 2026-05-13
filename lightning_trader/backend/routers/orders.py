@@ -5,7 +5,7 @@ routers/orders.py — 訂單相關 API 路由
 """
 import logging
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from shioaji.constant import (
     Action, OrderType,
@@ -13,6 +13,7 @@ from shioaji.constant import (
     StockOrderLot, StockOrderCond,
 )
 from backend import shared
+from backend.rate_limit import check_rate_limit
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["orders"])
@@ -20,29 +21,33 @@ router = APIRouter(prefix="/api", tags=["orders"])
 
 # ─── Request Models ────────────────────────────────────────
 
+from pydantic import Field
+from typing import Optional
+
+
 class PlaceOrderRequest(BaseModel):
-    symbol: str
-    price: float
-    action: str  # "Buy" 或 "Sell"
-    qty: int
+    symbol: str = Field(min_length=2, max_length=12)
+    price: float = Field(ge=0)            # 0 = 市價
+    action: str                            # "Buy" 或 "Sell"
+    qty: int = Field(gt=0, le=10000)
     order_type: str = "ROD"
     price_type: str = "LMT"
     order_cond: str = "Cash"
     order_lot: str = "Common"
 
 class CancelAllRequest(BaseModel):
-    symbol: str
-    action: str  # "Buy" 或 "Sell"
+    symbol: str = Field(min_length=2, max_length=12)
+    action: str
 
 class UpdateOrderRequest(BaseModel):
-    symbol: str
+    symbol: str = Field(min_length=2, max_length=12)
     action: str
-    old_price: float
-    new_price: float
-    qty: int = None
+    old_price: float = Field(ge=0)
+    new_price: float = Field(ge=0)
+    qty: Optional[int] = Field(default=None, gt=0, le=10000)
 
 class SymbolRequest(BaseModel):
-    symbol: str
+    symbol: str = Field(min_length=2, max_length=12)
 
 
 # ─── 內部工具 ──────────────────────────────────────────────
@@ -81,8 +86,9 @@ async def _get_working_orders_snapshot() -> list:
 # ─── 路由端點 ──────────────────────────────────────────────
 
 @router.post("/place_order")
-async def place_order(req: PlaceOrderRequest):
-    """下單後回傳已確認的活躍委託快照"""
+async def place_order(req: PlaceOrderRequest, request: Request):
+    """下單前先過 rate limit + RiskManager；通過後送出，並回傳已確認的活躍委託快照"""
+    check_rate_limit(request)
     action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
 
     order_type_map = {"ROD": OrderType.ROD, "IOC": OrderType.IOC, "FOK": OrderType.FOK}
@@ -98,10 +104,40 @@ async def place_order(req: PlaceOrderRequest):
     order_lot_val = order_lot_map.get(req.order_lot, StockOrderLot.Common)
 
     # 判斷商品類型以決定 PriceType
-    if len(req.symbol) == 4 and req.symbol.isdigit():
+    is_stock = len(req.symbol) == 4 and req.symbol.isdigit()
+    if is_stock:
         price_type_val = stock_price_type_map.get(req.price_type.upper(), StockPriceType.LMT)
     else:
         price_type_val = futures_price_type_map.get(req.price_type.upper(), FuturesPriceType.LMT)
+
+    # ★ Risk Manager 前置檢查
+    risk_manager = getattr(shared.engine, "risk_manager", None)
+    if risk_manager is not None:
+        is_market = req.price_type.upper() in {"MKT", "MKP"}
+        # 取得目前持倉狀態（給部位上限檢查）
+        try:
+            positions = await shared.run_in_qt_thread(shared.shioaji_client.list_positions)
+            pos = next((p for p in positions if p.get("symbol", "").upper() == req.symbol.upper()), None)
+        except Exception:
+            pos = None
+        pos_qty = (pos.get("qty", 0) if pos else 0)
+        pos_dir = (pos.get("direction", "Flat") if pos else "Flat")
+        result = risk_manager.pre_order_check(
+            symbol=req.symbol,
+            action=req.action,
+            qty=req.qty,
+            price=req.price,
+            is_market_order=is_market,
+            position_qty=pos_qty,
+            position_direction=pos_dir,
+        )
+        if not result.passed:
+            # BLOCK 直接 422；WARNING 也回 422 + warning flag，前端應彈確認框後重送 (帶 confirm=true)
+            raise HTTPException(status_code=422, detail={
+                "code": "RISK_BLOCK" if result.level.value == "block" else "RISK_WARNING",
+                "user_msg": result.reason,
+                "level": result.level.value,
+            })
 
     trade = await shared.run_in_qt_thread(
         shared.shioaji_client.place_order,
@@ -114,7 +150,10 @@ async def place_order(req: PlaceOrderRequest):
         snapshot = await _get_working_orders_snapshot()
         return {"status": "success", "message": "下單成功", "data": snapshot}
     else:
-        raise HTTPException(status_code=400, detail="下單失敗，請確認標的或庫存是否正確。")
+        raise HTTPException(status_code=400, detail={
+            "code": "ORDER_FAILED",
+            "user_msg": "下單失敗，請確認標的、保證金或庫存是否充足",
+        })
 
 
 @router.post("/update_order")
@@ -145,14 +184,32 @@ async def cancel_all(req: CancelAllRequest):
         raise HTTPException(status_code=500, detail="刪單過程遭遇錯誤")
 
 
+class FlattenRequest(BaseModel):
+    symbol: str = Field(min_length=2, max_length=12)
+    cancel_pending: bool = True   # F2: 預設先撤掉同商品兩側掛單
+
+
 @router.post("/flatten")
-async def flatten_position(req: SymbolRequest):
-    """一鍵平倉"""
+async def flatten_position(req: FlattenRequest):
+    """
+    一鍵平倉：可選擇先撤掉所有同商品掛單，再送反向市價單。
+    cancel_pending=True 時，平倉是 atomic-ish（先 cancel_all 兩側，再 flatten）。
+    """
+    if req.cancel_pending:
+        try:
+            await shared.run_in_qt_thread(shared.shioaji_client.cancel_all, req.symbol, Action.Buy)
+            await shared.run_in_qt_thread(shared.shioaji_client.cancel_all, req.symbol, Action.Sell)
+        except Exception as e:
+            logger.warning(f"flatten 前撤單失敗（仍會繼續平倉）: {e}")
+
     success = await shared.run_in_qt_thread(shared.shioaji_client.flatten_position, req.symbol)
     if success:
-        return {"status": "success", "message": "一鍵平倉指令已送出"}
+        return {"status": "success", "message": "一鍵平倉指令已送出", "cancelled_pending": req.cancel_pending}
     else:
-        raise HTTPException(status_code=400, detail="一鍵平倉失敗")
+        raise HTTPException(status_code=400, detail={
+            "code": "FLATTEN_FAILED",
+            "user_msg": "一鍵平倉失敗：可能沒有可平倉的部位",
+        })
 
 
 @router.post("/reverse")

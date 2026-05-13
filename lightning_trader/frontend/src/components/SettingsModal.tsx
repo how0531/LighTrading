@@ -1,14 +1,29 @@
-import React, { useState } from 'react';
-import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors, ShieldAlert, RotateCcw } from 'lucide-react';
 import { useSettings } from '../contexts/SettingsContext';
 import type { Settings, HotkeyItem } from '../contexts/SettingsContext';
+import { apiClient, normalizeApiError } from '../api/client';
+import { useToast } from './../contexts/ToastContext';
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-type TabType = 'transaction' | 'dom' | 'hotkeys' | 'splitOrder' | 'appearance';
+type TabType = 'transaction' | 'dom' | 'risk' | 'hotkeys' | 'splitOrder' | 'appearance';
+
+interface RiskConfigShape {
+  max_position_per_symbol: number;
+  max_position_enabled: boolean;
+  max_daily_loss: number;
+  max_daily_loss_enabled: boolean;
+  max_order_rate: number;
+  max_order_rate_enabled: boolean;
+  duplicate_window_ms: number;
+  duplicate_check_enabled: boolean;
+  market_order_confirm: boolean;
+  trading_enabled: boolean;
+}
 
 const ACTION_OPTIONS: { value: HotkeyItem['action']; label: string }[] = [
   { value: 'Buy',          label: '買進 (Buy)' },
@@ -20,14 +35,49 @@ const ACTION_OPTIONS: { value: HotkeyItem['action']; label: string }[] = [
 
 const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
   const { settings, updateSetting, resetSettings } = useSettings();
+  const { toast } = useToast();
   const [activeTab, setActiveTab] = useState<TabType>('transaction');
   const [capturingIdx, setCapturingIdx] = useState<number | null>(null);
+  const [riskCfg, setRiskCfg] = useState<RiskConfigShape | null>(null);
+
+  // 開啟對話框時拉一次最新風控設定
+  useEffect(() => {
+    if (!isOpen) return;
+    apiClient.get('/risk_config').then((res) => {
+      setRiskCfg(res.data as RiskConfigShape);
+    }).catch(() => { /* 後端不可用就隱藏該分頁的數字 */ });
+  }, [isOpen]);
+
+  const saveRisk = async (patch: Partial<RiskConfigShape>) => {
+    if (!riskCfg) return;
+    const next = { ...riskCfg, ...patch };
+    setRiskCfg(next);
+    try {
+      await apiClient.put('/risk_config', patch);
+    } catch (e) {
+      const err = normalizeApiError(e);
+      toast.error(err.user_msg || '更新風控失敗');
+    }
+  };
+
+  const resetDailyPnl = async () => {
+    try {
+      await apiClient.post('/risk_reset_daily');
+      toast.success('日虧損計數已重置，交易已啟用');
+      const res = await apiClient.get('/risk_config');
+      setRiskCfg(res.data as RiskConfigShape);
+    } catch (e) {
+      const err = normalizeApiError(e);
+      toast.error(err.user_msg || '重置失敗');
+    }
+  };
 
   if (!isOpen) return null;
 
   const tabs = [
     { id: 'transaction' as TabType, label: '交易設定',  icon: MousePointer2 },
     { id: 'dom'         as TabType, label: '閃電下單',  icon: Monitor },
+    { id: 'risk'        as TabType, label: '風險控管',  icon: ShieldAlert },
     { id: 'hotkeys'     as TabType, label: '快捷鍵',    icon: Keyboard },
     { id: 'splitOrder'  as TabType, label: '拆單設定',  icon: Scissors },
     { id: 'appearance'  as TabType, label: '外觀設定',  icon: Palette },
@@ -169,6 +219,116 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                     <ToggleItem label="顯示 成交量分布 (Volume Profile)" description="顯示各價位成交量分布圖" enabled={settings.visuals.showVolumeProfile} onToggle={() => handleToggle('visuals', 'showVolumeProfile')} />
                   </div>
                 </section>
+              </div>
+            )}
+
+            {/* ── 風險控管 ── */}
+            {activeTab === 'risk' && (
+              <div className="space-y-6">
+                {!riskCfg && (
+                  <p className="text-sm text-slate-500">無法連線到後端 RiskManager，請確認 backend 是否啟動。</p>
+                )}
+                {riskCfg && (
+                  <>
+                    <section>
+                      <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">全域交易開關</h3>
+                      <ToggleItem
+                        label={riskCfg.trading_enabled ? '交易：已啟用' : '交易：已停止'}
+                        description="日虧損觸發時會自動關閉；可手動切換或重置"
+                        enabled={riskCfg.trading_enabled}
+                        onToggle={() => saveRisk({ trading_enabled: !riskCfg.trading_enabled })}
+                      />
+                      <button
+                        onClick={resetDailyPnl}
+                        className="mt-3 flex items-center gap-2 px-3 py-1.5 bg-amber-700/40 hover:bg-amber-700/60 text-amber-200 rounded text-xs font-bold border border-amber-700/50 transition-colors cursor-pointer"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" /> 重置日虧損計數
+                      </button>
+                    </section>
+
+                    <section>
+                      <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">部位上限</h3>
+                      <ToggleItem
+                        label="啟用部位上限"
+                        description="送單前計算 現有部位 + 新增委託，超過則阻擋"
+                        enabled={riskCfg.max_position_enabled}
+                        onToggle={() => saveRisk({ max_position_enabled: !riskCfg.max_position_enabled })}
+                      />
+                      <div className="mt-3">
+                        <NumInput
+                          label="單一商品最大口數/張數"
+                          description=""
+                          value={riskCfg.max_position_per_symbol}
+                          min={1} max={9999}
+                          onChange={(v) => saveRisk({ max_position_per_symbol: v })}
+                        />
+                      </div>
+                    </section>
+
+                    <section>
+                      <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">日虧損上限</h3>
+                      <ToggleItem
+                        label="啟用日虧損自動停止"
+                        description="觸發時關閉 trading_enabled，所有新單會被擋下"
+                        enabled={riskCfg.max_daily_loss_enabled}
+                        onToggle={() => saveRisk({ max_daily_loss_enabled: !riskCfg.max_daily_loss_enabled })}
+                      />
+                      <div className="mt-3">
+                        <NumInput
+                          label="日虧損上限 (負值)"
+                          description="例如 -50000 = 帳上 -5 萬即停止交易"
+                          value={riskCfg.max_daily_loss}
+                          min={-10000000} max={0}
+                          onChange={(v) => saveRisk({ max_daily_loss: v })}
+                        />
+                      </div>
+                    </section>
+
+                    <section>
+                      <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">頻率與防呆</h3>
+                      <ToggleItem
+                        label="啟用下單頻率上限"
+                        description=""
+                        enabled={riskCfg.max_order_rate_enabled}
+                        onToggle={() => saveRisk({ max_order_rate_enabled: !riskCfg.max_order_rate_enabled })}
+                      />
+                      <div className="mt-3">
+                        <NumInput
+                          label="每秒最多筆數"
+                          description=""
+                          value={riskCfg.max_order_rate}
+                          min={1} max={100}
+                          onChange={(v) => saveRisk({ max_order_rate: v })}
+                        />
+                      </div>
+                      <div className="mt-4">
+                        <ToggleItem
+                          label="啟用重複下單防呆"
+                          description="短時間內相同方向價量會被視為手震"
+                          enabled={riskCfg.duplicate_check_enabled}
+                          onToggle={() => saveRisk({ duplicate_check_enabled: !riskCfg.duplicate_check_enabled })}
+                        />
+                      </div>
+                      <div className="mt-3">
+                        <NumInput
+                          label="重複偵測窗口 (ms)"
+                          description=""
+                          value={riskCfg.duplicate_window_ms}
+                          min={0} max={10000}
+                          onChange={(v) => saveRisk({ duplicate_window_ms: v })}
+                        />
+                      </div>
+                      <div className="mt-4">
+                        <ToggleItem
+                          label="市價單需確認"
+                          description=""
+                          enabled={riskCfg.market_order_confirm}
+                          onToggle={() => saveRisk({ market_order_confirm: !riskCfg.market_order_confirm })}
+                        />
+                      </div>
+                    </section>
+                  </>
+                )}
               </div>
             )}
 

@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { getOrderHistory, apiClient } from '../api/client';
+import { getOrderHistory, apiClient, normalizeApiError } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
+import { useToast } from '../contexts/ToastContext';
 
 interface Trade {
   time: string;
@@ -46,10 +47,14 @@ const formatStatusText = (status: string, failedMsg?: string): string => {
 
 const Panel_OrderHistory: React.FC = () => {
   const { accountSummary, cancelOrder } = useTradingContext();
+  const { toast } = useToast();
   const [trades, setTrades] = useState<Trade[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
   const [syncAge, setSyncAge] = useState(0); // 距離上次同步的秒數
+  // F4: 多選批次刪單
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const tradeKey = (t: Trade) => `${t.time}-${t.symbol}-${t.action}-${t.price}-${t.qty}`;
 
   const fetchHistory = async () => {
     setIsLoading(true);
@@ -65,14 +70,15 @@ const Panel_OrderHistory: React.FC = () => {
   };
 
   const handleUpdateQty = async (t: Trade) => {
+    // 減量 prompt 改用瀏覽器原生 prompt 仍可接受（單行數字輸入，後面想做美化再升級為 Modal）
     const remainingQty = t.qty - t.filled_qty;
-    const msg = `請輸入新的總委託數量\n(原委託量 ${t.qty}，已成交 ${t.filled_qty}，剩餘可減 ${remainingQty})\n\n💡 輸入的數字必須小於 ${t.qty} 且大於等於 ${t.filled_qty}`;
+    const msg = `輸入新的總委託數量\n原委託 ${t.qty}，已成交 ${t.filled_qty}，最多可減至 ${t.filled_qty}（最少）`;
     const input = window.prompt(msg, remainingQty.toString());
     if (!input) return;
-    
+
     const newQty = parseInt(input, 10);
     if (isNaN(newQty) || newQty >= t.qty || newQty < t.filled_qty) {
-      alert(`❌ 輸入無效！\n數量必須小於原委託量 (${t.qty})，且大於等於已成交量 (${t.filled_qty})`);
+      toast.error(`輸入無效：必須 ≥ ${t.filled_qty} 且 < ${t.qty}`);
       return;
     }
 
@@ -84,10 +90,11 @@ const Panel_OrderHistory: React.FC = () => {
         new_price: t.price,
         qty: newQty
       });
+      toast.success(`${t.symbol} 減量至 ${newQty}`);
       setTimeout(fetchHistory, 500);
-    } catch (err: any) {
-      console.error("Failed to update order:", err);
-      alert(`減量失敗：${err?.response?.data?.detail || err.message}`);
+    } catch (err) {
+      const e = normalizeApiError(err);
+      toast.error(e.user_msg || '減量失敗');
     }
   };
 
@@ -108,6 +115,43 @@ const Panel_OrderHistory: React.FC = () => {
   }, [accountMsgCount]);
 
   const validTrades = trades.filter(t => t.symbol && t.symbol.trim() !== "");
+  const cancellable = validTrades.filter(t =>
+    ['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(t.status)
+  );
+
+  const toggleSelected = (key: string) => {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  };
+
+  const selectAllCancellable = () => {
+    if (selected.size === cancellable.length) {
+      setSelected(new Set());
+    } else {
+      setSelected(new Set(cancellable.map(tradeKey)));
+    }
+  };
+
+  const batchCancel = () => {
+    const targets = cancellable.filter((t) => selected.has(tradeKey(t)));
+    if (targets.length === 0) return;
+    toast.warn(`將批次刪除 ${targets.length} 筆委託`, {
+      actionLabel: '確認批次刪單',
+      durationMs: 8000,
+      onAction: async () => {
+        for (const t of targets) {
+          try { await cancelOrder(t.action, t.price); } catch { /* 個別失敗繼續 */ }
+        }
+        setSelected(new Set());
+        toast.info(`批次刪單已送出 ${targets.length} 筆`);
+        setTimeout(fetchHistory, 500);
+      },
+    });
+  };
 
   return (
     <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700 h-full flex flex-col">
@@ -120,12 +164,23 @@ const Panel_OrderHistory: React.FC = () => {
             </span>
           )}
         </div>
-        <button
-          onClick={fetchHistory}
-          className="text-xs bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition-colors"
-        >
-          重新整理
-        </button>
+        <div className="flex items-center gap-1.5">
+          {selected.size > 0 && (
+            <button
+              onClick={batchCancel}
+              className="text-xs bg-red-600/30 hover:bg-red-600/50 text-red-200 border border-red-600/50 px-2 py-1 rounded transition-colors font-bold"
+              title="批次刪除已選取的委託"
+            >
+              刪除選取 ({selected.size})
+            </button>
+          )}
+          <button
+            onClick={fetchHistory}
+            className="text-xs bg-slate-700 hover:bg-slate-600 px-2 py-1 rounded transition-colors"
+          >
+            重新整理
+          </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-auto relative custom-scrollbar">
@@ -137,6 +192,17 @@ const Panel_OrderHistory: React.FC = () => {
         <table className="w-full text-xs text-left border-separate border-spacing-y-1">
           <thead className="sticky top-0 bg-slate-800 text-slate-500 z-10">
             <tr>
+              <th className="pb-2 px-2 w-6">
+                {cancellable.length > 0 && (
+                  <input
+                    type="checkbox"
+                    checked={selected.size === cancellable.length && cancellable.length > 0}
+                    onChange={selectAllCancellable}
+                    className="accent-[#D4AF37] cursor-pointer"
+                    title="全選/取消全選 可刪委託"
+                  />
+                )}
+              </th>
               <th className="pb-2 font-medium px-2">時間</th>
               <th className="pb-2 font-medium px-2">商品</th>
               <th className="pb-2 font-medium px-2">方向</th>
@@ -148,11 +214,24 @@ const Panel_OrderHistory: React.FC = () => {
           <tbody>
             {validTrades.length === 0 ? (
               <tr>
-                <td colSpan={6} className="py-8 text-center text-slate-500">今日尚無委託</td>
+                <td colSpan={7} className="py-8 text-center text-slate-500">今日尚無委託</td>
               </tr>
             ) : (
-              validTrades.map((t, idx) => (
-                <tr key={`${t.time}-${idx}`} className="hover:bg-white/5 transition-colors bg-slate-700/20">
+              validTrades.map((t, idx) => {
+                const k = tradeKey(t);
+                const isCancellable = ['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(t.status);
+                return (
+                <tr key={`${t.time}-${idx}`} className={`hover:bg-white/5 transition-colors ${selected.has(k) ? 'bg-amber-500/10 ring-1 ring-amber-500/30' : 'bg-slate-700/20'}`}>
+                  <td className="py-2 px-2">
+                    {isCancellable && (
+                      <input
+                        type="checkbox"
+                        checked={selected.has(k)}
+                        onChange={() => toggleSelected(k)}
+                        className="accent-[#D4AF37] cursor-pointer"
+                      />
+                    )}
+                  </td>
                   <td className="py-2 px-2 text-slate-400 font-mono tabular-nums">{t.time.split('T')[1]?.split('.')[0] || t.time}</td>
                   <td className="py-2 px-2 font-mono font-medium">{t.symbol}</td>
                   <td className={`py-2 px-2 font-bold ${t.action === 'Buy' ? 'text-red-400' : 'text-green-400'}`}>
@@ -182,9 +261,11 @@ const Panel_OrderHistory: React.FC = () => {
                           </button>
                           <button
                             onClick={() => {
-                              if (window.confirm(`確定要取消 ${t.symbol} 委託單嗎？`)) {
-                                cancelOrder(t.action, t.price);
-                              }
+                              toast.warn(`刪除 ${t.symbol} ${t.action === 'Buy' ? '買' : '賣'} @${t.price}？`, {
+                                actionLabel: '確認刪單',
+                                durationMs: 6000,
+                                onAction: () => cancelOrder(t.action, t.price),
+                              });
                             }}
                             className="bg-slate-700 hover:bg-red-500 hover:text-white text-slate-300 rounded px-2 py-0.5 text-[10px] transition-colors shadow-sm"
                           >
@@ -195,7 +276,8 @@ const Panel_OrderHistory: React.FC = () => {
                     </div>
                   </td>
                 </tr>
-              ))
+                );
+              })
             )}
           </tbody>
         </table>

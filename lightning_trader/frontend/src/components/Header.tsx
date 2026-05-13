@@ -1,6 +1,17 @@
-import React from 'react';
+import React, { useEffect, useState } from 'react';
 import { useTradingContext } from '../contexts/TradingContext';
-import { Activity, Settings, Lock, Unlock, Maximize, Minimize } from 'lucide-react';
+import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw } from 'lucide-react';
+import { getAccountBalance } from '../api/client';
+import { SymbolPicker } from './SymbolPicker';
+
+const QUICK_SYMBOLS = ['TXFR1', 'MXFR1', '2330', '2454'] as const;
+
+interface BalanceState {
+  equity: number;
+  margin_available: number;
+  margin_required: number;
+  pnl: number;
+}
 
 interface HeaderProps {
   onOpenSettings?: () => void;
@@ -11,8 +22,25 @@ interface HeaderProps {
 }
 
 const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode }) => {
-  const { isConnected, targetSymbol, subscribe, totalRealtimePnl } = useTradingContext();
+  const { isConnected, isTickStale, targetSymbol, subscribe, totalRealtimePnl, forceReconnect } = useTradingContext();
   const [symInput, setSymInput] = React.useState(targetSymbol);
+  const [balance, setBalance] = useState<BalanceState | null>(null);
+
+  useEffect(() => {
+    if (!isConnected) return;
+    const fetchBalance = () => {
+      getAccountBalance().then((b: BalanceState) => {
+        if (b && (b.equity || b.margin_required)) setBalance(b);
+      }).catch(() => { /* 靜默 */ });
+    };
+    fetchBalance();
+    const t = setInterval(fetchBalance, 15000); // 每 15 秒拉一次
+    return () => clearInterval(t);
+  }, [isConnected]);
+
+  const marginUsedPct = balance && balance.equity > 0
+    ? Math.min(100, Math.round((balance.margin_required / balance.equity) * 100))
+    : 0;
 
   const handleSub = (e: React.FormEvent) => {
     e.preventDefault();
@@ -26,14 +54,50 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
         <div>
           <h2 className="text-lg font-black tracking-[0.2em] text-white italic transition-transform hover:scale-105 cursor-default font-mono">LIGHTRADE</h2>
           <div className="flex items-center gap-1.5 mt-0.5">
-            <div className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-[#10B981] shadow-[0_0_6px_rgba(16,185,129,0.3)]' : 'bg-[#EF4444]'}`}></div>
-            <span className="text-[10px] text-slate-400 font-mono tracking-widest uppercase font-bold">{isConnected ? 'ONLINE' : 'OFFLINE'}</span>
+            <div className={`w-1.5 h-1.5 rounded-full ${
+              !isConnected ? 'bg-[#EF4444]'
+              : isTickStale ? 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)]'
+              : 'bg-[#10B981] shadow-[0_0_6px_rgba(16,185,129,0.3)]'
+            }`}></div>
+            <span className="text-[10px] text-slate-400 font-mono tracking-widest uppercase font-bold">
+              {!isConnected ? 'OFFLINE' : isTickStale ? 'NO-TICK' : 'ONLINE'}
+            </span>
+            {(!isConnected || isTickStale) && (
+              <button
+                type="button"
+                onClick={forceReconnect}
+                className="ml-1 flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 rounded text-[9px] font-bold border border-amber-500/40 transition-colors cursor-pointer"
+                title="立即重連 WebSocket"
+              >
+                <RefreshCw className="w-2.5 h-2.5" />
+                立即重連
+              </button>
+            )}
           </div>
         </div>
       </div>
 
       <div className="flex items-center gap-4">
-        {/* 新增: 帳戶總即時損益 */}
+        {/* 保證金 widget */}
+        {balance && (
+          <div className="hidden lg:flex flex-col items-end mr-2 min-w-[110px]">
+            <span className="text-[10px] text-slate-500 font-bold tracking-widest uppercase mb-0.5">可用保證金</span>
+            <span className="text-sm font-black font-mono tabular-nums text-slate-200">
+              {balance.margin_available.toLocaleString()}
+            </span>
+            <div className="flex items-center gap-1 mt-0.5 w-full">
+              <div className="flex-1 h-1 bg-slate-800 rounded overflow-hidden">
+                <div
+                  className={`h-full transition-all ${marginUsedPct >= 80 ? 'bg-red-500' : marginUsedPct >= 60 ? 'bg-amber-400' : 'bg-emerald-500'}`}
+                  style={{ width: `${marginUsedPct}%` }}
+                />
+              </div>
+              <span className={`text-[9px] font-mono tabular-nums ${marginUsedPct >= 80 ? 'text-red-400' : 'text-slate-500'}`}>{marginUsedPct}%</span>
+            </div>
+          </div>
+        )}
+
+        {/* 帳戶總即時損益 */}
         <div className="hidden md:flex flex-col items-end mr-4">
           <span className="text-[10px] text-slate-500 font-bold tracking-widest uppercase mb-0.5">總即時損益</span>
           <span className={`text-sm font-black font-mono tabular-nums ${totalRealtimePnl >= 0 ? 'text-red-400 drop-shadow-[0_0_8px_rgba(248,113,113,0.3)]' : 'text-emerald-400 drop-shadow-[0_0_8px_rgba(52,211,153,0.3)]'}`}>
@@ -54,6 +118,27 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
             <button type="submit" className="bg-slate-800 text-slate-400 hover:bg-[#D4AF37] hover:text-white px-3 py-1.5 text-[10px] font-black tracking-tighter border-l border-slate-700 transition-all uppercase">
               LOAD
             </button>
+          </div>
+          <div className="hidden lg:block">
+            <SymbolPicker onSelect={(s) => { setSymInput(s); subscribe(s); }} />
+          </div>
+
+          <div className="hidden lg:flex items-center gap-1">
+            {QUICK_SYMBOLS.map((s) => (
+              <button
+                type="button"
+                key={s}
+                onClick={() => { setSymInput(s); subscribe(s); }}
+                className={`px-2 py-1 text-[10px] font-mono font-bold rounded border transition-all cursor-pointer ${
+                  targetSymbol === s
+                    ? 'bg-[#D4AF37]/20 border-[#D4AF37] text-[#D4AF37]'
+                    : 'bg-slate-800/50 border-slate-700 text-slate-400 hover:border-[#D4AF37]/50 hover:text-slate-200'
+                }`}
+                title={`快速切換到 ${s}`}
+              >
+                {s}
+              </button>
+            ))}
           </div>
         </form>
 

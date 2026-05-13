@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { getPositions, getAccounts } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
+import { useToast } from '../contexts/ToastContext';
 
 interface Position {
   symbol: string;
@@ -18,9 +19,10 @@ interface Account {
 
 const Panel_Positions: React.FC = () => {
   const { isConnected, accountSummary, subscribe, flattenPosition, realtimePositions, totalRealtimePnl } = useTradingContext();
+  const { toast } = useToast();
   const [positions, setPositions] = useState<Position[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
-  const [selectedCategory, setSelectedCategory] = useState<'ALL' | 'Stock' | 'Future'>('ALL');
+  const [selectedCategory, setSelectedCategory] = useState<'ALL' | 'Stock' | 'Future' | 'Option'>('ALL');
   const [selectedAccountId, setSelectedAccountId] = useState<string>('');
   const [isLoading, setIsLoading] = useState(true);
 
@@ -67,11 +69,11 @@ const Panel_Positions: React.FC = () => {
   // 過濾後的帳號清單
   const filteredAccounts = useMemo(() => {
     if (selectedCategory === 'ALL') return accounts;
-    // 使用不區分大小寫的匹配，增加容錯
     const target = selectedCategory.toLowerCase();
     return accounts.filter(acc => {
       if (!acc.category) return false;
       const cat = acc.category.toLowerCase();
+      // Stock / Future / Option 三類獨立比對
       return cat.startsWith(target);
     });
   }, [accounts, selectedCategory]);
@@ -104,15 +106,15 @@ const Panel_Positions: React.FC = () => {
         <div className="flex items-center gap-2">
           {/* 類別切換 (樣式模仿截圖) */}
           <div className="flex gap-1">
-            {[
-              { id: 'ALL', label: '全' },
-              { id: 'Stock', label: '證' },
+            {([
+              { id: 'ALL',    label: '全' },
+              { id: 'Stock',  label: '證' },
               { id: 'Future', label: '期' },
-              { id: 'Future', label: '權' } // 權通常在期裡面，點擊同樣篩選 Future
-            ].map((cat, idx) => (
+              { id: 'Option', label: '權' },
+            ] as const).map((cat) => (
               <button
-                key={`${cat.id}-${idx}`}
-                onClick={() => setSelectedCategory(cat.id as 'ALL' | 'Stock' | 'Future')}
+                key={cat.id}
+                onClick={() => setSelectedCategory(cat.id)}
                 className={`w-7 h-7 flex items-center justify-center text-xs font-bold rounded-sm border transition-all ${selectedCategory === cat.id
                   ? 'bg-amber-400 text-slate-900 border-amber-500 shadow-[0_0_10px_rgba(251,191,36,0.2)]'
                   : 'bg-slate-800 text-slate-500 border-slate-700 hover:border-slate-500'
@@ -173,7 +175,7 @@ const Panel_Positions: React.FC = () => {
                     className="px-2 py-2 font-mono tabular-nums text-slate-200 cursor-pointer hover:text-[#D4AF37] hover:underline transition-colors"
                     onClick={() => {
                       subscribe(pos.symbol);
-                      alert('已切換至商品 ' + pos.symbol);
+                      toast.info(`已切換至 ${pos.symbol}`);
                     }}
                     title={`點擊切換至 ${pos.symbol}`}
                   >{pos.symbol}</td>
@@ -192,10 +194,18 @@ const Panel_Positions: React.FC = () => {
                   <td className="px-2 py-2 text-center">
                     <button
                       onClick={(e) => {
-                        e.stopPropagation(); // 防止觸發列點擊事件
-                        if (window.confirm(`確定要以市價平倉 ${pos.symbol} (數量: ${pos.qty}) 嗎？\n\n警告：此操作將立即送出反向市價單！`)) {
-                          flattenPosition(pos.symbol);
-                        }
+                        e.stopPropagation();
+                        toast.warn(
+                          `將以市價平倉 ${pos.symbol}（${pos.direction === 'Buy' ? '多' : '空'} ${pos.qty} 口/張）`,
+                          {
+                            actionLabel: '確認平倉',
+                            durationMs: 8000,
+                            onAction: () => {
+                              flattenPosition(pos.symbol);
+                              toast.info(`${pos.symbol} 平倉指令已送出`);
+                            },
+                          }
+                        );
                       }}
                       className="bg-slate-700 hover:bg-amber-500 hover:text-black text-slate-300 rounded px-2 py-0.5 text-[10px] font-bold transition-all shadow-sm"
                     >

@@ -28,13 +28,28 @@ active_connections: set[WebSocket] = set()
 # Shioaji → WebSocket 的報價佇列
 quotes_to_broadcast: asyncio.Queue = asyncio.Queue()
 
-# 全域訂單序號，用於解決前端收單的競態問題
-_order_seq = int(time.time() * 1000)
+# ─── 訂單序號（分流） ──────────────────────────────────────
+# 分成兩條獨立流：
+#   - callback_seq：Shioaji order_callback 推送的 OrderUpdate
+#   - snapshot_seq：REST API 主動回傳的快照（place_order / cancel_all / order_history）
+# 兩條序號流互不干擾，前端各自比較自己的 ref，避免交錯導致的丟更新。
+_base = int(time.time() * 1000)
+_callback_seq = _base
+_snapshot_seq = _base
 
+def generate_callback_seq() -> int:
+    global _callback_seq
+    _callback_seq += 1
+    return _callback_seq
+
+def generate_snapshot_seq() -> int:
+    global _snapshot_seq
+    _snapshot_seq += 1
+    return _snapshot_seq
+
+# 向後相容：保留舊名，預設指到 snapshot_seq
 def generate_order_seq() -> int:
-    global _order_seq
-    _order_seq += 1
-    return _order_seq
+    return generate_snapshot_seq()
 
 
 # ─── 工具函式 ──────────────────────────────────────────────

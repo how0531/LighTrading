@@ -194,7 +194,7 @@ class RiskManager:
             return r
 
         # === 3. 部位上限 ===
-        r = self._check_max_position(symbol, action, qty, position_qty)
+        r = self._check_max_position(symbol, action, qty, position_qty, position_direction)
         if not r.passed:
             return r
 
@@ -243,16 +243,28 @@ class RiskManager:
         return CheckResult.ok()
 
     def _check_max_position(self, symbol: str, action: str,
-                            qty: int, current_qty: int) -> CheckResult:
+                            qty: int, current_qty: int,
+                            current_direction: str = "Flat") -> CheckResult:
+        """
+        Bug fix: 反向加碼（持有空單時下買單）應該算「平倉」而非「加碼」。
+        把 (current_qty, current_direction) 轉成有號淨部位，再加上有號委託量。
+        """
         if not self.config.max_position_enabled:
             return CheckResult.ok()
-        # 優先使用傳入的 current_qty，fallback 到內部追蹤
+        # 把現有部位轉成有號值
         if current_qty == 0:
-            current_qty = self._current_positions.get(symbol, 0)
-        projected = current_qty + qty if action == "Buy" else current_qty - qty
+            # fallback：內部追蹤已是有號 net
+            net_current = self._current_positions.get(symbol, 0)
+        elif current_direction == "Sell":
+            net_current = -current_qty
+        else:
+            net_current = current_qty
+        # 委託 → 有號增減
+        delta = qty if action == "Buy" else -qty
+        projected = net_current + delta
         if abs(projected) > self.config.max_position_per_symbol:
-            reason = (f"超過部位上限: 目前 {current_qty} 口，下單後 {projected} 口 "
-                      f"(上限 {self.config.max_position_per_symbol})")
+            reason = (f"超過部位上限: 目前淨 {net_current} 口，下單後淨 {projected} 口 "
+                      f"(上限 ±{self.config.max_position_per_symbol})")
             self.event_bus.on_risk_breach.emit("warning", reason)
             return CheckResult.block(reason)
         return CheckResult.ok()

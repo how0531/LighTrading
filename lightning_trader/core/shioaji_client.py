@@ -3,6 +3,7 @@ from shioaji.constant import StockPriceType, FuturesPriceType, OrderType, Action
 import threading
 from .config import Config
 from .event_bus import Signal
+from .symbol_resolver import SymbolResolver
 import json
 import logging
 import time
@@ -33,28 +34,32 @@ class ShioajiClient:
         self.active_futopt_account = None
         # 直接回呼 (繞過 Qt signal，解決 uvicorn 跨執行緒問題)
         self._direct_quote_callback = None
-        
+
+        # ★ 統一商品代號正規化（解期貨 tick.code vs user-facing symbol 不一致）
+        self.symbol_resolver = SymbolResolver()
+
+        # ★ 多商品即時報價快取（key = canonical symbol）
+        self._latest_prices: Dict[str, float] = {}
+        # ★ 成交均價快取：ordno → deal_price
+        self._deal_prices: Dict[str, float] = {}
+        # ★ 切換訂閱用的 mutex，避免兩筆 subscribe 競態
+        self._subscribe_lock = threading.Lock()
+
         self._setup_callbacks()
         self.smart_orders: List[Dict[str, Any]] = []
-        self.volume_profile: Dict[str, Any] = {} 
+        self.volume_profile: Dict[str, Any] = {}
         self.last_message_time = time.time()
         self._start_reconnect_timer()
 
     def _start_reconnect_timer(self):
-        self._reconnect_timer = threading.Timer(10.0, self._on_reconnect_timer_tick)
+        # 巡檢間隔縮短到 5 秒（搭配 15s watchdog），最壞 20s 內偵測到靜默斷線
+        self._reconnect_timer = threading.Timer(5.0, self._on_reconnect_timer_tick)
         self._reconnect_timer.daemon = True
         self._reconnect_timer.start()
 
     def _on_reconnect_timer_tick(self):
         self.check_connection()
         self._start_reconnect_timer()
-        
-        # 注意：自動登入已移至 main.py lifespan，避免雙重登入競態
-        # 如果需要從 PyQt5 GUI 使用，可在 GUI 中手動呼叫 login()
-        # ★ 多商品即時報價快取（供後端 PnL 計算用）
-        self._latest_prices: Dict[str, float] = {}
-        # ★ 成交均價快取：ordno → deal_price（從 order callback Deal 事件擷取）
-        self._deal_prices: Dict[str, float] = {}
 
     def check_connection(self):
         if getattr(self, '_is_reconnecting', False): return
@@ -69,8 +74,8 @@ class ShioajiClient:
                 logger.warning(f"連線檢查失敗 (API 異常)，準備重連: {e}")
                 
         # 2. 檢查 Watchdog (最後收到行情封包的時間)
-        # 只有在有訂閱合約且處於連線狀態時才檢查，預設 60 秒沒收到任何封包即視為報價中斷
-        watchdog_timeout = 60
+        # 縮短為 15 秒：當沖場景每秒都有 tick，超過 15 秒沒任何封包就視為靜默斷線
+        watchdog_timeout = 15
         is_stale = False
         if api_ok and self.current_contract and self._is_connected:
             elapsed = time.time() - getattr(self, 'last_message_time', time.time())
@@ -112,7 +117,7 @@ class ShioajiClient:
             """股票 Tick 回呼"""
             self.last_message_time = time.time()
             try:
-                symbol = str(tick.code)  # ★ 用 tick.code 支援多商品報價識別
+                symbol = self.symbol_resolver.canonical(getattr(tick, "code", ""))
                 q = {
                     "Symbol": symbol,
                     "Price": float(tick.close),
@@ -124,8 +129,13 @@ class ShioajiClient:
                     "TickType": int(tick.tick_type),
                     "TickTime": str(tick.datetime),
                 }
-                if q["Price"] > 0:
-                    self._latest_prices[symbol] = q["Price"]  # ★ 更新最新價快取
+                if q["Price"] > 0 and symbol:
+                    self._latest_prices[symbol] = q["Price"]
+                    if self.event_bus:
+                        try:
+                            self.event_bus.on_tick.emit(symbol, q)
+                        except Exception:
+                            pass
                     if self._direct_quote_callback:
                         self._direct_quote_callback(q)
             except Exception as e:
@@ -135,7 +145,9 @@ class ShioajiClient:
             """股票 BidAsk 回呼"""
             self.last_message_time = time.time()
             try:
-                symbol = self.current_contract.symbol if self.current_contract else str(bidask.code)
+                symbol = self.symbol_resolver.canonical(getattr(bidask, "code", ""))
+                if not symbol:
+                    return
                 bp = [float(p) for p in bidask.bid_price]
                 bv = [int(v) for v in bidask.bid_volume]
                 ap = [float(p) for p in bidask.ask_price]
@@ -157,7 +169,7 @@ class ShioajiClient:
             """期貨/選擇權 Tick 回呼"""
             self.last_message_time = time.time()
             try:
-                symbol = str(tick.code)  # ★ 用 tick.code 支援多商品報價識別
+                symbol = self.symbol_resolver.canonical(getattr(tick, "code", ""))
                 q = {
                     "Symbol": symbol,
                     "Price": float(tick.close),
@@ -165,12 +177,17 @@ class ShioajiClient:
                     "Open": float(tick.open),
                     "High": float(tick.high),
                     "Low": float(tick.low),
-                    "AvgPrice": float(getattr(tick, "avg_price", 0)), # 期貨無 avg_price
+                    "AvgPrice": float(getattr(tick, "avg_price", 0)),
                     "TickType": int(tick.tick_type),
                     "TickTime": str(tick.datetime),
                 }
-                if q["Price"] > 0:
-                    self._latest_prices[symbol] = q["Price"]  # ★ 更新最新價快取
+                if q["Price"] > 0 and symbol:
+                    self._latest_prices[symbol] = q["Price"]
+                    if self.event_bus:
+                        try:
+                            self.event_bus.on_tick.emit(symbol, q)
+                        except Exception:
+                            pass
                     if self._direct_quote_callback:
                         self._direct_quote_callback(q)
             except Exception as e:
@@ -180,7 +197,9 @@ class ShioajiClient:
             """期貨/選擇權 BidAsk 回呼"""
             self.last_message_time = time.time()
             try:
-                symbol = self.current_contract.symbol if self.current_contract else str(bidask.code)
+                symbol = self.symbol_resolver.canonical(getattr(bidask, "code", ""))
+                if not symbol:
+                    return
                 bp = [float(p) for p in bidask.bid_price]
                 bv = [int(v) for v in bidask.bid_volume]
                 ap = [float(p) for p in bidask.ask_price]
@@ -209,24 +228,21 @@ class ShioajiClient:
         def _on_quote_dict(topic, quote):
             self.last_message_time = time.time()
             try:
-                # 簡單轉換後交給 _direct_quote_callback
-                if isinstance(quote, dict):
-                    # 擷取原始的 Symbol
-                    original_symbol = quote.get("Symbol")
-                    if not original_symbol:
-                        parts = topic.split('/')
-                        if len(parts) >= 4:
-                            original_symbol = parts[3]
-                    
-                    if not original_symbol or not self.current_contract:
-                        return
-                        
-                    # 只有當報價的合約確實是我們當前訂閱的合約(包含 code 或 symbol 匹配)時，才進行覆寫與廣播
-                    if (original_symbol == self.current_contract.symbol or 
-                        original_symbol == self.current_contract.code):
-                        quote["Symbol"] = self.current_contract.symbol
-                        if self._direct_quote_callback:
-                            self._direct_quote_callback(quote)
+                if not isinstance(quote, dict):
+                    return
+                original_symbol = quote.get("Symbol")
+                if not original_symbol:
+                    parts = topic.split('/')
+                    if len(parts) >= 4:
+                        original_symbol = parts[3]
+                if not original_symbol:
+                    return
+                canonical = self.symbol_resolver.canonical(original_symbol)
+                if not canonical:
+                    return
+                quote["Symbol"] = canonical
+                if self._direct_quote_callback:
+                    self._direct_quote_callback(quote)
             except Exception as e:
                 logger.error(f"Fallback 報價回呼錯誤: {e}")
 
@@ -305,9 +321,12 @@ class ShioajiClient:
                     positions = self.api.list_positions(acc)
                     for p in positions:
                         qty = int(p.quantity)
+                        raw_code = str(p.code).strip().upper()
+                        # canonical：若 resolver 有 alias 就用 user-facing symbol，否則保留 raw
+                        canonical = self.symbol_resolver.canonical(raw_code) or raw_code
                         all_pos.append({
-                            "symbol": str(p.code).strip().upper(),
-                            "qty": qty, 
+                            "symbol": canonical,
+                            "qty": qty,
                             "direction": "Buy" if p.direction == Action.Buy else "Sell",
                             "price": float(p.price),
                             "pnl": float(p.pnl),
@@ -383,27 +402,37 @@ class ShioajiClient:
         contract = self.get_contract(symbol)
         if not contract: return ""
         logger.info(f"🎯 成功取得合約: symbol={getattr(contract, 'symbol', None)}, code={getattr(contract, 'code', None)}, name={getattr(contract, 'name', None)}")
-        if self.current_contract:
-            try:
-                self.api.quote.unsubscribe(self.current_contract, QuoteType.Tick)
-                self.api.quote.unsubscribe(self.current_contract, QuoteType.BidAsk)
-            except Exception as e:
-                logger.debug(f"取消訂閱舊合約時發生例外: {e}")
-        self.current_contract = contract
-        self.api.quote.subscribe(contract, QuoteType.Tick)
-        self.api.quote.subscribe(contract, QuoteType.BidAsk)
+        # ★ subscribe mutex：避免兩筆切換交錯導致回呼帶錯 symbol
+        with self._subscribe_lock:
+            old_contract = self.current_contract
+            # 切換到不同合約時，把舊合約的 latest price 清掉（避免新商品 DOM 用到舊價）
+            if old_contract is not None and getattr(old_contract, "symbol", "") != getattr(contract, "symbol", ""):
+                try:
+                    self.api.quote.unsubscribe(old_contract, QuoteType.Tick)
+                    self.api.quote.unsubscribe(old_contract, QuoteType.BidAsk)
+                except Exception as e:
+                    logger.debug(f"取消訂閱舊合約時發生例外: {e}")
+                # 注意：持倉商品的價格仍由 subscribe_background 維護，不在此清除
+            self.current_contract = contract
+            # ★ 登記到 resolver，確保 tick.code 能映射回 user-facing symbol
+            self.symbol_resolver.register(contract)
+            self.api.quote.subscribe(contract, QuoteType.Tick)
+            self.api.quote.subscribe(contract, QuoteType.BidAsk)
         
         # 發送初始化 Snapshot 補齊 Reference, High, Low, LimitUp, LimitDown
+        canonical = self.symbol_resolver.canonical(contract.symbol)
         try:
             snaps = self.api.snapshots([contract])
             if snaps:
                 s = snaps[0]
                 close_price = float(s.close)
                 ref_price = float(getattr(s, 'reference', close_price))
-                
+                if close_price > 0:
+                    self._latest_prices[canonical] = close_price
+
                 # 發送 Tick Snapshot
                 tick_data = {
-                    "Symbol": contract.symbol,
+                    "Symbol": canonical,
                     "Price": close_price,
                     "Volume": int(getattr(s, 'volume', 0)),
                     "Open": float(getattr(s, 'open', close_price)),
@@ -417,17 +446,17 @@ class ShioajiClient:
                 }
                 if self._direct_quote_callback:
                     self._direct_quote_callback(tick_data)
-                
+
                 # 發送 BidAsk Snapshot (Snapshot 只有最佳一檔)
                 buy_price = float(getattr(s, 'buy_price', 0))
                 sell_price = float(getattr(s, 'sell_price', 0))
                 buy_vol = int(getattr(s, 'buy_volume', 0))
                 sell_vol = int(getattr(s, 'sell_volume', 0))
-                
+
                 if buy_price > 0 or sell_price > 0:
                     logger.info(f"📊 Snapshot BidAsk: buy={buy_price}x{buy_vol}, sell={sell_price}x{sell_vol}")
                     bidask_data = {
-                        "Symbol": contract.symbol,
+                        "Symbol": canonical,
                         "AskPrice": [sell_price],
                         "AskVolume": [sell_vol],
                         "BidPrice": [buy_price],
@@ -446,22 +475,65 @@ class ShioajiClient:
 
     def subscribe_background(self, symbol: str) -> bool:
         """
-        背景訂閱商品報價（僅更新 _latest_prices 快取，不影響 current_contract）。
-        用於 pnl_broadcaster 訂閱所有持倉商品的即時價格，不干擾 DOM 面板主訂閱。
+        背景訂閱商品報價：不切換 current_contract，但
+          1. 登記 resolver alias，讓 tick.code 回呼能對應到 user-facing symbol
+          2. 訂閱 Tick（PnL 計算所需）
+          3. 推送一份 Snapshot（Reference/LimitUp/LimitDown/初始 BidAsk）給前端，
+             避免使用者切換到該商品時看不到漲跌停或一檔買賣盤
         """
         contract = self.get_contract(symbol)
         if not contract:
             logger.warning(f"subscribe_background: 找不到合約 {symbol}")
             return False
         try:
-            # 先用 snapshot 填入初始價格
-            snaps = self.api.snapshots([contract])
-            if snaps and snaps[0].close > 0:
-                self._latest_prices[symbol] = float(snaps[0].close)
-                logger.info(f"  📌 背景訂閱 {symbol} snapshot={snaps[0].close}")
-            # 訂閱 Tick（僅 Tick，BidAsk 不需要）
+            self.symbol_resolver.register(contract)
+            canonical = self.symbol_resolver.canonical(contract.symbol)
+
             self.api.quote.subscribe(contract, QuoteType.Tick)
-            logger.info(f"  ✅ 背景訂閱 {symbol} 成功")
+            logger.info(f"  ✅ 背景訂閱 {symbol} Tick 成功 (canonical={canonical})")
+
+            # 推送 Snapshot 補齊 Reference / LimitUp / LimitDown / 初始一檔 BidAsk
+            try:
+                snaps = self.api.snapshots([contract])
+                if snaps:
+                    s = snaps[0]
+                    close_price = float(getattr(s, "close", 0))
+                    ref_price = float(getattr(s, "reference", close_price))
+                    if close_price > 0:
+                        self._latest_prices[canonical] = close_price
+                    tick_data = {
+                        "Symbol": canonical,
+                        "Price": close_price,
+                        "Volume": int(getattr(s, "volume", 0)),
+                        "Open": float(getattr(s, "open", close_price)),
+                        "High": float(getattr(s, "high", close_price)),
+                        "Low": float(getattr(s, "low", close_price)),
+                        "Reference": ref_price,
+                        "LimitUp": float(getattr(contract, "limit_up", ref_price * 1.1)),
+                        "LimitDown": float(getattr(contract, "limit_down", ref_price * 0.9)),
+                        "TickTime": str(getattr(s, "ts", "")),
+                        "Action": "Snapshot",
+                    }
+                    if self._direct_quote_callback:
+                        self._direct_quote_callback(tick_data)
+
+                    buy_price = float(getattr(s, "buy_price", 0))
+                    sell_price = float(getattr(s, "sell_price", 0))
+                    if buy_price > 0 or sell_price > 0:
+                        bidask_data = {
+                            "Symbol": canonical,
+                            "AskPrice": [sell_price],
+                            "AskVolume": [int(getattr(s, "sell_volume", 0))],
+                            "BidPrice": [buy_price],
+                            "BidVolume": [int(getattr(s, "buy_volume", 0))],
+                            "DiffBidVol": [0],
+                            "DiffAskVol": [0],
+                            "Time": str(getattr(s, "ts", "")),
+                        }
+                        if self._direct_quote_callback:
+                            self._direct_quote_callback(bidask_data)
+            except Exception as snap_err:
+                logger.warning(f"subscribe_background {symbol} snapshot 失敗: {snap_err}")
             return True
         except Exception as e:
             logger.warning(f"subscribe_background {symbol} 失敗: {e}")
@@ -506,13 +578,81 @@ class ShioajiClient:
             logger.error(f"place_order 失敗: {symbol} {action} {qty}@{price} — {e}")
             return None
 
+    def search_contracts(self, query: str, limit: int = 20) -> List[Dict[str, str]]:
+        """
+        模糊搜尋商品代碼或名稱（不區分大小寫）。
+        範圍：Stocks（含上市櫃）+ Futures + Options。
+        """
+        q = (query or "").strip().upper()
+        if not q:
+            return []
+        out: List[Dict[str, str]] = []
+
+        def _match(c, kind: str) -> bool:
+            sym = str(getattr(c, "symbol", "") or "").upper()
+            code = str(getattr(c, "code", "") or "").upper()
+            name = str(getattr(c, "name", "") or "")
+            return (q in sym) or (q in code) or (q in name.upper())
+
+        def _emit(c, kind: str):
+            if len(out) >= limit:
+                return False
+            out.append({
+                "symbol": getattr(c, "symbol", ""),
+                "code":   getattr(c, "code", ""),
+                "name":   getattr(c, "name", ""),
+                "kind":   kind,
+            })
+            return True
+
+        try:
+            # Stocks: iter 直接拿到 contracts
+            for c in self.api.Contracts.Stocks:
+                if _match(c, "Stock") and not _emit(c, "Stock"):
+                    return out
+        except Exception as e:
+            logger.debug(f"search Stocks 失敗: {e}")
+
+        try:
+            for attr in dir(self.api.Contracts.Futures):
+                if attr.startswith("_"):
+                    continue
+                cat = getattr(self.api.Contracts.Futures, attr)
+                if not hasattr(cat, "__iter__"):
+                    continue
+                for c in cat:
+                    if _match(c, "Future") and not _emit(c, "Future"):
+                        return out
+        except Exception as e:
+            logger.debug(f"search Futures 失敗: {e}")
+
+        try:
+            for attr in dir(self.api.Contracts.Options):
+                if attr.startswith("_"):
+                    continue
+                cat = getattr(self.api.Contracts.Options, attr)
+                if not hasattr(cat, "__iter__"):
+                    continue
+                for c in cat:
+                    if _match(c, "Option") and not _emit(c, "Option"):
+                        return out
+        except Exception as e:
+            logger.debug(f"search Options 失敗: {e}")
+
+        return out
+
     def get_all_accounts(self) -> List[Dict[str, str]]:
         try:
             raw_accounts = self.api.list_accounts()
             return [
                 {
                     "account_id": acc.account_id,
-                    "category": "Stock" if "Stock" in acc.__class__.__name__ else "Future" if "Future" in acc.__class__.__name__ else "Other",
+                    "category": (
+                        "Stock"  if "Stock"  in acc.__class__.__name__ else
+                        "Option" if "Option" in acc.__class__.__name__ else
+                        "Future" if "Future" in acc.__class__.__name__ else
+                        "Other"
+                    ),
                     "person_id": acc.person_id,
                     "broker_id": acc.broker_id,
                     "account_name": f"{acc.broker_id}-{acc.account_id}"

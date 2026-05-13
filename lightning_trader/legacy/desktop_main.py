@@ -1,12 +1,19 @@
 """
-LighTrading — 閃電下單工具主入口
+LighTrading — PyQt5 桌面版入口（legacy / 已停止主動開發）
 
-整合 PyQt5 桌面 UI + 核心交易引擎。
+主要產品已切換到 backend/main.py 的 FastAPI + React 版本。這份 PyQt5 入口保留
+用於本機快速驗證 Shioaji client，不會跟著 backend 同步更新功能。
+
+啟動方式（從 lightning_trader/ 目錄）：
+    python -m legacy.desktop_main
 """
 import sys
+import os
 import logging
+# 把 lightning_trader/ 加進 sys.path，讓 core import 能找到
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 from PyQt5.QtWidgets import QApplication
-from ui.main_window import LightningOrderWindow
+from legacy.ui.main_window import LightningOrderWindow
 from core import create_trading_engine
 
 # 統一日誌格式

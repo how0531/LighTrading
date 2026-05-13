@@ -10,6 +10,7 @@ Usage:
 """
 from .event_bus import EventBus
 from .config import Config
+from .symbol_resolver import SymbolResolver
 from .shioaji_client import ShioajiClient
 from .order_manager import OrderManager, OrderEntry, OrderStatus
 from .position_tracker import PositionTracker, PositionEntry
@@ -21,7 +22,7 @@ from .sound_manager import SoundManager
 
 __all__ = [
     # 核心
-    "EventBus", "Config", "ShioajiClient",
+    "EventBus", "Config", "ShioajiClient", "SymbolResolver",
     # 交易引擎
     "OrderManager", "OrderEntry", "OrderStatus",
     "PositionTracker", "PositionEntry",

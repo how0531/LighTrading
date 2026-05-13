@@ -1,4 +1,5 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import { apiClient } from '../api/client';
 
 // 快捷鍵行為定義
 export interface HotkeyItem {
@@ -107,6 +108,31 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     return DEFAULT_SETTINGS;
   });
 
+  // 後端同步：載入時拉一次；之後每次變更 debounce 800ms 寫回
+  const hydratedFromServerRef = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    apiClient.get('/user_settings').then((res) => {
+      if (cancelled) return;
+      const remote = res.data?.data;
+      if (remote && typeof remote === 'object') {
+        setSettings((prev) => ({
+          ...prev,
+          ...remote,
+          confirmations: { ...prev.confirmations, ...(remote.confirmations || {}) },
+          visuals: { ...prev.visuals, ...(remote.visuals || {}) },
+          hotkeys: remote.hotkeys || prev.hotkeys,
+          splitOrder: { ...prev.splitOrder, ...(remote.splitOrder || {}) },
+        }));
+      }
+      hydratedFromServerRef.current = true;
+    }).catch(() => {
+      hydratedFromServerRef.current = true;  // 後端不可用就只走 localStorage
+    });
+    return () => { cancelled = true; };
+  }, []);
+
+  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
     localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
     if (settings.theme === 'dark') {
@@ -115,6 +141,13 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       document.documentElement.classList.remove('dark');
     }
     document.documentElement.style.setProperty('--base-font-size', `${settings.visuals.fontSize || 12}px`);
+
+    // debounced 後端同步
+    if (!hydratedFromServerRef.current) return;
+    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+    syncTimerRef.current = setTimeout(() => {
+      apiClient.put('/user_settings', { data: settings }).catch(() => { /* 靜默，localStorage 為主 */ });
+    }, 800);
   }, [settings]);
 
   const updateSetting = (updates: Partial<Settings> | ((prev: Settings) => Settings)) => {

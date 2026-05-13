@@ -1,0 +1,47 @@
+# docker-compose for LighTrade dev environment
+#
+# 注意：shioaji wheel 不在 PyPI 公開索引，需要從永豐金提供的私有索引或本機 wheel 安裝。
+# 預設這份 compose 只跑 frontend dev + backend skeleton（不含 shioaji 連線）。
+# 真實交易請在主機端 venv 安裝 shioaji 後直接執行 backend/main.py。
+
+services:
+  backend:
+    image: python:3.11-slim
+    container_name: lightrade-backend
+    working_dir: /app/lightning_trader
+    volumes:
+      - ./:/app
+      - lightrade-pip-cache:/root/.cache/pip
+    environment:
+      - PYTHONUNBUFFERED=1
+      - PYTHONPATH=/app/lightning_trader
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    command: >
+      bash -c "
+        pip install --quiet fastapi 'uvicorn[standard]' pydantic python-dotenv pytest &&
+        echo '⚠️ shioaji 未安裝；只能跑離線測試。' &&
+        echo '   真實連線請在主機端執行 backend/main.py' &&
+        tail -f /dev/null
+      "
+
+  frontend:
+    image: node:20-alpine
+    container_name: lightrade-frontend
+    working_dir: /app
+    volumes:
+      - ./lightning_trader/frontend:/app
+      - lightrade-node-modules:/app/node_modules
+    ports:
+      - "5173:5173"
+    command: >
+      sh -c "
+        npm ci &&
+        npm run dev -- --host 0.0.0.0
+      "
+
+volumes:
+  lightrade-pip-cache:
+  lightrade-node-modules:

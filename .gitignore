@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+.env
+.env.local
+
+# Logs & crash dumps
+*.log
+*.stackdump
+shioaji.log
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# Build artifacts
+dist/
+build/
+*.egg-info/
+
+# Dev scratch
+debug_*.json
+*_diff.txt
+*_diff_*.txt
+dompanel_v*.tsx
+run_*_batch.ps1
+search_skill*.json
+repos.json
+check_*.txt
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-error.log
+
+# Frontend build
+lightning_trader/frontend/dist/
+
+# Test scratch
+test_external_order.py
+test_place.py
