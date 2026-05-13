@@ -124,7 +124,7 @@ def on_shioaji_order_update(order_msg: dict):
 
 
 def on_shioaji_trade_update(trade_data: dict):
-    """成交回報推播 + 通知 PnL broadcaster 立即作廢持倉快取 + 自動補訂閱新商品"""
+    """成交回報推播 + 通知 PnL broadcaster 立即作廢持倉快取 + 自動補訂閱新商品 + 落地 journal"""
     try:
         msg_item = {"type": "TradeUpdate", "data": trade_data}
         if shared.fastapi_loop:
@@ -142,6 +142,13 @@ def on_shioaji_trade_update(trade_data: dict):
             from backend.services.pnl_broadcaster import subscribe_position_contracts
             if shared.fastapi_loop:
                 asyncio.run_coroutine_threadsafe(subscribe_position_contracts(), shared.fastapi_loop)
+        except Exception:
+            pass
+
+        # ★ Sprint 14：每筆 Deal/Fill 落地到 SQLite journal（極短 IO，~1ms，不會卡 tick）
+        try:
+            from backend.services import trade_journal
+            trade_journal.record_trade(trade_data)
         except Exception:
             pass
     except Exception as e:
