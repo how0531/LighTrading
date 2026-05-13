@@ -9,7 +9,7 @@
  *
  * 用 TradingView lightweight-charts (MIT, ~30KB gzipped)
  */
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
   CandlestickSeries,
@@ -23,28 +23,55 @@ import {
 import { useTradingContext } from '../contexts/TradingContext';
 import { apiClient } from '../api/client';
 
-const BAR_INTERVAL_SECONDS = 60;
 const PNL_COLOR_UP = '#EF4444';     // 台灣：紅 = 漲
 const PNL_COLOR_DOWN = '#10B981';   // 台灣：綠 = 跌
+
+type Timeframe = '1m' | '5m' | '15m' | '60m';
+const TIMEFRAMES: { id: Timeframe; label: string; seconds: number; days: number }[] = [
+  { id: '1m',  label: '1m',  seconds: 60,    days: 1 },
+  { id: '5m',  label: '5m',  seconds: 300,   days: 2 },
+  { id: '15m', label: '15m', seconds: 900,   days: 5 },
+  { id: '60m', label: '60m', seconds: 3600,  days: 15 },
+];
 
 interface KBarApi {
   time: number; open: number; high: number; low: number; close: number; volume: number;
 }
 
-// 把 unix 秒 floor 到當分鐘起點，用來決定 tick 該歸到哪根 bar
-function alignToMinute(unix: number): number {
-  return Math.floor(unix / BAR_INTERVAL_SECONDS) * BAR_INTERVAL_SECONDS;
+// 把 unix 秒 floor 到當 bin（依 timeframe 秒數）起點
+function alignToBucket(unix: number, secs: number): number {
+  return Math.floor(unix / secs) * secs;
+}
+
+// 把 1m bars 聚合到任意 timeframe（>= 1m）
+function aggregate1mBars(bars: KBarApi[], bucketSecs: number): KBarApi[] {
+  if (bucketSecs <= 60) return bars;
+  const buckets = new Map<number, KBarApi>();
+  for (const b of bars) {
+    const k = alignToBucket(b.time, bucketSecs);
+    const existing = buckets.get(k);
+    if (!existing) {
+      buckets.set(k, { ...b, time: k });
+    } else {
+      existing.high = Math.max(existing.high, b.high);
+      existing.low  = Math.min(existing.low, b.low);
+      existing.close = b.close;
+      existing.volume += b.volume;
+    }
+  }
+  return Array.from(buckets.values()).sort((a, b) => a.time - b.time);
 }
 
 const ChartPanel: React.FC = () => {
   const { targetSymbol, quote } = useTradingContext();
+  const [timeframe, setTimeframe] = useState<Timeframe>('1m');
+  const tfMeta = useMemo(() => TIMEFRAMES.find((t) => t.id === timeframe)!, [timeframe]);
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
   const lastBarRef = useRef<CandlestickData<Time> | null>(null);
   const lastVolRef = useRef<HistogramData<Time> | null>(null);
-  const cumulativeVolRef = useRef(0); // 上一個 quote 看到的 Volume
 
   // 初始化圖表（mount 一次）
   useEffect(() => {
@@ -95,15 +122,16 @@ const ChartPanel: React.FC = () => {
     };
   }, []);
 
-  // 切換商品：拉歷史 kbars 重新填
+  // 切換商品或 timeframe：拉 1m kbars → aggregate → 填圖
   useEffect(() => {
     if (!targetSymbol || !candleSeriesRef.current || !volSeriesRef.current) return;
     let cancelled = false;
 
-    apiClient.get<KBarApi[]>('/kbars', { params: { symbol: targetSymbol, days: 1 } })
+    apiClient.get<KBarApi[]>('/kbars', { params: { symbol: targetSymbol, days: tfMeta.days } })
       .then((res) => {
         if (cancelled) return;
-        const bars = res.data || [];
+        const raw = res.data || [];
+        const bars = aggregate1mBars(raw, tfMeta.seconds);
         const candles: CandlestickData<Time>[] = bars.map((b) => ({
           time: b.time as Time, open: b.open, high: b.high, low: b.low, close: b.close,
         }));
@@ -116,7 +144,6 @@ const ChartPanel: React.FC = () => {
         volSeriesRef.current!.setData(vols);
         lastBarRef.current = candles[candles.length - 1] ?? null;
         lastVolRef.current = vols[vols.length - 1] ?? null;
-        cumulativeVolRef.current = 0; // 新商品累積量歸零
         chartRef.current?.timeScale().fitContent();
       })
       .catch(() => {
@@ -128,7 +155,7 @@ const ChartPanel: React.FC = () => {
       });
 
     return () => { cancelled = true; };
-  }, [targetSymbol]);
+  }, [targetSymbol, tfMeta.seconds, tfMeta.days]);
 
   // Live update：每次 quote 變動，更新或新增當分鐘 bar
   useEffect(() => {
@@ -136,9 +163,9 @@ const ChartPanel: React.FC = () => {
     const price = quote.Price;
     if (!(price > 0)) return;
 
-    // quote.TickTime 是 ISO 字串；解析到 unix 秒
+    // quote.TickTime 是 ISO 字串；解析到 unix 秒，再對齊到當前 timeframe 的 bin
     const tickTime = quote.TickTime ? Date.parse(quote.TickTime) / 1000 : Date.now() / 1000;
-    const barTime = alignToMinute(tickTime);
+    const barTime = alignToBucket(tickTime, tfMeta.seconds);
 
     // tick volume 是「自上次 quote 起的累計量」？Shioaji 的 Volume 是該 tick 的 volume，不累計。
     // 直接拿 quote.Volume 加到當前 bar volume；之前的 quote 用 ref 拿
@@ -181,16 +208,30 @@ const ChartPanel: React.FC = () => {
       volSeriesRef.current.update(newVol);
       lastVolRef.current = newVol;
     }
-  }, [quote]);
+  }, [quote, tfMeta.seconds]);
 
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
       <div className="px-3 py-2 border-b border-slate-700/50 flex items-center justify-between">
         <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
           <span className="w-1 h-3.5 bg-amber-500 rounded-full"></span>
-          K 線圖 ({targetSymbol || '—'} · 1m)
+          K 線圖 ({targetSymbol || '—'})
         </h3>
-        <span className="text-[9px] text-slate-500 font-mono">lightweight-charts</span>
+        <div className="flex items-center gap-1">
+          {TIMEFRAMES.map((tf) => (
+            <button
+              key={tf.id}
+              onClick={() => setTimeframe(tf.id)}
+              className={`px-2 py-0.5 text-[10px] font-bold rounded border transition-colors ${
+                timeframe === tf.id
+                  ? 'bg-[#D4AF37]/20 text-[#D4AF37] border-[#D4AF37]'
+                  : 'bg-slate-900 text-slate-500 border-slate-700 hover:text-slate-300'
+              }`}
+            >
+              {tf.label}
+            </button>
+          ))}
+        </div>
       </div>
       <div className="flex-1 min-h-0">
         <div ref={containerRef} className="w-full h-full" />
