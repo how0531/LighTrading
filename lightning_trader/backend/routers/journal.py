@@ -11,6 +11,7 @@ import logging
 from typing import Optional
 from fastapi import APIRouter
 from backend.services import trade_journal
+from backend.services.equity_curve import compute_realized_curve
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/journal", tags=["journal"])
@@ -34,3 +35,20 @@ async def get_stats(
 ):
     """區間內統計：筆數、買賣口數、首尾時間、top symbols。"""
     return trade_journal.fetch_stats(from_ts=from_ts, to_ts=to_ts)
+
+
+@router.get("/equity")
+async def get_equity_curve(
+    from_ts: Optional[int] = None,
+    to_ts: Optional[int] = None,
+    symbol: Optional[str] = None,
+    limit: int = 5000,
+):
+    """
+    Sprint 15：FIFO 配對的累積已實現 PnL 曲線。
+    回傳 [{ts, realized_pnl, delta, symbol, action, qty, price}, ...] 升序排列。
+    """
+    # fetch_fills 倒序、要反轉成升序給 FIFO 算
+    fills = trade_journal.fetch_fills(from_ts=from_ts, to_ts=to_ts, symbol=symbol, limit=limit)
+    fills_asc = list(reversed(fills))
+    return compute_realized_curve(fills_asc)

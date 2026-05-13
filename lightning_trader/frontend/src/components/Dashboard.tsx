@@ -16,6 +16,8 @@ const WatchlistPanel        = lazy(() => import('./WatchlistPanel'));
 const SmartOrdersPanel      = lazy(() => import('./SmartOrdersPanel'));
 // Sprint 14：交易日誌 lazy
 const JournalPanel          = lazy(() => import('./JournalPanel'));
+// Sprint 15：已實現損益曲線 lazy（共用 lightweight-charts chunk）
+const EquityCurvePanel      = lazy(() => import('./EquityCurvePanel'));
 import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
 import { useElectronUpdater } from '../hooks/useElectronUpdater';
 import { useFillNotification } from '../hooks/useFillNotification';
@@ -32,6 +34,7 @@ const defaultLayouts = {
     { i: 'watch',   x: 0,  y: 0,  w: 2, h: 22 },
     { i: 'dom',     x: 2,  y: 0,  w: 5, h: 22 },
     { i: 'chart',   x: 2,  y: 22, w: 5, h: 10 },
+    { i: 'equity',  x: 0,  y: 22, w: 2, h: 10 },
     { i: 'bal',     x: 7,  y: 0,  w: 5, h: 8 },
     { i: 'pos',     x: 7,  y: 8,  w: 5, h: 8 },
     { i: 'smart',   x: 7,  y: 16, w: 5, h: 8 },
@@ -43,6 +46,7 @@ const defaultLayouts = {
     { i: 'watch',   x: 0, y: 0,  w: 2, h: 22 },
     { i: 'dom',     x: 2, y: 0,  w: 4, h: 22 },
     { i: 'chart',   x: 2, y: 22, w: 4, h: 10 },
+    { i: 'equity',  x: 0, y: 22, w: 2, h: 10 },
     { i: 'bal',     x: 6, y: 0,  w: 4, h: 8 },
     { i: 'pos',     x: 6, y: 8,  w: 4, h: 8 },
     { i: 'smart',   x: 6, y: 16, w: 4, h: 8 },
@@ -54,17 +58,18 @@ const defaultLayouts = {
     { i: 'watch',   x: 0, y: 0,  w: 6, h: 8 },
     { i: 'dom',     x: 0, y: 8,  w: 6, h: 20 },
     { i: 'chart',   x: 0, y: 28, w: 6, h: 10 },
-    { i: 'bal',     x: 0, y: 38, w: 6, h: 7 },
-    { i: 'pos',     x: 0, y: 45, w: 6, h: 8 },
-    { i: 'smart',   x: 0, y: 53, w: 6, h: 8 },
-    { i: 'journal', x: 0, y: 61, w: 6, h: 8 },
-    { i: 'hist',    x: 0, y: 69, w: 3, h: 8 },
-    { i: 'trade',   x: 3, y: 69, w: 3, h: 8 },
+    { i: 'equity',  x: 0, y: 38, w: 6, h: 10 },
+    { i: 'bal',     x: 0, y: 48, w: 6, h: 7 },
+    { i: 'pos',     x: 0, y: 55, w: 6, h: 8 },
+    { i: 'smart',   x: 0, y: 63, w: 6, h: 8 },
+    { i: 'journal', x: 0, y: 71, w: 6, h: 8 },
+    { i: 'hist',    x: 0, y: 79, w: 3, h: 8 },
+    { i: 'trade',   x: 3, y: 79, w: 3, h: 8 },
   ]
 };
 
-// Sprint 14：新增 journal panel，bump key
-const LAYOUT_KEY = 'lighTrade_layout_v6';
+// Sprint 15：新增 equity curve panel，bump key
+const LAYOUT_KEY = 'lighTrade_layout_v7';
 
 
 
@@ -230,6 +235,11 @@ const DashboardContent: React.FC = () => {
             <div key="journal" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
               {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
               <div className="flex-1 h-full overflow-hidden flex flex-col"><JournalPanel /></div>
+            </div>
+
+            <div key="equity" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><EquityCurvePanel /></div>
             </div>
           </ResponsiveGridLayout>
         </div>
