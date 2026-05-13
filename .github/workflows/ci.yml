@@ -23,6 +23,9 @@ jobs:
         with:
           python-version: "3.11"
           cache: pip
+          # 顯式指向 requirements 檔；不加這行 setup-python 會去 repo root 找
+          # 預設名稱 (requirements.txt / pyproject.toml) 找不到就直接 fail
+          cache-dependency-path: lightning_trader/backend/requirements_backend.txt
 
       - name: Install test deps (no shioaji / pyqt5)
         # CI 不裝 shioaji（券商 wheel 沒上 PyPI）與 pyqt5（無圖形環境）

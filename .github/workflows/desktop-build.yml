@@ -41,6 +41,10 @@ jobs:
         with:
           python-version: '3.11'
           cache: pip
+          # 顯式指向 requirements 檔（兩份），不然 setup-python 找不到預設檔名就 fail
+          cache-dependency-path: |
+            lightning_trader/backend/requirements_backend.txt
+            lightning_trader/backend/requirements_build.txt
 
       # --- Stage 1: Frontend build ---
       - name: Build frontend
