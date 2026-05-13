@@ -1,7 +1,11 @@
 import axios, { AxiosError } from 'axios';
 
+// 一律走相對路徑 /api。
+//   - dev：vite proxy 轉到 127.0.0.1:8000
+//   - prod / docker：nginx 同站台 proxy 轉到 backend
+// 這樣切換部署模式不用改前端程式碼。
 export const apiClient = axios.create({
-  baseURL: `http://${window.location.hostname}:8000/api`,
+  baseURL: '/api',
   timeout: 30000, // Shioaji 登入可能需要 10-15 秒
   headers: {
     'Content-Type': 'application/json',
