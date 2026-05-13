@@ -4,8 +4,19 @@ const { app, BrowserWindow, Menu, dialog, shell, ipcMain } = require('electron')
 const path = require('path');
 const fs = require('fs');
 const http = require('http');
+const net = require('net');
 const { spawn } = require('child_process');
 const { autoUpdater } = require('electron-updater');
+
+// ---------------------------------------------------------------------------
+// Single-instance lock — 防止使用者雙擊兩次造成兩個 backend 搶 port 8000
+// ---------------------------------------------------------------------------
+if (!app.requestSingleInstanceLock()) {
+  // 已有另一個 instance 跑著；當前 process 直接退出。
+  // 另一個 instance 會在 second-instance 事件聚焦現有視窗（見 lifecycle 區段）。
+  app.quit();
+  process.exit(0);
+}
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -15,6 +26,11 @@ const BACKEND_HOST = process.env.LIGHTRADE_HOST || '127.0.0.1';
 const BACKEND_PORT = parseInt(process.env.LIGHTRADE_PORT || '8000', 10);
 const BACKEND_URL = `http://${BACKEND_HOST}:${BACKEND_PORT}`;
 const IS_DEV = process.env.ELECTRON_DEV === '1';
+// Dev mode 預設載 vite dev server（HMR），可用 ELECTRON_DEV_URL 覆寫；
+// 若沒設且 ELECTRON_DEV=1，預設 :5173（vite 預設 port）。
+const DEV_FRONTEND_URL =
+  process.env.ELECTRON_DEV_URL || `http://${BACKEND_HOST}:5173`;
+const APP_URL = IS_DEV ? DEV_FRONTEND_URL : BACKEND_URL;
 const GITHUB_REPO_URL = 'https://github.com/how0531/LighTrading';
 
 // ---------------------------------------------------------------------------
@@ -70,6 +86,21 @@ function resolveBackendBinary() {
     exeName,
   );
   return { backendBinary, resourcesPath };
+}
+
+// Port-busy 預檢：spawn 前先看 8000 是不是被佔。
+// 被佔通常代表：使用者開了第二份 LighTrade（已用 single-instance lock 擋）、
+// docker compose 正在跑、或自己手動啟動了 backend。給友善訊息直接退出。
+function checkPortAvailable(host, port) {
+  return new Promise((resolve) => {
+    const tester = net
+      .createServer()
+      .once('error', () => resolve(false))
+      .once('listening', () => {
+        tester.close(() => resolve(true));
+      })
+      .listen(port, host);
+  });
 }
 
 function resolveFrontendDist() {
@@ -219,9 +250,11 @@ function createWindow() {
     },
   });
 
-  mainWindow.loadURL(BACKEND_URL).catch((err) => {
+  // Dev: 載 vite dev server（HMR）；Prod: 載 backend 同 origin 服務的靜態 build
+  mainWindow.loadURL(APP_URL).catch((err) => {
     console.error('[window] loadURL failed:', err);
   });
+  if (IS_DEV) mainWindow.webContents.openDevTools({ mode: 'detach' });
 
   mainWindow.on('close', (e) => {
     if (isQuitting) return;
@@ -261,7 +294,7 @@ function createWindow() {
 
 function openSettingsWindow() {
   if (!mainWindow) return;
-  mainWindow.loadURL(`${BACKEND_URL}/settings`).catch(() => {});
+  mainWindow.loadURL(`${APP_URL}/settings`).catch(() => {});
 }
 
 // ---------------------------------------------------------------------------
@@ -505,16 +538,40 @@ function createSplash() {
   splashWindow.on('closed', () => { splashWindow = null; });
 }
 
+// 第二個 instance 嘗試啟動時，把現有視窗叫回前景而不是真的開新視窗
+app.on('second-instance', () => {
+  if (mainWindow) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.focus();
+  }
+});
+
 app.whenReady().then(async () => {
   buildMenu();
   createSplash();
 
   try {
     if (!IS_DEV) {
+      // Prod 才會 spawn backend。先預檢 port，被佔就提早 bail。
+      const free = await checkPortAvailable(BACKEND_HOST, BACKEND_PORT);
+      if (!free) {
+        if (splashWindow) splashWindow.destroy();
+        dialog.showErrorBox(
+          'LighTrade',
+          `Port ${BACKEND_PORT} 被佔用，無法啟動 backend。\n\n` +
+          '可能原因：\n' +
+          '• docker compose 正在跑\n' +
+          '• 上一次 LighTrade 沒乾淨退出，殘留 process\n' +
+          '• 其他程式佔用此 port\n\n' +
+          '請先把佔用的 process 停掉，再重新啟動。',
+        );
+        app.quit();
+        return;
+      }
       spawnBackend();
       if (!backendProcess) return; // already errored + quitting
     } else {
-      console.log('[dev] expecting backend on', BACKEND_URL);
+      console.log('[dev] expecting backend on', BACKEND_URL, 'frontend on', APP_URL);
     }
     await waitForBackend();
   } catch (err) {
