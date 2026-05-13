@@ -103,6 +103,49 @@ export const DOMPanel: React.FC = () => {
     hasScrolled.current = false;
   }, [targetSymbol, hasScrolled]);
 
+  // ★ 跟隨價格：每 10 秒檢查當前價是不是還在可視範圍。若飄出去就靜默捲回。
+  //   不直接綁在 price tick 上，避免使用者手動滾動研究 ladder 時被搶回去。
+  //   只有「飄出畫面 > 10 秒」才會校正一次，且不打斷使用者的拖曳。
+  useEffect(() => {
+    const containerEl = tableRef.current;
+    if (!containerEl) return;
+    const FOLLOW_INTERVAL_MS = 10_000;
+    let userScrolledRecently = false;
+    let scrollResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // 偵測「最近 3 秒內使用者有手動 scroll」→ 暫不自動跟隨
+    const onUserScroll = () => {
+      userScrolledRecently = true;
+      if (scrollResetTimer) clearTimeout(scrollResetTimer);
+      scrollResetTimer = setTimeout(() => { userScrolledRecently = false; }, 3000);
+    };
+    // wheel / touchmove 才算「使用者主動」；programmatic scroll 不觸發這些事件
+    containerEl.addEventListener('wheel',     onUserScroll, { passive: true });
+    containerEl.addEventListener('touchmove', onUserScroll, { passive: true });
+
+    const timer = setInterval(() => {
+      if (userScrolledRecently || currentPrice <= 0) return;
+      const pKey = Math.round(currentPrice * 100);
+      const row = containerEl.querySelector<HTMLElement>(`[data-price="${pKey}"]`);
+      if (!row) return;
+      const containerRect = containerEl.getBoundingClientRect();
+      const rowRect = row.getBoundingClientRect();
+      // 飄出可視範圍才捲回
+      const isVisible = rowRect.top >= containerRect.top
+                     && rowRect.bottom <= containerRect.bottom;
+      if (!isVisible) {
+        row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    }, FOLLOW_INTERVAL_MS);
+
+    return () => {
+      containerEl.removeEventListener('wheel',     onUserScroll);
+      containerEl.removeEventListener('touchmove', onUserScroll);
+      if (scrollResetTimer) clearTimeout(scrollResetTimer);
+      clearInterval(timer);
+    };
+  }, [tableRef, currentPrice]);
+
 
   // ★ 全域快捷鍵監聽
   useEffect(() => {

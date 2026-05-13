@@ -25,8 +25,12 @@ type SimpleOrder = {
   status: string;
 };
 
+// 若 order_id 存在就拿它（最穩定）；只有完全缺 id 才走 compound fallback。
+// 之前 orderKey 一律拼 compound key，會在 backend 偶爾省略 order_id 時
+// 把同一張單看成兩張，造成 filled_qty 從 0 跳到 N 時觸發兩次 notification。
 function orderKey(o: SimpleOrder): string {
-  return `${o.order_id || ''}|${o.symbol}|${o.action}|${o.price}|${o.qty}`;
+  if (o.order_id) return `id:${o.order_id}`;
+  return `c:${o.symbol}|${o.action}|${o.price}|${o.qty}`;
 }
 
 export function useFillNotification(): void {
