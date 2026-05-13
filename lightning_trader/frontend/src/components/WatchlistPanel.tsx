@@ -10,8 +10,8 @@
  *
  * 與 ChartPanel 一樣 lazy-loaded。
  */
-import React, { useEffect, useRef, useState } from 'react';
-import { X, Eye, GripVertical } from 'lucide-react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
+import { X, Eye, GripVertical, ListPlus } from 'lucide-react';
 import { useTradingContext } from '../contexts/TradingContext';
 import { SymbolPicker } from './SymbolPicker';
 import { formatPrice } from '../utils/instrument';
@@ -35,8 +35,25 @@ function saveList(list: string[]) {
 }
 
 const WatchlistPanel: React.FC = () => {
-  const { targetSymbol, subscribe, watchlistQuotes, watchSymbols } = useTradingContext();
+  const { targetSymbol, subscribe, watchlistQuotes, watchSymbols, accountSummary } = useTradingContext();
   const [list, setList] = useState<string[]>(() => loadList());
+
+  // Sprint 12 R5：算出「持倉但不在 watchlist 內」的 symbol，用來啟用「+ 加入持倉」按鈕
+  const missingPositions = useMemo(() => {
+    const inList = new Set(list);
+    const positions = accountSummary?.positions || [];
+    const out: string[] = [];
+    for (const p of positions) {
+      const s = (p.symbol || '').trim().toUpperCase();
+      if (s && !inList.has(s) && !out.includes(s)) out.push(s);
+    }
+    return out;
+  }, [accountSummary?.positions, list]);
+
+  const addAllPositions = () => {
+    if (missingPositions.length === 0) return;
+    setList((prev) => [...prev, ...missingPositions].slice(0, MAX_ITEMS));
+  };
   // Sprint 12 R3：native HTML5 drag-and-drop reorder（不引入 dnd lib，~0 KB cost）
   const dragSrcRef = useRef<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
@@ -89,12 +106,23 @@ const WatchlistPanel: React.FC = () => {
 
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
-      <div className="px-3 py-2 border-b border-slate-700/50 flex items-center justify-between">
+      <div className="px-3 py-2 border-b border-slate-700/50 flex items-center justify-between gap-2">
         <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
           <span className="w-1 h-3.5 bg-amber-500 rounded-full"></span>
           自選 ({list.length})
         </h3>
-        <SymbolPicker onSelect={(s) => addSymbol(s)} />
+        <div className="flex items-center gap-1">
+          {missingPositions.length > 0 && (
+            <button
+              onClick={addAllPositions}
+              className="flex items-center gap-1 px-2 py-0.5 bg-emerald-700/40 hover:bg-emerald-700/60 text-emerald-200 rounded text-[10px] font-bold border border-emerald-700/50 transition-colors cursor-pointer"
+              title={`一鍵加入 ${missingPositions.length} 個持倉：${missingPositions.join(', ')}`}
+            >
+              <ListPlus className="w-3 h-3" /> +持倉 ({missingPositions.length})
+            </button>
+          )}
+          <SymbolPicker onSelect={(s) => addSymbol(s)} />
+        </div>
       </div>
       <div className="flex-1 overflow-auto custom-scrollbar">
         <table className="w-full text-[11px] tabular-nums">
