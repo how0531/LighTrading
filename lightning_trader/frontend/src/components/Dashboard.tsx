@@ -1,11 +1,13 @@
-import React, { useState } from 'react';
+import React, { useState, Suspense, lazy } from 'react';
 import Header from './Header';
 import DOMPanel from './DOMPanel';
-import Panel_Positions from './Panel_Positions';
-import Panel_OrderHistory from './Panel_OrderHistory';
-import Panel_AccountBalance from './Panel_AccountBalance';
-import Panel_TradeHistory from './Panel_TradeHistory';
-import SettingsModal from './SettingsModal';
+// Focus mode 預設為 true → 以下 panels 在首載時不會顯示，懶載入掉
+// 進入 layout 模式時 Suspense 會閃 100~200ms（網路慢時更明顯），可接受
+const Panel_Positions       = lazy(() => import('./Panel_Positions'));
+const Panel_OrderHistory    = lazy(() => import('./Panel_OrderHistory'));
+const Panel_AccountBalance  = lazy(() => import('./Panel_AccountBalance'));
+const Panel_TradeHistory    = lazy(() => import('./Panel_TradeHistory'));
+const SettingsModal         = lazy(() => import('./SettingsModal'));
 import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
 import { useElectronUpdater } from '../hooks/useElectronUpdater';
 import { useFillNotification } from '../hooks/useFillNotification';
@@ -119,6 +121,7 @@ const DashboardContent: React.FC = () => {
           </div>
         </div>
       ) : (
+        <Suspense fallback={<div className="flex-1 flex items-center justify-center text-slate-500 text-xs">載入面板中…</div>}>
         <div className="flex-1 overflow-auto -mx-4 px-4 pb-12 min-h-0">
           <ResponsiveGridLayout
             className="layout"
@@ -158,12 +161,18 @@ const DashboardContent: React.FC = () => {
             </div>
           </ResponsiveGridLayout>
         </div>
+        </Suspense>
       )}
 
-      <SettingsModal 
-        isOpen={isSettingsOpen} 
-        onClose={() => setIsSettingsOpen(false)} 
-      />
+      {/* SettingsModal 也走 lazy；isOpen=false 時 lazy chunk 不會載 */}
+      {isSettingsOpen && (
+        <Suspense fallback={null}>
+          <SettingsModal
+            isOpen={isSettingsOpen}
+            onClose={() => setIsSettingsOpen(false)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };
