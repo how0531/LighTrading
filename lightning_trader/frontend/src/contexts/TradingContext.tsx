@@ -31,17 +31,21 @@ export interface SmartOrderData {
   is_active: boolean; is_triggered: boolean; created_at: string; triggered_at?: string;
 }
 interface TradingContextType {
-  isConnected: boolean; isStale: boolean; targetSymbol: string; setTargetSymbol: (sym: string) => void;
+  isConnected: boolean;
+  isStale: boolean;          // 任何訊息都沒收到（連線假死）
+  isTickStale: boolean;      // 連線正常但沒 tick（盤後或商品冷門）
+  targetSymbol: string; setTargetSymbol: (sym: string) => void;
   quote: QuoteData | null; bidAsk: BidAskData | null; quoteHistory: QuoteData[];
   accountSummary: AccountSummary; accounts: AccountInfo[]; activeAccount: string | null;
   workingOrders: WorkingOrder[]; setWorkingOrders: React.Dispatch<React.SetStateAction<WorkingOrder[]>>; refreshOrders: () => Promise<void>;
+  syncAll: () => Promise<void>;
   subscribe: (symbol: string) => void; selectAccount: (accountId: string) => Promise<void>;
   cancelOrder: (action: 'Buy' | 'Sell', price?: number) => Promise<void>;
   flattenPosition: (symbol: string) => Promise<void>;
   // 即時損益（前端隨 tick 計算）
   realtimePositions: RealtimePosition[];
   totalRealtimePnl: number;
-  totalRealizedPnl: number;  // ★ 已實現損益（從後端 PnLUpdate 接收）
+  totalRealizedPnl: number;
   // 智慧單
   smartOrders: SmartOrderData[];
   refreshSmartOrders: (symbol?: string) => Promise<void>;
@@ -53,6 +57,9 @@ const initialSummary: AccountSummary = { "當日交易": 0, "參考損益": 0, p
 export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [isStale, setIsStale] = useState(false);
+  const [isTickStale, setIsTickStale] = useState(false);
+  const lastTickTimeRef = useRef<number>(Date.now());
+  const isTickStaleRef = useRef<boolean>(false);
   const [targetSymbolState, setTargetSymbolState] = useState('2330');
   const targetSymbolRef = useRef('2330');
 
@@ -87,8 +94,10 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     } catch { /* 靜默 */ }
   }, []);
 
-  // 用於追蹤最新委託單版本的 Sequence Number，防止被舊回報覆蓋
-  const orderSeqRef = useRef<number>(0);
+  // ★ 分流 Sequence：snapshot（REST 快照 + sync_all）與 callback（Shioaji 推播）
+  // 兩條獨立 ref，避免一條被另一條的舊 seq 卡住
+  const snapshotSeqRef = useRef<number>(0);
+  const callbackSeqRef = useRef<number>(0);
 
   const refreshOrders = useCallback(async () => {
     try {
@@ -96,10 +105,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const payload = res.data || {};
       const newSeq = payload.seq_no || 0;
       const historyList = payload.orders || [];
-      
-      // 只有當拿到的 seq_no >= 我們目前記錄的，才更新畫面
-      if (newSeq >= orderSeqRef.current) {
-        orderSeqRef.current = newSeq;
+
+      if (newSeq >= snapshotSeqRef.current) {
+        snapshotSeqRef.current = newSeq;
         const active: WorkingOrder[] = historyList.filter((o: any) =>
           o.status === 'PendingSubmit' || o.status === 'PreSubmitted' ||
           o.status === 'Submitted' || o.status === 'PartFilled'
@@ -107,6 +115,19 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         setWorkingOrders(active);
       }
     } catch { /* 靜默，維持舊狀態 */ }
+  }, []);
+
+  // 強制全量同步（給 reconnect / 使用者手動 sync）
+  const syncAll = useCallback(async () => {
+    try {
+      const res = await apiClient.post('/sync_all');
+      const payload = res.data || {};
+      const newSeq = payload.seq_no || 0;
+      if (newSeq >= snapshotSeqRef.current) {
+        snapshotSeqRef.current = newSeq;
+        setWorkingOrders(payload.working_orders || []);
+      }
+    } catch { /* 靜默；reconnect 時若失敗會自動重試 */ }
   }, []);
 
   const wsRef = useRef<WebSocket | null>(null);
@@ -187,21 +208,30 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     return () => clearInterval(timer);
   }, []);
 
-  // 檢查是否假死 (Stale) - 每秒檢查一次
+  // 雙重 stale watchdog
+  //  - isStale     ：任何訊息都沒收到 > 8 秒（PnLUpdate 每 1.5s 心跳，超過代表連線假死）
+  //  - isTickStale ：連線正常但 > 6 秒沒 Tick（盤後或商品冷門，不算錯誤但 UI 要降級）
   useEffect(() => {
     const timer = setInterval(() => {
-      // 只有在已連線的狀態下才判斷是否假死
       if (!isConnected) {
         if (isStaleRef.current) { isStaleRef.current = false; setIsStale(false); }
+        if (isTickStaleRef.current) { isTickStaleRef.current = false; setIsTickStale(false); }
         return;
       }
-      const elapsed = Date.now() - lastMessageTimeRef.current;
-      if (elapsed > 5000 && !isStaleRef.current) {
-        isStaleRef.current = true;
-        setIsStale(true);
-      } else if (elapsed <= 5000 && isStaleRef.current) {
-        isStaleRef.current = false;
-        setIsStale(false);
+      const now = Date.now();
+      const msgElapsed = now - lastMessageTimeRef.current;
+      const tickElapsed = now - lastTickTimeRef.current;
+      // 連線假死
+      const wantStale = msgElapsed > 8000;
+      if (wantStale !== isStaleRef.current) {
+        isStaleRef.current = wantStale;
+        setIsStale(wantStale);
+      }
+      // Tick 假死
+      const wantTickStale = tickElapsed > 6000;
+      if (wantTickStale !== isTickStaleRef.current) {
+        isTickStaleRef.current = wantTickStale;
+        setIsTickStale(wantTickStale);
       }
     }, 1000);
     return () => clearInterval(timer);
@@ -253,6 +283,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       ws.send(JSON.stringify({ action: 'subscribe', symbol: sym }));
       console.log(`[WS] 連線成功，訂閱 ${sym}`);
       lastMessageTimeRef.current = Date.now();
+      // ★ 重連後立即強制三合一同步：確保斷線期間外部下單的單也會出現
+      syncAll();
     };
 
     ws.onmessage = (event) => {
@@ -269,6 +301,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         };
 
         if (data.type === 'Tick' && data.data && isMatch(data.data)) {
+          lastTickTimeRef.current = Date.now();
           mergeQuote(data.data as Partial<QuoteData>);
         } else if (data.type === 'BidAsk' && data.data) {
           if (isMatch(data.data)) {
@@ -284,12 +317,10 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setTotalRealtimePnl(total_pnl ?? 0);
           if (total_realized !== undefined) setTotalRealizedPnl(total_realized);
         } else if (data.type === 'OrderUpdate' && data.data) {
-          // 即時更新委託單狀態（由 Shioaji callback 推送）
-          // 比較 seq_no 大小來決定是否接受此推播
+          // Shioaji order_callback 推送 → 比較 callback seq，獨立於 snapshot seq
           const incSeq = data.seq_no || 0;
-          if (incSeq >= orderSeqRef.current) {
-             orderSeqRef.current = incSeq;
-             // 為確保資料一致性，仍延遲 0.5s 等 Shioaji 內部狀態同步後拉取最新快照。
+          if (incSeq >= callbackSeqRef.current) {
+             callbackSeqRef.current = incSeq;
              setTimeout(refreshOrders, 500);
           }
         } else if (data.type === 'SmartOrderUpdate' && data.data) {
@@ -396,8 +427,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       });
       const payload = res.data?.data || {};
       const newSeq = payload.seq_no || 0;
-      if (newSeq >= orderSeqRef.current) {
-        orderSeqRef.current = newSeq;
+      if (newSeq >= snapshotSeqRef.current) {
+        snapshotSeqRef.current = newSeq;
         setWorkingOrders(payload.orders || []);
       }
     } catch (err) {
@@ -416,9 +447,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   return (
     <TradingContext.Provider value={{
-      isConnected, isStale, targetSymbol: targetSymbolState, setTargetSymbol,
+      isConnected, isStale, isTickStale, targetSymbol: targetSymbolState, setTargetSymbol,
       quote, bidAsk, quoteHistory, accountSummary, accounts, activeAccount,
-      workingOrders, setWorkingOrders, refreshOrders,
+      workingOrders, setWorkingOrders, refreshOrders, syncAll,
       subscribe, selectAccount,
       cancelOrder, flattenPosition,
       realtimePositions, totalRealtimePnl, totalRealizedPnl,

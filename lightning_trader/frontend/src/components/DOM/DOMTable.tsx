@@ -1,5 +1,4 @@
 import React, { useMemo } from 'react';
-import { getMultiplier } from '../../types';
 
 // 針對數字顯示精度
 const formatPrice = (price: number, symbol: string): string => {

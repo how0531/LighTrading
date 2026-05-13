@@ -112,9 +112,10 @@ def on_shioaji_order_update(order_msg: dict):
     """訂單狀態推播"""
     try:
         msg_item = {
-            "type": "OrderUpdate", 
+            "type": "OrderUpdate",
             "data": order_msg,
-            "seq_no": shared.generate_order_seq()
+            "seq_no": shared.generate_callback_seq(),
+            "seq_kind": "callback",
         }
         if shared.fastapi_loop:
             shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg_item)
@@ -123,13 +124,37 @@ def on_shioaji_order_update(order_msg: dict):
 
 
 def on_shioaji_trade_update(trade_data: dict):
-    """成交回報推播"""
+    """成交回報推播 + 通知 PnL broadcaster 立即作廢持倉快取 + 自動補訂閱新商品"""
     try:
         msg_item = {"type": "TradeUpdate", "data": trade_data}
         if shared.fastapi_loop:
             shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg_item)
+
+        # ★ 通知 pnl_broadcaster：成交 → 持倉變動 → 作廢快取
+        try:
+            from backend.services import pnl_broadcaster as pb
+            pb.on_fill_event(trade_data)
+        except Exception:
+            pass
+
+        # ★ 新成交可能產生新部位 → 自動補訂閱該商品報價
+        try:
+            from backend.services.pnl_broadcaster import subscribe_position_contracts
+            if shared.fastapi_loop:
+                asyncio.run_coroutine_threadsafe(subscribe_position_contracts(), shared.fastapi_loop)
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"廣播交易回報時發生錯誤: {e}")
+
+
+def on_shioaji_tick_for_pnl(symbol: str, tick_data: dict):
+    """EventBus.on_tick → 通知 pnl_broadcaster 喚醒重算"""
+    try:
+        from backend.services import pnl_broadcaster as pb
+        pb.on_tick_event(symbol, tick_data)
+    except Exception:
+        pass
 
 
 def on_smart_order_update(order_data: dict):
@@ -149,13 +174,15 @@ def wire_callbacks():
     client = shared.shioaji_client
     eng = shared.engine
 
-    # 帳戶/訂單訊號仍使用 Qt Signal（低頻）
+    # 帳戶/訂單訊號仍使用 Signal（低頻）
     client.signal_account_update.connect(on_shioaji_account_update)
     client.signal_order_update.connect(on_shioaji_order_update)
     client.signal_trade_update.connect(on_shioaji_trade_update)
     eng.event_bus.on_smart_order_added.connect(on_smart_order_update)
     eng.event_bus.on_smart_order_triggered.connect(on_smart_order_update)
+    # ★ event-driven PnL：tick 一進來就喚醒重算
+    eng.event_bus.on_tick.connect(on_shioaji_tick_for_pnl)
 
-    # 高頻報價使用直接回呼（繞過 Qt Signal）
+    # 高頻報價使用直接回呼（繞過 Signal）
     client._direct_quote_callback = on_shioaji_quote
-    logger.info("✅ bridge: 已連接所有 Shioaji 回呼")
+    logger.info("✅ bridge: 已連接所有 Shioaji 回呼 (含 on_tick → PnL)")

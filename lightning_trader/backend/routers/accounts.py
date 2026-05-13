@@ -156,3 +156,58 @@ async def get_accounts():
     except Exception as e:
         logger.error(f"獲取帳號列表失敗: {e}")
         return []
+
+
+@router.post("/sync_all")
+async def sync_all():
+    """
+    強制三合一同步：update_status + list_trades + list_positions。
+    給前端在 WebSocket 重連 / 使用者按「重新整理」時呼叫。
+
+    回傳：
+      - working_orders：當前活躍委託（含外部平台送出的單）
+      - positions：最新持倉
+      - seq_no（snapshot）
+    """
+    client = shared.shioaji_client
+    if not getattr(client, "_is_connected", False):
+        raise HTTPException(status_code=409, detail="尚未登入，無法同步")
+
+    try:
+        # 1. update_status：強制券商主機把外部 session 的單也同步回來
+        await shared.run_in_qt_thread(client.api.update_status)
+        # 2. list_trades → 活躍委託快照
+        trades = await shared.run_in_qt_thread(client.get_order_history)
+        active_statuses = {"PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"}
+        working = []
+        from shioaji.constant import Action as _Action
+        for t in trades:
+            status_name = t.status.status.name if hasattr(t.status, "status") else getattr(t.status, "name", "Unknown")
+            if status_name not in active_statuses:
+                continue
+            raw_symbol = getattr(t.contract, "symbol", "") or getattr(t.contract, "code", "")
+            working.append({
+                "symbol": raw_symbol,
+                "action": "Buy" if t.order.action == _Action.Buy else "Sell",
+                "price": float(t.order.price),
+                "qty": t.order.quantity,
+                "filled_qty": getattr(t.status, "deal_quantity", getattr(t.status, "filled_quantity", 0)),
+                "status": status_name,
+                "order_id": getattr(t.order, "id", getattr(t.order, "seqno", "")),
+            })
+        # 3. list_positions
+        positions = await shared.run_in_qt_thread(client.list_positions)
+        # 4. 觸發一次帳務廣播
+        try:
+            client.trigger_account_update()
+        except Exception:
+            pass
+        return {
+            "status": "success",
+            "seq_no": shared.generate_snapshot_seq(),
+            "working_orders": working,
+            "positions": positions,
+        }
+    except Exception as e:
+        logger.error(f"sync_all 失敗: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail="同步失敗")
