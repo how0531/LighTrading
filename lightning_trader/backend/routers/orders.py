@@ -5,7 +5,7 @@ routers/orders.py — 訂單相關 API 路由
 """
 import logging
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from shioaji.constant import (
     Action, OrderType,
@@ -13,6 +13,7 @@ from shioaji.constant import (
     StockOrderLot, StockOrderCond,
 )
 from backend import shared
+from backend.rate_limit import check_rate_limit
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["orders"])
@@ -20,29 +21,33 @@ router = APIRouter(prefix="/api", tags=["orders"])
 
 # ─── Request Models ────────────────────────────────────────
 
+from pydantic import Field
+from typing import Optional
+
+
 class PlaceOrderRequest(BaseModel):
-    symbol: str
-    price: float
-    action: str  # "Buy" 或 "Sell"
-    qty: int
+    symbol: str = Field(min_length=2, max_length=12)
+    price: float = Field(ge=0)            # 0 = 市價
+    action: str                            # "Buy" 或 "Sell"
+    qty: int = Field(gt=0, le=10000)
     order_type: str = "ROD"
     price_type: str = "LMT"
     order_cond: str = "Cash"
     order_lot: str = "Common"
 
 class CancelAllRequest(BaseModel):
-    symbol: str
-    action: str  # "Buy" 或 "Sell"
+    symbol: str = Field(min_length=2, max_length=12)
+    action: str
 
 class UpdateOrderRequest(BaseModel):
-    symbol: str
+    symbol: str = Field(min_length=2, max_length=12)
     action: str
-    old_price: float
-    new_price: float
-    qty: int = None
+    old_price: float = Field(ge=0)
+    new_price: float = Field(ge=0)
+    qty: Optional[int] = Field(default=None, gt=0, le=10000)
 
 class SymbolRequest(BaseModel):
-    symbol: str
+    symbol: str = Field(min_length=2, max_length=12)
 
 
 # ─── 內部工具 ──────────────────────────────────────────────
@@ -81,8 +86,9 @@ async def _get_working_orders_snapshot() -> list:
 # ─── 路由端點 ──────────────────────────────────────────────
 
 @router.post("/place_order")
-async def place_order(req: PlaceOrderRequest):
-    """下單前先過 RiskManager；通過後送出，並回傳已確認的活躍委託快照"""
+async def place_order(req: PlaceOrderRequest, request: Request):
+    """下單前先過 rate limit + RiskManager；通過後送出，並回傳已確認的活躍委託快照"""
+    check_rate_limit(request)
     action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
 
     order_type_map = {"ROD": OrderType.ROD, "IOC": OrderType.IOC, "FOK": OrderType.FOK}

@@ -52,7 +52,8 @@ class ShioajiClient:
         self._start_reconnect_timer()
 
     def _start_reconnect_timer(self):
-        self._reconnect_timer = threading.Timer(10.0, self._on_reconnect_timer_tick)
+        # 巡檢間隔縮短到 5 秒（搭配 15s watchdog），最壞 20s 內偵測到靜默斷線
+        self._reconnect_timer = threading.Timer(5.0, self._on_reconnect_timer_tick)
         self._reconnect_timer.daemon = True
         self._reconnect_timer.start()
 
@@ -73,8 +74,8 @@ class ShioajiClient:
                 logger.warning(f"連線檢查失敗 (API 異常)，準備重連: {e}")
                 
         # 2. 檢查 Watchdog (最後收到行情封包的時間)
-        # 只有在有訂閱合約且處於連線狀態時才檢查，預設 60 秒沒收到任何封包即視為報價中斷
-        watchdog_timeout = 60
+        # 縮短為 15 秒：當沖場景每秒都有 tick，超過 15 秒沒任何封包就視為靜默斷線
+        watchdog_timeout = 15
         is_stale = False
         if api_ok and self.current_contract and self._is_connected:
             elapsed = time.time() - getattr(self, 'last_message_time', time.time())
@@ -583,7 +584,12 @@ class ShioajiClient:
             return [
                 {
                     "account_id": acc.account_id,
-                    "category": "Stock" if "Stock" in acc.__class__.__name__ else "Future" if "Future" in acc.__class__.__name__ else "Other",
+                    "category": (
+                        "Stock"  if "Stock"  in acc.__class__.__name__ else
+                        "Option" if "Option" in acc.__class__.__name__ else
+                        "Future" if "Future" in acc.__class__.__name__ else
+                        "Other"
+                    ),
                     "person_id": acc.person_id,
                     "broker_id": acc.broker_id,
                     "account_name": f"{acc.broker_id}-{acc.account_id}"

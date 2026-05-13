@@ -79,11 +79,34 @@ async def lifespan(app):
 
     login_task = asyncio.create_task(_auto_login())
 
+    async def _daily_risk_reset():
+        """每日 04:00 重置 RiskManager 日虧損計數器（盤後）。"""
+        from datetime import datetime, timedelta
+        while True:
+            now = datetime.now()
+            target = now.replace(hour=4, minute=0, second=0, microsecond=0)
+            if target <= now:
+                target += timedelta(days=1)
+            try:
+                await asyncio.sleep((target - now).total_seconds())
+                rm = getattr(shared.engine, "risk_manager", None)
+                if rm is not None:
+                    rm.reset_daily()
+                    rm.config.trading_enabled = True
+                    logger.info("⏰ 每日 04:00 RiskManager 日虧損已重置")
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"daily_risk_reset 例外: {e}")
+                await asyncio.sleep(60)
+
+    daily_task = asyncio.create_task(_daily_risk_reset())
+
     yield
 
-    for task in (login_task, broadcast_task, pnl_task):
+    for task in (login_task, broadcast_task, pnl_task, daily_task):
         task.cancel()
-    for task in (login_task, broadcast_task, pnl_task):
+    for task in (login_task, broadcast_task, pnl_task, daily_task):
         try:
             await task
         except asyncio.CancelledError:
@@ -130,11 +153,13 @@ app.add_middleware(
 )
 
 # 掛載路由模組
-from backend.routers import orders, accounts, smart, user_settings
+from backend.routers import orders, accounts, smart, user_settings, risk, health
 app.include_router(orders.router)
 app.include_router(accounts.router)
 app.include_router(smart.router)
 app.include_router(user_settings.router)
+app.include_router(risk.router)
+app.include_router(health.router)
 
 
 # ─── WebSocket（唯一留在 main 的端點）─────────────────────

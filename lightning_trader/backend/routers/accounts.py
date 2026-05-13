@@ -6,11 +6,12 @@ routers/accounts.py — 帳務相關 API 路由
 import asyncio
 import logging
 from datetime import datetime
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 from shioaji.constant import Action
 from core.config import Config
 from backend import shared
+from backend.rate_limit import check_rate_limit
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["accounts"])
@@ -43,13 +44,14 @@ class AccountSwitchRequest(BaseModel):
 # ─── 路由端點 ──────────────────────────────────────────────
 
 @router.post("/login")
-async def login(req: LoginRequest):
+async def login(req: LoginRequest, request: Request):
     """
     登入流程：
       1. 若 simulation=False 但前端沒給 api_key/secret_key，改用 backend .env
       2. 已登入則直接返回 success（不重複登入）
       3. 金鑰只進 logger.debug 並遮蔽；info/error 永不夾帶 raw 金鑰
     """
+    check_rate_limit(request)
     # 若已登入，直接回成功，避免重複呼叫造成 socket flapping
     if getattr(shared.shioaji_client, "_is_connected", False) and shared.shioaji_client.is_simulation == req.simulation:
         return {"status": "success", "message": "已登入", "already": True}

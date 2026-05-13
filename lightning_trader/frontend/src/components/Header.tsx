@@ -1,6 +1,6 @@
 import React from 'react';
 import { useTradingContext } from '../contexts/TradingContext';
-import { Activity, Settings, Lock, Unlock, Maximize, Minimize } from 'lucide-react';
+import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw } from 'lucide-react';
 
 const QUICK_SYMBOLS = ['TXFR1', 'MXFR1', '2330', '2454'] as const;
 
@@ -13,7 +13,7 @@ interface HeaderProps {
 }
 
 const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode }) => {
-  const { isConnected, isTickStale, targetSymbol, subscribe, totalRealtimePnl } = useTradingContext();
+  const { isConnected, isTickStale, targetSymbol, subscribe, totalRealtimePnl, forceReconnect } = useTradingContext();
   const [symInput, setSymInput] = React.useState(targetSymbol);
 
   const handleSub = (e: React.FormEvent) => {
@@ -36,6 +36,17 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
             <span className="text-[10px] text-slate-400 font-mono tracking-widest uppercase font-bold">
               {!isConnected ? 'OFFLINE' : isTickStale ? 'NO-TICK' : 'ONLINE'}
             </span>
+            {(!isConnected || isTickStale) && (
+              <button
+                type="button"
+                onClick={forceReconnect}
+                className="ml-1 flex items-center gap-0.5 px-1.5 py-0.5 bg-amber-500/20 hover:bg-amber-500/40 text-amber-300 rounded text-[9px] font-bold border border-amber-500/40 transition-colors cursor-pointer"
+                title="立即重連 WebSocket"
+              >
+                <RefreshCw className="w-2.5 h-2.5" />
+                立即重連
+              </button>
+            )}
           </div>
         </div>
       </div>

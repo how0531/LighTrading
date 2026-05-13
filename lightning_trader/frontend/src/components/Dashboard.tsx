@@ -6,7 +6,7 @@ import Panel_OrderHistory from './Panel_OrderHistory';
 import Panel_AccountBalance from './Panel_AccountBalance';
 import Panel_TradeHistory from './Panel_TradeHistory';
 import SettingsModal from './SettingsModal';
-import { TradingProvider } from '../contexts/TradingContext';
+import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
 import { Responsive, WidthProvider } from 'react-grid-layout';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
@@ -45,6 +45,8 @@ const DashboardContent: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isLayoutLocked, setIsLayoutLocked] = useState(true);
   const [isFocusMode, setIsFocusMode] = useState(true); // 預設為專注模式
+  const { accountSummary } = useTradingContext();
+  const isLive = accountSummary.is_simulation === false;
 
   const [layouts, setLayouts] = useState(() => {
     try {
@@ -62,8 +64,15 @@ const DashboardContent: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[var(--color-blue-gray-900)] text-slate-100 p-4 md:p-6 flex flex-col overflow-hidden max-h-screen">
-      <Header 
+    <div className={`min-h-screen bg-[var(--color-blue-gray-900)] text-slate-100 p-4 md:p-6 flex flex-col overflow-hidden max-h-screen relative ${isLive ? 'ring-2 ring-inset ring-red-500/70' : ''}`}>
+      {isLive && (
+        <div className="absolute top-1.5 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
+          <div className="px-3 py-0.5 bg-red-600/90 text-white text-[11px] font-black tracking-[0.3em] rounded-b shadow-lg border-x border-b border-red-400/70">
+            ⚠ LIVE TRADING ⚠
+          </div>
+        </div>
+      )}
+      <Header
         onOpenSettings={() => setIsSettingsOpen(true)} 
         isLayoutLocked={isLayoutLocked}
         onToggleLayoutLock={() => setIsLayoutLocked(!isLayoutLocked)}

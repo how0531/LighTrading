@@ -39,6 +39,7 @@ interface TradingContextType {
   accountSummary: AccountSummary; accounts: AccountInfo[]; activeAccount: string | null;
   workingOrders: WorkingOrder[]; setWorkingOrders: React.Dispatch<React.SetStateAction<WorkingOrder[]>>; refreshOrders: () => Promise<void>;
   syncAll: () => Promise<void>;
+  forceReconnect: () => void;
   subscribe: (symbol: string) => void; selectAccount: (accountId: string) => Promise<void>;
   cancelOrder: (action: 'Buy' | 'Sell', price?: number) => Promise<void>;
   flattenPosition: (symbol: string) => Promise<void>;
@@ -376,6 +377,17 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     } catch (err) { console.error('[TradingContext] 帳號切換失敗:', err); isSwitchingAccountRef.current = false; }
   }, []);
 
+  const forceReconnect = useCallback(() => {
+    // 立即關閉現有 socket 並觸發重連（不等指數退避）
+    reconnectDelayRef.current = 500;
+    const ws = wsRef.current;
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) {
+      try { ws.close(); } catch { /* noop */ }
+    }
+    // ws.onclose 會排下一次重連，這邊保險再戳一次
+    setTimeout(() => connectWsRef.current(), 100);
+  }, []);
+
   const subscribe = useCallback((symbol: string) => {
     const trimmed = symbol.trim().toUpperCase();
     if (!trimmed) return;
@@ -429,7 +441,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     <TradingContext.Provider value={{
       isConnected, isStale, isTickStale, targetSymbol: targetSymbolState, setTargetSymbol,
       quote, bidAsk, quoteHistory, accountSummary, accounts, activeAccount,
-      workingOrders, setWorkingOrders, refreshOrders, syncAll,
+      workingOrders, setWorkingOrders, refreshOrders, syncAll, forceReconnect,
       subscribe, selectAccount,
       cancelOrder, flattenPosition,
       realtimePositions, totalRealtimePnl, totalRealizedPnl,

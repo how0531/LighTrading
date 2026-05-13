@@ -128,7 +128,9 @@ export const DOMPanel: React.FC = () => {
           handleCancelOrder('Sell');
           break;
         case 'Flatten':
+          // B1 fix: 平倉前必須兩側都撤單，否則殘留掛單會被吃進新部位
           logic.handleCancelOrder('Buy');
+          logic.handleCancelOrder('Sell');
           await handleFlatten();
           break;
         case 'ScrollCenter':
