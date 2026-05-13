@@ -87,14 +87,29 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[],
     excludes=[
-        # Strip out PyQt5 — it's only used by legacy/ desktop UI, not the FastAPI server
+        # PyQt5：只給 legacy/ 用，server 不需要（剝掉約 80MB）
         "PyQt5",
         "PyQt5.QtCore",
         "PyQt5.QtGui",
         "PyQt5.QtWidgets",
-        # Strip dev/test tooling
+        # 開發/測試工具
         "pytest",
         "_pytest",
+        # 常見 bloat：若 shioaji / fastapi 傳遞依賴沒主動引入這些就剝掉
+        "tkinter",
+        "tkinter.ttk",
+        "IPython",
+        "ipykernel",
+        "jupyter",
+        "notebook",
+        "matplotlib",
+        "scipy",
+        "PIL",          # Pillow，後端純 JSON/binary tick 不需要影像處理
+        "pandas.tests",
+        "numpy.tests",
+        "test",
+        "tests",
+        "unittest",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,

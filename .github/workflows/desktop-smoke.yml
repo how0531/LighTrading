@@ -1,0 +1,71 @@
+name: Desktop smoke build (PR)
+
+# 比 desktop-build.yml 輕量：PR 上的快速 sanity check
+# - 只跑 Linux（最快、AppImage 最便宜）
+# - 不執行 PyInstaller 完整 bundle、不上傳 artifact
+# - 只驗證：node --check、tsc -b、frontend build、backend AST、yaml/json
+# 想跑完整 3-platform build 請 push 一個 v*.*.* tag → 觸發 desktop-build.yml
+
+on:
+  pull_request:
+    paths:
+      - 'electron/**'
+      - 'lightning_trader/backend/**'
+      - 'lightning_trader/frontend/**'
+      - '.github/workflows/desktop-*.yml'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Desktop smoke (ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'lightning_trader/frontend/package-lock.json'
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+
+      - name: Syntax check (node)
+        run: |
+          node --check electron/main.js
+          node --check electron/preload.js
+          node -e 'JSON.parse(require("fs").readFileSync("electron/package.json","utf8"))'
+
+      - name: Syntax check (python)
+        run: |
+          python -c "import ast; ast.parse(open('lightning_trader/backend/main.py').read())"
+          python -c "import ast; ast.parse(open('lightning_trader/backend/pyinstaller_backend.spec').read())"
+
+      - name: Syntax check (yaml)
+        run: |
+          python -c "import yaml; yaml.safe_load(open('.github/workflows/desktop-build.yml'))"
+          python -c "import yaml; yaml.safe_load(open('.github/workflows/desktop-smoke.yml'))"
+
+      - name: Frontend tsc + build + vitest
+        run: |
+          cd lightning_trader/frontend
+          npm ci
+          npx tsc -b --pretty false
+          npm run build
+          npx vitest run
+
+      - name: Backend pytest (offline)
+        run: |
+          pip install fastapi pydantic python-dotenv pytest
+          cd lightning_trader
+          python -m pytest tests/ -q
+
+      - name: bash -n on shell scripts
+        run: bash -n lightning_trader/backend/build_backend.sh

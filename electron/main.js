@@ -110,6 +110,23 @@ function spawnBackend() {
     windowsHide: true,
   });
 
+  // 立刻把 proc 存到全域 ref；確保 spawn 後若 error/exit 拋出
+  // 也能在 before-quit 把它收掉，不會 leak。
+  backendProcess = proc;
+
+  // 同時把 backend stdout/stderr 鏡像寫到 userData/logs/backend.log，
+  // 方便使用者在打包後的 app crash 後找到原因。
+  try {
+    const logsDir = path.join(app.getPath('userData'), 'logs');
+    fs.mkdirSync(logsDir, { recursive: true });
+    const logFile = fs.createWriteStream(path.join(logsDir, 'backend.log'), { flags: 'a' });
+    logFile.write(`\n=== ${new Date().toISOString()} backend spawn ===\n`);
+    proc.stdout.pipe(logFile);
+    proc.stderr.pipe(logFile);
+  } catch (err) {
+    console.warn('[backend] log file setup failed:', err);
+  }
+
   proc.stdout.on('data', (chunk) => {
     process.stdout.write(`[backend] ${chunk.toString()}`);
   });
@@ -120,20 +137,29 @@ function spawnBackend() {
   proc.on('exit', (code, signal) => {
     console.log(`[backend] exited code=${code} signal=${signal}`);
     backendProcess = null;
-    if (!isQuitting) {
-      dialog.showErrorBox(
-        'LighTrade',
-        `Backend 已意外終止 (code=${code}, signal=${signal})`,
-      );
-      app.quit();
+    if (isQuitting) return;
+    // 嘗試自動 restart 一次；之後仍掛掉才彈錯誤。
+    if (!proc._lightradeRestarted) {
+      console.warn('[backend] unexpected exit, attempting one auto-restart');
+      setTimeout(() => {
+        const next = spawnBackend();
+        if (next) next._lightradeRestarted = true;
+      }, 500);
+      return;
     }
+    dialog.showErrorBox(
+      'LighTrade',
+      `Backend 再次意外終止 (code=${code}, signal=${signal})\n\nlog: ${path.join(app.getPath('userData'), 'logs', 'backend.log')}`,
+    );
+    app.quit();
   });
 
   proc.on('error', (err) => {
     console.error('[backend] spawn error:', err);
+    // 若已掛 ref 但本身沒成功啟動，仍要清掉避免假性活著
+    if (backendProcess === proc) backendProcess = null;
   });
 
-  backendProcess = proc;
   return proc;
 }
 
@@ -202,23 +228,28 @@ function createWindow() {
     const prefs = loadPrefs();
     if (prefs.skipCloseConfirm) return;
 
+    // 用 async showMessageBox 才能拿到 checkbox 狀態（sync 變體拿不到）。
     e.preventDefault();
-    const result = dialog.showMessageBoxSync(mainWindow, {
-      type: 'question',
-      buttons: ['取消', '關閉'],
-      defaultId: 1,
-      cancelId: 0,
-      title: 'LighTrade',
-      message: '確定要關閉 LighTrade 嗎？',
-      checkboxLabel: '不再詢問',
-      checkboxChecked: false,
-    });
-    // showMessageBoxSync returns the index; checkbox state isn't returned by
-    // sync variant, so use async-ish via showMessageBox below as a fallback.
-    if (result === 1) {
-      isQuitting = true;
-      mainWindow.close();
-    }
+    dialog
+      .showMessageBox(mainWindow, {
+        type: 'question',
+        buttons: ['取消', '關閉'],
+        defaultId: 1,
+        cancelId: 0,
+        title: 'LighTrade',
+        message: '確定要關閉 LighTrade 嗎？',
+        checkboxLabel: '不再詢問',
+        checkboxChecked: false,
+      })
+      .then((r) => {
+        if (r.response !== 1) return;
+        if (r.checkboxChecked) {
+          savePrefs({ ...loadPrefs(), skipCloseConfirm: true });
+        }
+        isQuitting = true;
+        mainWindow.close();
+      })
+      .catch((err) => console.warn('[close] dialog failed:', err));
   });
 
   mainWindow.on('closed', () => {
@@ -306,7 +337,9 @@ function buildMenu() {
 
   template.push({
     label: 'Window',
-    submenu: [{ role: 'minimize' }, { role: 'zoom' }],
+    submenu: isMac
+      ? [{ role: 'minimize' }, { role: 'zoom' }, { type: 'separator' }, { role: 'front' }]
+      : [{ role: 'minimize' }, { role: 'zoom' }],
   });
 
   template.push({
@@ -317,17 +350,25 @@ function buildMenu() {
         click: () => shell.openExternal(GITHUB_REPO_URL),
       },
       {
-        label: '檢查更新',
+        label: '開啟 log 資料夾',
         click: () => {
-          if (!app.isPackaged) {
-            dialog.showMessageBox({
-              type: 'info',
-              message: '開發模式不檢查更新',
-            });
-            return;
+          try {
+            const logsDir = path.join(app.getPath('userData'), 'logs');
+            fs.mkdirSync(logsDir, { recursive: true });
+            shell.openPath(logsDir);
+          } catch (err) {
+            dialog.showErrorBox('LighTrade', `無法開啟 log 資料夾：${err.message}`);
           }
+        },
+      },
+      {
+        label: '檢查更新',
+        // dev 模式 disable 而不是顯示對話框，更符合 UX 預期
+        enabled: app.isPackaged,
+        click: () => {
           autoUpdater.checkForUpdates().catch((err) => {
             console.warn('[updater] manual check failed:', err);
+            dialog.showErrorBox('LighTrade', `檢查更新失敗：${err.message}`);
           });
         },
       },
@@ -427,8 +468,46 @@ ipcMain.on('install-update', () => {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
+// 冷啟動 loading splash：在 backend 還沒 ready 前先給使用者一個視覺回饋
+let splashWindow = null;
+function createSplash() {
+  splashWindow = new BrowserWindow({
+    width: 420,
+    height: 240,
+    frame: false,
+    resizable: false,
+    movable: true,
+    alwaysOnTop: true,
+    skipTaskbar: true,
+    transparent: process.platform !== 'win32',
+    webPreferences: { contextIsolation: true, nodeIntegration: false },
+  });
+  const html = `<!doctype html>
+<html><head><meta charset="utf-8"><style>
+  body { margin:0; height:100vh; display:flex; flex-direction:column;
+         align-items:center; justify-content:center; gap:14px;
+         background:#101623; color:#F1F5F9;
+         font-family:-apple-system,Segoe UI,sans-serif; }
+  .brand { font-size:26px; font-weight:900; letter-spacing:0.2em; font-style:italic;
+           color:#D4AF37; text-shadow:0 0 18px rgba(212,175,55,0.4); }
+  .msg   { font-size:12px; color:#94A3B8; letter-spacing:0.1em; }
+  .bar   { width:240px; height:4px; background:#1C2331; border-radius:2px; overflow:hidden; }
+  .bar > i { display:block; width:40%; height:100%;
+             background:linear-gradient(90deg, transparent, #D4AF37, transparent);
+             animation:slide 1.2s linear infinite; }
+  @keyframes slide { 0% { transform:translateX(-100%); } 100% { transform:translateX(340%); } }
+</style></head><body>
+  <div class="brand">LIGHTRADE</div>
+  <div class="bar"><i></i></div>
+  <div class="msg">正在連線到交易引擎…</div>
+</body></html>`;
+  splashWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
+  splashWindow.on('closed', () => { splashWindow = null; });
+}
+
 app.whenReady().then(async () => {
   buildMenu();
+  createSplash();
 
   try {
     if (!IS_DEV) {
@@ -440,12 +519,18 @@ app.whenReady().then(async () => {
     await waitForBackend();
   } catch (err) {
     console.error('[startup] backend not ready:', err);
+    if (splashWindow) splashWindow.destroy();
     dialog.showErrorBox('LighTrade', '無法啟動 backend');
     app.quit();
     return;
   }
 
   createWindow();
+  // backend ready → main window 接管，把 splash 關掉
+  if (splashWindow) {
+    splashWindow.destroy();
+    splashWindow = null;
+  }
   initAutoUpdater();
 
   app.on('activate', () => {
