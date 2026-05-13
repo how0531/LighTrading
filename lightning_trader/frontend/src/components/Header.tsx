@@ -2,6 +2,8 @@ import React from 'react';
 import { useTradingContext } from '../contexts/TradingContext';
 import { Activity, Settings, Lock, Unlock, Maximize, Minimize } from 'lucide-react';
 
+const QUICK_SYMBOLS = ['TXFR1', 'MXFR1', '2330', '2454'] as const;
+
 interface HeaderProps {
   onOpenSettings?: () => void;
   isLayoutLocked?: boolean;
@@ -11,7 +13,7 @@ interface HeaderProps {
 }
 
 const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode }) => {
-  const { isConnected, targetSymbol, subscribe, totalRealtimePnl } = useTradingContext();
+  const { isConnected, isTickStale, targetSymbol, subscribe, totalRealtimePnl } = useTradingContext();
   const [symInput, setSymInput] = React.useState(targetSymbol);
 
   const handleSub = (e: React.FormEvent) => {
@@ -26,8 +28,14 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
         <div>
           <h2 className="text-lg font-black tracking-[0.2em] text-white italic transition-transform hover:scale-105 cursor-default font-mono">LIGHTRADE</h2>
           <div className="flex items-center gap-1.5 mt-0.5">
-            <div className={`w-1.5 h-1.5 rounded-full ${isConnected ? 'bg-[#10B981] shadow-[0_0_6px_rgba(16,185,129,0.3)]' : 'bg-[#EF4444]'}`}></div>
-            <span className="text-[10px] text-slate-400 font-mono tracking-widest uppercase font-bold">{isConnected ? 'ONLINE' : 'OFFLINE'}</span>
+            <div className={`w-1.5 h-1.5 rounded-full ${
+              !isConnected ? 'bg-[#EF4444]'
+              : isTickStale ? 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)]'
+              : 'bg-[#10B981] shadow-[0_0_6px_rgba(16,185,129,0.3)]'
+            }`}></div>
+            <span className="text-[10px] text-slate-400 font-mono tracking-widest uppercase font-bold">
+              {!isConnected ? 'OFFLINE' : isTickStale ? 'NO-TICK' : 'ONLINE'}
+            </span>
           </div>
         </div>
       </div>
@@ -54,6 +62,23 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
             <button type="submit" className="bg-slate-800 text-slate-400 hover:bg-[#D4AF37] hover:text-white px-3 py-1.5 text-[10px] font-black tracking-tighter border-l border-slate-700 transition-all uppercase">
               LOAD
             </button>
+          </div>
+          <div className="hidden lg:flex items-center gap-1">
+            {QUICK_SYMBOLS.map((s) => (
+              <button
+                type="button"
+                key={s}
+                onClick={() => { setSymInput(s); subscribe(s); }}
+                className={`px-2 py-1 text-[10px] font-mono font-bold rounded border transition-all cursor-pointer ${
+                  targetSymbol === s
+                    ? 'bg-[#D4AF37]/20 border-[#D4AF37] text-[#D4AF37]'
+                    : 'bg-slate-800/50 border-slate-700 text-slate-400 hover:border-[#D4AF37]/50 hover:text-slate-200'
+                }`}
+                title={`快速切換到 ${s}`}
+              >
+                {s}
+              </button>
+            ))}
           </div>
         </form>
 

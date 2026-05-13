@@ -61,7 +61,9 @@ export const DOMTable: React.FC<DOMTableProps> = ({
   targetSymbol, currentPosition, flashDir, smartOrders, workingBuyMap, workingSellMap, bData,
   orderFeedback, handleAddStopOrder, handleCancelOrder, handlePlaceOrder, handleDropOrder
 }) => {
-  
+  // 拖曳目標 hover：用 pKey + action 標記目前 drop target，給單一格子強光提示
+  const [dropTarget, setDropTarget] = React.useState<{ pKey: number; action: 'Buy' | 'Sell' } | null>(null);
+
   // --- BidAsk 查找表重構進 Table 內部以簡化傳遞 ---
   const { bidMap, askMap, diffBidMap, diffAskMap, cumBidMap, cumAskMap, maxCumVolume } = useMemo(() => {
     const pricesB = bData.BidPrice || [];
@@ -205,10 +207,11 @@ export const DOMTable: React.FC<DOMTableProps> = ({
                 {!smartBuyLine && myBuyQty > 0 && <span className="font-bold text-[10px] text-red-400 hover:text-white transition-colors">✕</span>}
               </td>
 
-              <td className={`bg-red-950/40 text-red-500 font-bold cursor-pointer hover:bg-red-900/60 border-r border-slate-800 transition-colors ${fbBuyClass}`}
+              <td className={`bg-red-950/40 text-red-500 font-bold cursor-pointer hover:bg-red-900/60 border-r border-slate-800 transition-colors ${fbBuyClass} ${dropTarget && dropTarget.pKey === pKey && dropTarget.action === 'Buy' ? 'ring-2 ring-inset ring-red-400 bg-red-500/40' : ''}`}
                 onClick={() => handlePlaceOrder(p, 'Buy')}
-                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
-                onDrop={(e) => handleDropOrder(e as any, p, 'Buy')}
+                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropTarget({ pKey, action: 'Buy' }); }}
+                onDragLeave={() => setDropTarget((cur) => (cur && cur.pKey === pKey && cur.action === 'Buy' ? null : cur))}
+                onDrop={(e) => { setDropTarget(null); handleDropOrder(e as any, p, 'Buy'); }}
               >
                 {myBuyQty > 0 && (
                   <span draggable
@@ -267,10 +270,11 @@ export const DOMTable: React.FC<DOMTableProps> = ({
                 </div>
               </td>
 
-              <td className={`bg-emerald-950/40 text-emerald-500 font-bold cursor-pointer hover:bg-emerald-900/60 border-r border-slate-800 transition-colors ${fbSellClass}`}
+              <td className={`bg-emerald-950/40 text-emerald-500 font-bold cursor-pointer hover:bg-emerald-900/60 border-r border-slate-800 transition-colors ${fbSellClass} ${dropTarget && dropTarget.pKey === pKey && dropTarget.action === 'Sell' ? 'ring-2 ring-inset ring-emerald-400 bg-emerald-500/40' : ''}`}
                 onClick={() => handlePlaceOrder(p, 'Sell')}
-                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; }}
-                onDrop={(e) => handleDropOrder(e as any, p, 'Sell')}
+                onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropTarget({ pKey, action: 'Sell' }); }}
+                onDragLeave={() => setDropTarget((cur) => (cur && cur.pKey === pKey && cur.action === 'Sell' ? null : cur))}
+                onDrop={(e) => { setDropTarget(null); handleDropOrder(e as any, p, 'Sell'); }}
               >
                 {mySellQty > 0 && (
                   <span draggable

@@ -4,7 +4,8 @@ import { DOMHeader } from './DOM/DOMHeader';
 import { DOMTable } from './DOM/DOMTable';
 import { DOMFooter } from './DOM/DOMFooter';
 import { getTickSize } from '../utils/tickSize';
-import { apiClient } from '../api/client';
+import { apiClient, normalizeApiError } from '../api/client';
+import { useToast } from '../contexts/ToastContext';
 import { getMultiplier } from '../types';
 
 // 精確四捨五入避免浮點漂移
@@ -12,6 +13,7 @@ const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 export const DOMPanel: React.FC = () => {
   const logic = useDOMLogic();
+  const { toast } = useToast();
   const {
     qData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice, isSimulation,
     isStale, tableRef, hasScrolled, flashDir,
@@ -141,13 +143,21 @@ export const DOMPanel: React.FC = () => {
   const handleFlatten = async () => {
     try {
       await apiClient.post('/flatten', { symbol: targetSymbol });
-    } catch (e) { console.error('[DOMPanel] 平倉失敗:', e); }
+      toast.success(`${targetSymbol} 平倉指令已送出`);
+    } catch (e) {
+      const err = normalizeApiError(e);
+      toast.error(err.user_msg || '平倉失敗');
+    }
   };
 
   const handleReverse = async () => {
     try {
       await apiClient.post('/reverse', { symbol: targetSymbol });
-    } catch (e) { console.error('[DOMPanel] 反手失敗:', e); }
+      toast.success(`${targetSymbol} 反手指令已送出`);
+    } catch (e) {
+      const err = normalizeApiError(e);
+      toast.error(err.user_msg || '反手失敗');
+    }
   };
 
 

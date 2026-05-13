@@ -1,7 +1,8 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
-import { apiClient } from '../api/client';
+import { apiClient, normalizeApiError } from '../api/client';
+import { useToast } from '../contexts/ToastContext';
 import { splitOrders, randomDelay } from '../utils/splitOrder';
 import type { WorkingOrder } from '../contexts/TradingContext';
 import { getMultiplier } from '../types';
@@ -13,6 +14,7 @@ export function useDOMLogic() {
     smartOrders, refreshSmartOrders,
     accounts, activeAccount, selectAccount
   } = useTradingContext();
+  const { toast } = useToast();
 
   const [orderValue, setOrderValue] = useState(1);
   const [orderType, setOrderType] = useState('ROD');
@@ -178,26 +180,45 @@ export function useDOMLogic() {
       }
       setOrderFeedback({ price, action, status: 'success' });
       setTimeout(refreshOrders, 200);
-      const audio = new Audio('/sounds/order_placed.mp3');
-      audio.volume = 0.5;
-      audio.play();
+      try {
+        const audio = new Audio('/sounds/order_placed.mp3');
+        audio.volume = 0.5;
+        audio.play().catch(() => { /* 瀏覽器音效政策 */ });
+      } catch { /* noop */ }
     } catch (e) {
-      console.error('[DOMPanel] 快速下單失敗:', e);
+      const err = normalizeApiError(e);
       setOrderFeedback({ price, action, status: 'error' });
+      // RISK_WARNING → 提供「仍要下單」的 action 按鈕（Sprint 1 後端可回 warning level）
+      if (err.level === 'warning') {
+        toast.warn(err.user_msg, {
+          actionLabel: '仍要下單',
+          onAction: () => {
+            // 未來可附 confirm 旗標到後端；目前 warning 後端尚未支援 bypass，提示即可
+            toast.info('已收到，請手動再次點擊下單以確認');
+          },
+        });
+      } else {
+        toast.error(err.user_msg || '下單失敗');
+      }
     }
     isOrderPendingRef.current = false;
     feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 800);
-  }, [targetSymbol, orderValue, orderType, priceType, orderCond, orderLot, splitCfg, refreshOrders]);
+  }, [targetSymbol, orderValue, orderType, priceType, orderCond, orderLot, splitCfg, refreshOrders, toast]);
 
   const handleCancelOrder = useCallback(async (action: 'Buy' | 'Sell', price?: number) => {
     try {
       await apiClient.post('/cancel_all', { symbol: targetSymbol, action, price });
       setTimeout(refreshOrders, 200);
-      const audio = new Audio('/sounds/cancel_order.mp3');
-      audio.volume = 0.5;
-      audio.play();
-    } catch (e) { console.error(e); }
-  }, [targetSymbol, refreshOrders]);
+      try {
+        const audio = new Audio('/sounds/cancel_order.mp3');
+        audio.volume = 0.5;
+        audio.play().catch(() => { /* noop */ });
+      } catch { /* noop */ }
+    } catch (e) {
+      const err = normalizeApiError(e);
+      toast.error(err.user_msg || '刪單失敗');
+    }
+  }, [targetSymbol, refreshOrders, toast]);
 
   const handleAddStopOrder = useCallback(async (triggerPrice: number, action: 'Buy' | 'Sell') => {
     if (!targetSymbol) return;
@@ -213,11 +234,13 @@ export function useDOMLogic() {
         take_profit_price: 0,
         stop_loss_price: 0
       });
+      toast.success(`觸價單已掛 @${triggerPrice}`);
       setTimeout(() => refreshSmartOrders(targetSymbol), 200);
-    } catch (err) {
-      console.error('Add stop order failed:', err);
+    } catch (e) {
+      const err = normalizeApiError(e);
+      toast.error(err.user_msg || '新增觸價單失敗');
     }
-  }, [targetSymbol, orderValue, refreshSmartOrders]);
+  }, [targetSymbol, orderValue, refreshSmartOrders, toast]);
 
   const handleDropOrder = useCallback(async (e: React.DragEvent, newPrice: number, tgtAction: 'Buy' | 'Sell') => {
     e.preventDefault();
@@ -242,12 +265,17 @@ export function useDOMLogic() {
         qty: qty
       });
 
-      const audio = new Audio('/sounds/order_replaced.mp3');
-      audio.volume = 0.5;
-      audio.play();
+      try {
+        const audio = new Audio('/sounds/order_replaced.mp3');
+        audio.volume = 0.5;
+        audio.play().catch(() => { /* noop */ });
+      } catch { /* noop */ }
       setTimeout(refreshOrders, 200);
-    } catch (err) { console.error('改單失敗:', err); }
-  }, [targetSymbol, workingBuyMap, workingSellMap, refreshOrders]);
+    } catch (e) {
+      const err = normalizeApiError(e);
+      toast.error(err.user_msg || '改單失敗');
+    }
+  }, [targetSymbol, workingBuyMap, workingSellMap, refreshOrders, toast]);
 
   return {
     qData, bData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice, isSimulation,

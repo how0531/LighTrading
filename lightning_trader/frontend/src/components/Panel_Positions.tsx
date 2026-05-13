@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo } from 'react';
 import { getPositions, getAccounts } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
+import { useToast } from '../contexts/ToastContext';
 
 interface Position {
   symbol: string;
@@ -18,6 +19,7 @@ interface Account {
 
 const Panel_Positions: React.FC = () => {
   const { isConnected, accountSummary, subscribe, flattenPosition, realtimePositions, totalRealtimePnl } = useTradingContext();
+  const { toast } = useToast();
   const [positions, setPositions] = useState<Position[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [selectedCategory, setSelectedCategory] = useState<'ALL' | 'Stock' | 'Future'>('ALL');
@@ -173,7 +175,7 @@ const Panel_Positions: React.FC = () => {
                     className="px-2 py-2 font-mono tabular-nums text-slate-200 cursor-pointer hover:text-[#D4AF37] hover:underline transition-colors"
                     onClick={() => {
                       subscribe(pos.symbol);
-                      alert('已切換至商品 ' + pos.symbol);
+                      toast.info(`已切換至 ${pos.symbol}`);
                     }}
                     title={`點擊切換至 ${pos.symbol}`}
                   >{pos.symbol}</td>
@@ -192,10 +194,18 @@ const Panel_Positions: React.FC = () => {
                   <td className="px-2 py-2 text-center">
                     <button
                       onClick={(e) => {
-                        e.stopPropagation(); // 防止觸發列點擊事件
-                        if (window.confirm(`確定要以市價平倉 ${pos.symbol} (數量: ${pos.qty}) 嗎？\n\n警告：此操作將立即送出反向市價單！`)) {
-                          flattenPosition(pos.symbol);
-                        }
+                        e.stopPropagation();
+                        toast.warn(
+                          `將以市價平倉 ${pos.symbol}（${pos.direction === 'Buy' ? '多' : '空'} ${pos.qty} 口/張）`,
+                          {
+                            actionLabel: '確認平倉',
+                            durationMs: 8000,
+                            onAction: () => {
+                              flattenPosition(pos.symbol);
+                              toast.info(`${pos.symbol} 平倉指令已送出`);
+                            },
+                          }
+                        );
                       }}
                       className="bg-slate-700 hover:bg-amber-500 hover:text-black text-slate-300 rounded px-2 py-0.5 text-[10px] font-bold transition-all shadow-sm"
                     >
