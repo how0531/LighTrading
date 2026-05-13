@@ -31,12 +31,25 @@ export interface SmartOrderData {
   take_profit_price: number; stop_loss_price: number;
   is_active: boolean; is_triggered: boolean; created_at: string; triggered_at?: string;
 }
+// Sprint 12：watchlist 用的 mini quote（多 symbol 同時跑時不要塞整份 QuoteData）
+export interface MiniQuote {
+  symbol: string;
+  price: number;
+  reference: number;      // 0 = 還沒收到 snapshot
+  high: number;
+  low: number;
+  updatedAt: number;      // local epoch ms
+}
+
 interface TradingContextType {
   isConnected: boolean;
   isStale: boolean;          // 任何訊息都沒收到（連線假死）
   isTickStale: boolean;      // 連線正常但沒 tick（盤後或商品冷門）
   targetSymbol: string; setTargetSymbol: (sym: string) => void;
   quote: QuoteData | null; bidAsk: BidAskData | null; quoteHistory: QuoteData[];
+  // Sprint 12：所有 watchlist + position 商品的最新 mini-quote（key = canonical symbol）
+  watchlistQuotes: Record<string, MiniQuote>;
+  watchSymbols: (syms: string[]) => void;
   accountSummary: AccountSummary; accounts: AccountInfo[]; activeAccount: string | null;
   workingOrders: WorkingOrder[]; setWorkingOrders: React.Dispatch<React.SetStateAction<WorkingOrder[]>>; refreshOrders: () => Promise<void>;
   syncAll: () => Promise<void>;
@@ -87,6 +100,10 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [totalRealizedPnl, setTotalRealizedPnl] = useState(0);
   // 智慧單狀態
   const [smartOrders, setSmartOrders] = useState<SmartOrderData[]>([]);
+  // Sprint 12：watchlist mini-quotes — 100ms throttle 與主 quote 一起 flush
+  const [watchlistQuotes, setWatchlistQuotes] = useState<Record<string, MiniQuote>>({});
+  const watchlistDirtyRef = useRef<Record<string, MiniQuote>>({});
+  const watchSymbolsRef = useRef<Set<string>>(new Set());
 
   const refreshSmartOrders = useCallback(async (symbol?: string) => {
     try {
@@ -187,6 +204,13 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (!isSwitchingAccountRef.current && summary.active_stock) {
           setActiveAccount(summary.active_stock);
         }
+      }
+      // Sprint 12：把累積的 watchlist 變動 flush 到 state（合併、不覆蓋）
+      const dirtyKeys = Object.keys(watchlistDirtyRef.current);
+      if (dirtyKeys.length > 0) {
+        const updates = watchlistDirtyRef.current;
+        watchlistDirtyRef.current = {};
+        setWatchlistQuotes((prev) => ({ ...prev, ...updates }));
       }
     }, 100);
     return () => clearInterval(timer);
@@ -292,9 +316,33 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           return sym === target;
         };
 
-        if (data.type === 'Tick' && data.data && isMatch(data.data)) {
-          lastTickTimeRef.current = Date.now();
-          mergeQuote(data.data as Partial<QuoteData>);
+        if (data.type === 'Tick' && data.data) {
+          if (isMatch(data.data)) {
+            // target 商品的 Tick 進主流程
+            lastTickTimeRef.current = Date.now();
+            mergeQuote(data.data as Partial<QuoteData>);
+          }
+          // Sprint 12：所有 Tick（含 target）都更新 watchlistDirtyRef，讓 watchlist panel 拿到報價
+          const tickSym = String(data.data.Symbol || '').trim().toUpperCase();
+          const tickPrice = Number(data.data.Price || 0);
+          if (tickSym && tickPrice > 0 && watchSymbolsRef.current.has(tickSym)) {
+            const existing = watchlistDirtyRef.current[tickSym] || {
+              symbol: tickSym, price: 0,
+              reference: Number(data.data.Reference || 0),
+              high: 0, low: 0, updatedAt: 0,
+            };
+            const ref = Number(data.data.Reference || 0) || existing.reference;
+            const high = Number(data.data.High || 0) || existing.high || tickPrice;
+            const low  = Number(data.data.Low || 0)  || existing.low  || tickPrice;
+            watchlistDirtyRef.current[tickSym] = {
+              symbol: tickSym,
+              price: tickPrice,
+              reference: ref,
+              high: Math.max(high, tickPrice),
+              low: Math.min(low || tickPrice, tickPrice),
+              updatedAt: Date.now(),
+            };
+          }
         } else if (data.type === 'BidAsk' && data.data) {
           if (isMatch(data.data)) {
             latestBidAskRef.current = data.data as BidAskData;
@@ -388,6 +436,27 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     } catch (err) { console.error('[TradingContext] 帳號切換失敗:', err); isSwitchingAccountRef.current = false; }
   }, []);
 
+  // Sprint 12：watchlist 訂閱 — 把 symbols 寫進 ref 並送 WS 'watch' 訊息
+  // ref 是給 onmessage handler 過濾用；WS 訊息是給後端 subscribe_background
+  const watchSymbols = useCallback((syms: string[]) => {
+    const cleaned = Array.from(new Set(
+      syms.map((s) => (s || '').trim().toUpperCase()).filter(Boolean),
+    ));
+    watchSymbolsRef.current = new Set(cleaned);
+    // 移除掉不再 watch 的 symbol（舊資料留著會佔記憶體 + UI 顯示舊價）
+    setWatchlistQuotes((prev) => {
+      const next: Record<string, MiniQuote> = {};
+      for (const s of cleaned) {
+        if (prev[s]) next[s] = prev[s];
+      }
+      return next;
+    });
+    const ws = wsRef.current;
+    if (ws && ws.readyState === WebSocket.OPEN && cleaned.length > 0) {
+      ws.send(JSON.stringify({ action: 'watch', symbols: cleaned }));
+    }
+  }, []);
+
   const forceReconnect = useCallback(() => {
     // 立即關閉現有 socket 並觸發重連（不等指數退避）
     reconnectDelayRef.current = 500;
@@ -457,6 +526,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       cancelOrder, flattenPosition,
       realtimePositions, totalRealtimePnl, totalRealizedPnl,
       smartOrders, refreshSmartOrders,
+      watchlistQuotes, watchSymbols,
     }}>
       {children}
     </TradingContext.Provider>

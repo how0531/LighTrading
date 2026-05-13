@@ -231,7 +231,8 @@ async def websocket_quotes(websocket: WebSocket):
             data = await websocket.receive_text()
             try:
                 msg = json.loads(data)
-                if msg.get("action") == "subscribe" and msg.get("symbol"):
+                action = msg.get("action")
+                if action == "subscribe" and msg.get("symbol"):
                     actual_symbol = msg["symbol"]
 
                     if not shared.shioaji_client._is_connected:
@@ -254,6 +255,25 @@ async def websocket_quotes(websocket: WebSocket):
                         "status": "success",
                         "action": "subscribe",
                         "symbol": actual_symbol
+                    }))
+                elif action == "watch" and isinstance(msg.get("symbols"), list):
+                    # Sprint 12：watchlist — 用 subscribe_background 訂閱所有 symbols
+                    # 不切換 current_contract，背景流會把 Tick 也丟給這個 WS 連線
+                    if not shared.shioaji_client._is_connected:
+                        continue
+                    syms = [s for s in msg["symbols"] if isinstance(s, str) and s.strip()]
+                    accepted = []
+                    for s in syms[:30]:   # 上限 30 個避免訂太多
+                        try:
+                            ok = await shared.run_in_qt_thread(shared.shioaji_client.subscribe_background, s)
+                            if ok:
+                                accepted.append(s.upper())
+                        except Exception as e:
+                            logger.warning(f"watch 背景訂閱 {s} 失敗: {e}")
+                    await websocket.send_text(json.dumps({
+                        "status": "success",
+                        "action": "watch",
+                        "symbols": accepted,
                     }))
             except json.JSONDecodeError:
                 pass
