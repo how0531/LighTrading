@@ -1,7 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import type { QuoteData, BidAskData } from '../types';
-import { getMultiplier } from '../types';
 import { apiClient } from '../api/client';
+import { computeLocalPnL } from '../utils/pnl';
 
 interface AccountPosition {
   symbol: string; qty: number; direction: 'Buy' | 'Sell'; price: number; pnl: number; account?: string; raw_qty?: number;
@@ -153,37 +153,17 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         const latestQ = { ...latestQuoteRef.current };
         setQuote(latestQ);
 
-        // ★ 即時損益計算：每次 quote 更新時重算所有持倉的即時 PnL
+        // ★ 本地 PnL 重算抽到 utils/pnl.ts，方便單獨測試
         const latestPrice = latestQ.Price;
         if (latestPrice > 0) {
           const positions = accountSummaryRef.current.positions || [];
-          if (positions.length === 0) {
-            setRealtimePositions([]);
-            setTotalRealtimePnl(0);
-          } else {
-            const targetSym = targetSymbolRef.current.toUpperCase();
-            const targetCode = targetSym.replace(/\D/g, '');
-            let totalPnl = 0;
-            const rtPositions: RealtimePosition[] = positions.map(pos => {
-              const posSym = (pos.symbol || '').toUpperCase();
-              // 只有與當前訂閱商品匹配的持倉才用即時價格計算
-              const isMatch = posSym === targetSym || (targetCode && posSym.includes(targetCode));
-              if (isMatch && pos.price > 0) {
-                const multiplier = getMultiplier(pos.symbol);
-                const direction = pos.direction === 'Buy' ? 1 : -1;
-                const pnlPerUnit = (latestPrice - pos.price) * direction;
-                const realtimePnl = Math.round(pnlPerUnit * pos.qty * multiplier);
-                totalPnl += realtimePnl;
-                return { ...pos, realtimePnl, pnlPerUnit, currentPrice: latestPrice };
-              } else {
-                // 非當前商品：使用後端提供的 pnl
-                totalPnl += (pos.pnl || 0);
-                return { ...pos, realtimePnl: pos.pnl || 0, pnlPerUnit: 0, currentPrice: 0 };
-              }
-            });
-            setRealtimePositions(rtPositions);
-            setTotalRealtimePnl(totalPnl);
-          }
+          const { positions: rtPositions, totalPnl } = computeLocalPnL(
+            positions,
+            latestPrice,
+            targetSymbolRef.current,
+          );
+          setRealtimePositions(rtPositions);
+          setTotalRealtimePnl(totalPnl);
         }
       }
       if (bidaskDirtyRef.current && latestBidAskRef.current) {

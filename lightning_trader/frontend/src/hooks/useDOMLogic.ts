@@ -52,25 +52,47 @@ export function useDOMLogic() {
 
   const qData = quote || {};
   const bData = bidAsk || {};
-  const [currentPrice, setCurrentPrice] = useState<number>(0);
-  const [refPrice, setRefPrice] = useState<number>(0);
-  const [limitUp, setLimitUp] = useState<number>(0);
-  const [limitDown, setLimitDown] = useState<number>(0);
-  const [highPrice, setHighPrice] = useState<number>(0);
-  const [lowPrice, setLowPrice] = useState<number>(0);
 
-  // 當 qData 更新時，同步更新報價資訊
-  useEffect(() => {
-    if (qData) {
-      const q = qData as any; // Type assertion to bypass strict checking
-      if (q.Price > 0) setCurrentPrice(q.Price);
-      if (q.Reference > 0) setRefPrice(q.Reference);
-      if (q.LimitUp > 0) setLimitUp(q.LimitUp);
-      if (q.LimitDown > 0) setLimitDown(q.LimitDown);
-      if (q.High > 0) setHighPrice(q.High);
-      if (q.Low > 0) setLowPrice(q.Low);
+  // ★ R9：把 6 個獨立 setState 合併為 sticky-reducer。
+  // 之前每次 qData 更新會觸發 6 次 setState（React 18+ batch 仍會 schedule reconcile），
+  // 且 effect 依賴整個 qData 物件，等同每 tick 都重跑。改為單一 useMemo + useRef 黏滯：
+  // - 報價欄位只在 > 0 時覆寫舊值（保留 Snapshot 帶來的靜態欄位）
+  // - 輸出物件 reference 只在實際變化時換新，避免無謂 re-render
+  const stickyDerivedRef = useRef<{
+    currentPrice: number; refPrice: number;
+    limitUp: number; limitDown: number;
+    highPrice: number; lowPrice: number;
+  }>({ currentPrice: 0, refPrice: 0, limitUp: 0, limitDown: 0, highPrice: 0, lowPrice: 0 });
+
+  const derived = useMemo(() => {
+    const q = qData as any;
+    const prev = stickyDerivedRef.current;
+    const next = {
+      currentPrice: q?.Price     > 0 ? q.Price     : prev.currentPrice,
+      refPrice:     q?.Reference > 0 ? q.Reference : prev.refPrice,
+      limitUp:      q?.LimitUp   > 0 ? q.LimitUp   : prev.limitUp,
+      limitDown:    q?.LimitDown > 0 ? q.LimitDown : prev.limitDown,
+      highPrice:    q?.High      > 0 ? q.High      : prev.highPrice,
+      lowPrice:     q?.Low       > 0 ? q.Low       : prev.lowPrice,
+    };
+    // 只在實際變化時才更新 ref + 給出新 object（穩定下游 memo）
+    if (
+      next.currentPrice === prev.currentPrice && next.refPrice === prev.refPrice &&
+      next.limitUp === prev.limitUp && next.limitDown === prev.limitDown &&
+      next.highPrice === prev.highPrice && next.lowPrice === prev.lowPrice
+    ) {
+      return prev;
     }
+    stickyDerivedRef.current = next;
+    return next;
   }, [qData]);
+
+  const { currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice } = derived;
+
+  // 切換商品時清掉 sticky 快取，避免上個商品的 LimitUp/LimitDown 殘留
+  useEffect(() => {
+    stickyDerivedRef.current = { currentPrice: 0, refPrice: 0, limitUp: 0, limitDown: 0, highPrice: 0, lowPrice: 0 };
+  }, [targetSymbol]);
 
   const isSimulation = accountSummary?.is_simulation ?? true;
 
