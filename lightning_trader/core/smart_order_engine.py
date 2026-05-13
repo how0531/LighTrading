@@ -243,8 +243,8 @@ class SmartOrderEngine:
                 return True
         return False
 
-    def cancel_all(self, symbol: Optional[str] = None):
-        """批次取消所有智慧單"""
+    def cancel_all(self, symbol: Optional[str] = None) -> int:
+        """批次取消所有智慧單，回傳取消數量。"""
         count = 0
         for order in self._smart_orders:
             if order.is_active:
@@ -254,6 +254,7 @@ class SmartOrderEngine:
         if count > 0:
             logger.info(f"[SmartOrder] 批次取消 {count} 張智慧單" +
                         (f" ({symbol})" if symbol else ""))
+        return count
 
     def _cancel_linked(self, linked_id: str):
         for order in self._smart_orders:
