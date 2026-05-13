@@ -60,6 +60,33 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     }
   };
 
+  const copyDiagnostics = async () => {
+    try {
+      const [healthRes, metricsRes] = await Promise.all([
+        apiClient.get('/health').catch((e) => ({ data: { error: String(e) } })),
+        apiClient.get('/metrics').catch((e) => ({ data: { error: String(e) } })),
+      ]);
+      const payload = {
+        ts: new Date().toISOString(),
+        ua: typeof navigator !== 'undefined' ? navigator.userAgent : 'n/a',
+        location: typeof window !== 'undefined' ? window.location.href : 'n/a',
+        health: healthRes.data,
+        metrics: metricsRes.data,
+      };
+      const text = JSON.stringify(payload, null, 2);
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        toast.success('系統診斷已複製到剪貼簿');
+      } else {
+        // Fallback：丟到 toast 讓使用者自己複製
+        toast.info(`系統診斷：\n${text}`, { durationMs: 30000 });
+      }
+    } catch (e) {
+      const err = normalizeApiError(e);
+      toast.error(err.user_msg || '取得診斷失敗');
+    }
+  };
+
   const resetDailyPnl = async () => {
     try {
       await apiClient.post('/risk_reset_daily');
@@ -239,12 +266,21 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                         enabled={riskCfg.trading_enabled}
                         onToggle={() => saveRisk({ trading_enabled: !riskCfg.trading_enabled })}
                       />
-                      <button
-                        onClick={resetDailyPnl}
-                        className="mt-3 flex items-center gap-2 px-3 py-1.5 bg-amber-700/40 hover:bg-amber-700/60 text-amber-200 rounded text-xs font-bold border border-amber-700/50 transition-colors cursor-pointer"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" /> 重置日虧損計數
-                      </button>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          onClick={resetDailyPnl}
+                          className="flex items-center gap-2 px-3 py-1.5 bg-amber-700/40 hover:bg-amber-700/60 text-amber-200 rounded text-xs font-bold border border-amber-700/50 transition-colors cursor-pointer"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" /> 重置日虧損計數
+                        </button>
+                        <button
+                          onClick={copyDiagnostics}
+                          className="flex items-center gap-2 px-3 py-1.5 bg-slate-700/40 hover:bg-slate-700/60 text-slate-200 rounded text-xs font-bold border border-slate-700/50 transition-colors cursor-pointer"
+                          title="抓取 /api/health + /api/metrics 並複製到剪貼簿，方便回報問題"
+                        >
+                          <ShieldAlert className="w-3.5 h-3.5" /> 複製系統診斷
+                        </button>
+                      </div>
                     </section>
 
                     <section>
