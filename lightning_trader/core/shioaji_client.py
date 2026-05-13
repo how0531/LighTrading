@@ -683,6 +683,40 @@ class ShioajiClient:
             logger.error(f"get_order_history 失敗: {e}")
             return []
 
+    def get_kbars(self, symbol: str, days: int = 1) -> List[Dict[str, Any]]:
+        """
+        Sprint 11：抓 1 分鐘 K 棒。days 指回看的「市場日」數，預設只給今日。
+        回傳 [{time, open, high, low, close, volume}, ...]  time = unix 秒。
+        """
+        from datetime import datetime, timedelta
+        contract = self.get_contract(symbol)
+        if not contract:
+            logger.warning(f"get_kbars: 找不到合約 {symbol}")
+            return []
+        try:
+            end = datetime.now()
+            start = (end - timedelta(days=max(1, days))).strftime("%Y-%m-%d")
+            end_s = end.strftime("%Y-%m-%d")
+            kb = self.api.kbars(contract, start=start, end=end_s)
+            # Shioaji Kbars 物件：ts / Open / High / Low / Close / Volume，
+            # ts 為 nanoseconds since epoch（int64）。轉成秒以利前端 lightweight-charts
+            n = len(kb.ts)
+            out: List[Dict[str, Any]] = []
+            for i in range(n):
+                out.append({
+                    "time": int(kb.ts[i] // 1_000_000_000),
+                    "open":  float(kb.Open[i]),
+                    "high":  float(kb.High[i]),
+                    "low":   float(kb.Low[i]),
+                    "close": float(kb.Close[i]),
+                    "volume": int(kb.Volume[i]),
+                })
+            return out
+        except Exception as e:
+            logger.error(f"get_kbars {symbol} 失敗: {e}", exc_info=True)
+            return []
+            return []
+
     # ----- 以下為補齊的缺失方法 -----
 
     def update_status(self, account=None):

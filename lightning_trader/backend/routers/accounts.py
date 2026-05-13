@@ -203,6 +203,25 @@ async def get_accounts():
         return []
 
 
+@router.get("/kbars")
+async def get_kbars(symbol: str, days: int = 1):
+    """
+    Sprint 11：拿指定商品的 1 分鐘 K 棒。days 預設 1 = 今日。
+    若還沒登入或沒料就回空 array，前端要能 graceful 處理。
+    """
+    if not getattr(shared.shioaji_client, "_is_connected", False):
+        return []
+    sym = (symbol or "").strip().upper()
+    if not sym:
+        return []
+    try:
+        days = max(1, min(30, int(days)))   # 限制 1~30 日
+        return await shared.run_in_qt_thread(shared.shioaji_client.get_kbars, sym, days)
+    except Exception as e:
+        logger.error(f"get_kbars endpoint 失敗: {e}")
+        return []
+
+
 @router.get("/symbols/search")
 async def search_symbols(q: str, limit: int = 20):
     """模糊搜尋商品。query 至少 1 字。"""
