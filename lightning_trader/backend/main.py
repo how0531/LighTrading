@@ -57,19 +57,25 @@ async def lifespan(app):
     pnl_task = asyncio.create_task(pnl_broadcaster())
 
     async def _auto_login():
+        # 給 2 秒讓使用者有機會主動登入（避免 race）
         await asyncio.sleep(2)
-        if Config.API_KEY and Config.SECRET_KEY:
-            logger.info("🔑 偵測到 .env 憑證，自動登入 Shioaji...")
-            try:
-                success = await shared.run_in_qt_thread(shared.shioaji_client.login)
-                if success:
-                    logger.info("✅ Shioaji 自動登入成功")
-                    await asyncio.sleep(1)
-                    await subscribe_position_contracts()
-                else:
-                    logger.warning("⚠️ Shioaji 自動登入失敗，請檢查 .env 設定")
-            except Exception as e:
-                logger.error(f"❌ 自動登入發生例外: {e}")
+        # 已登入或正在登入：直接跳過
+        if getattr(shared.shioaji_client, "_is_connected", False):
+            logger.info("⏭️ 跳過自動登入：已登入")
+            return
+        if not (Config.API_KEY and Config.SECRET_KEY):
+            return
+        logger.info("🔑 偵測到 .env 憑證，嘗試自動登入 Shioaji...")
+        try:
+            success = await shared.run_in_qt_thread(shared.shioaji_client.login)
+            if success:
+                logger.info("✅ Shioaji 自動登入成功")
+                await asyncio.sleep(1)
+                await subscribe_position_contracts()
+            else:
+                logger.warning("⚠️ Shioaji 自動登入失敗，請檢查 .env 設定")
+        except Exception as e:
+            logger.error(f"❌ 自動登入發生例外: {e}")
 
     login_task = asyncio.create_task(_auto_login())
 
@@ -88,14 +94,36 @@ async def lifespan(app):
 
 app = FastAPI(title="LighTrade Backend API", version="2.0.0", lifespan=lifespan)
 
+
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception):
-    logger.error(f"未處理的例外: {exc}", exc_info=True)
-    return JSONResponse(status_code=500, content={"detail": str(exc)})
+    """
+    統一錯誤 envelope：永遠回傳 { code, user_msg }。
+    詳細 traceback 只進 log，不外洩。
+    """
+    logger.error(f"未處理的例外 @ {request.url.path}: {exc}", exc_info=True)
+    return JSONResponse(status_code=500, content={
+        "detail": {
+            "code": "INTERNAL_ERROR",
+            "user_msg": "伺服器發生未預期錯誤，請稍後再試或聯絡管理員",
+        }
+    })
+
+
+# ★ CORS 緊縮：僅允許本機 Vite dev server 與本機部署
+_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+    "http://localhost:4173",
+    "http://127.0.0.1:4173",
+]
+_extra = os.environ.get("LIGHTRADE_ALLOWED_ORIGINS", "")
+if _extra:
+    _ALLOWED_ORIGINS.extend([o.strip() for o in _extra.split(",") if o.strip()])
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_ALLOWED_ORIGINS,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

@@ -53,12 +53,25 @@ const LoginPanel: React.FC = () => {
       }
 
       await apiClient.post("/login", payload);
-      // 儲存非敏感欄位到 localStorage，下次登入自動帶入
       localStorage.setItem(STORAGE_KEY, JSON.stringify({ apiKey: apiKey.trim(), caPath: caPath.trim(), isSim }));
       navigate("/dashboard");
     } catch (err) {
-      const error = err as { response?: { data?: { detail?: string } } };
-      setError(error.response?.data?.detail || "登入失敗，請檢查連線或金鑰");
+      // 新的錯誤 envelope：detail 可能是 { code, user_msg } 或舊版 string
+      const error = err as { response?: { data?: { detail?: unknown } }, message?: string };
+      const detail = error.response?.data?.detail;
+      let msg = "登入失敗，請檢查連線或金鑰";
+      if (typeof detail === "string") {
+        msg = detail;
+      } else if (detail && typeof detail === "object") {
+        const d = detail as { code?: string; user_msg?: string };
+        if (d.code === "MISSING_CREDENTIALS") msg = "未填寫 API Key / Secret Key";
+        else if (d.code === "LOGIN_FAILED") msg = "登入失敗：請確認 API Key / Secret 或 CA 路徑";
+        else if (d.code === "LOGIN_EXCEPTION") msg = "登入過程例外，請確認網路連線";
+        else if (d.user_msg) msg = d.user_msg;
+      } else if (!error.response) {
+        msg = "無法連線到後端（http://localhost:8000），請確認 backend 是否啟動";
+      }
+      setError(msg);
     } finally {
       setLoading(false);
     }

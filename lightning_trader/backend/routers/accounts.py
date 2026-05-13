@@ -19,11 +19,22 @@ router = APIRouter(prefix="/api", tags=["accounts"])
 # ─── Request Models ────────────────────────────────────────
 
 class LoginRequest(BaseModel):
-    api_key: str
-    secret_key: str
+    # 允許前端不傳金鑰；若空字串則改用 backend .env 的 Config.API_KEY/SECRET_KEY
+    api_key: str = ""
+    secret_key: str = ""
     simulation: bool = True
     ca_path: str = ""
     ca_passwd: str = ""
+
+
+def _mask(s: str, head: int = 2, tail: int = 2) -> str:
+    """字串遮蔽工具，給 log 用。"""
+    if not s:
+        return ""
+    s = str(s)
+    if len(s) <= head + tail:
+        return "*" * len(s)
+    return f"{s[:head]}{'*' * (len(s) - head - tail)}{s[-tail:]}"
 
 class AccountSwitchRequest(BaseModel):
     account_id: str
@@ -33,22 +44,54 @@ class AccountSwitchRequest(BaseModel):
 
 @router.post("/login")
 async def login(req: LoginRequest):
-    """接收 JSON 格式的登入資訊並透過 shioaji_client 登入"""
-    Config.SIMULATION = req.simulation
+    """
+    登入流程：
+      1. 若 simulation=False 但前端沒給 api_key/secret_key，改用 backend .env
+      2. 已登入則直接返回 success（不重複登入）
+      3. 金鑰只進 logger.debug 並遮蔽；info/error 永不夾帶 raw 金鑰
+    """
+    # 若已登入，直接回成功，避免重複呼叫造成 socket flapping
+    if getattr(shared.shioaji_client, "_is_connected", False) and shared.shioaji_client.is_simulation == req.simulation:
+        return {"status": "success", "message": "已登入", "already": True}
 
-    success = await shared.run_in_qt_thread(
-        shared.shioaji_client.login,
-        api_key=req.api_key, secret_key=req.secret_key,
-        simulation=req.simulation,
-        ca_path=req.ca_path, ca_passwd=req.ca_passwd
+    Config.SIMULATION = req.simulation
+    api_key = req.api_key or Config.API_KEY or ""
+    secret_key = req.secret_key or Config.SECRET_KEY or ""
+
+    if not api_key or not secret_key:
+        raise HTTPException(status_code=400, detail={
+            "code": "MISSING_CREDENTIALS",
+            "user_msg": "未提供 API Key / Secret，且 .env 也沒有預設值",
+        })
+
+    logger.info(
+        "嘗試登入 Shioaji：simulation=%s, api_key=%s, ca_path=%s",
+        req.simulation, _mask(api_key, 3, 3), _mask(req.ca_path, 6, 4) if req.ca_path else "(none)"
     )
+
+    try:
+        success = await shared.run_in_qt_thread(
+            shared.shioaji_client.login,
+            api_key=api_key, secret_key=secret_key,
+            simulation=req.simulation,
+            ca_path=req.ca_path, ca_passwd=req.ca_passwd
+        )
+    except Exception as e:
+        logger.error("Shioaji login 例外: %s", e, exc_info=True)
+        raise HTTPException(status_code=400, detail={
+            "code": "LOGIN_EXCEPTION",
+            "user_msg": "登入過程發生錯誤，請確認網路與憑證",
+        })
 
     if success:
         from backend.services.pnl_broadcaster import subscribe_position_contracts
         asyncio.create_task(subscribe_position_contracts())
         return {"status": "success", "message": "登入成功"}
     else:
-        raise HTTPException(status_code=400, detail="登入失敗，請檢查 API 參數或網路狀態。")
+        raise HTTPException(status_code=400, detail={
+            "code": "LOGIN_FAILED",
+            "user_msg": "登入失敗：請確認 API Key、Secret 或 CA 設定是否正確",
+        })
 
 
 @router.post("/set_active_account")

@@ -82,7 +82,7 @@ async def _get_working_orders_snapshot() -> list:
 
 @router.post("/place_order")
 async def place_order(req: PlaceOrderRequest):
-    """下單後回傳已確認的活躍委託快照"""
+    """下單前先過 RiskManager；通過後送出，並回傳已確認的活躍委託快照"""
     action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
 
     order_type_map = {"ROD": OrderType.ROD, "IOC": OrderType.IOC, "FOK": OrderType.FOK}
@@ -98,10 +98,40 @@ async def place_order(req: PlaceOrderRequest):
     order_lot_val = order_lot_map.get(req.order_lot, StockOrderLot.Common)
 
     # 判斷商品類型以決定 PriceType
-    if len(req.symbol) == 4 and req.symbol.isdigit():
+    is_stock = len(req.symbol) == 4 and req.symbol.isdigit()
+    if is_stock:
         price_type_val = stock_price_type_map.get(req.price_type.upper(), StockPriceType.LMT)
     else:
         price_type_val = futures_price_type_map.get(req.price_type.upper(), FuturesPriceType.LMT)
+
+    # ★ Risk Manager 前置檢查
+    risk_manager = getattr(shared.engine, "risk_manager", None)
+    if risk_manager is not None:
+        is_market = req.price_type.upper() in {"MKT", "MKP"}
+        # 取得目前持倉狀態（給部位上限檢查）
+        try:
+            positions = await shared.run_in_qt_thread(shared.shioaji_client.list_positions)
+            pos = next((p for p in positions if p.get("symbol", "").upper() == req.symbol.upper()), None)
+        except Exception:
+            pos = None
+        pos_qty = (pos.get("qty", 0) if pos else 0)
+        pos_dir = (pos.get("direction", "Flat") if pos else "Flat")
+        result = risk_manager.pre_order_check(
+            symbol=req.symbol,
+            action=req.action,
+            qty=req.qty,
+            price=req.price,
+            is_market_order=is_market,
+            position_qty=pos_qty,
+            position_direction=pos_dir,
+        )
+        if not result.passed:
+            # BLOCK 直接 422；WARNING 也回 422 + warning flag，前端應彈確認框後重送 (帶 confirm=true)
+            raise HTTPException(status_code=422, detail={
+                "code": "RISK_BLOCK" if result.level.value == "block" else "RISK_WARNING",
+                "user_msg": result.reason,
+                "level": result.level.value,
+            })
 
     trade = await shared.run_in_qt_thread(
         shared.shioaji_client.place_order,
@@ -114,7 +144,10 @@ async def place_order(req: PlaceOrderRequest):
         snapshot = await _get_working_orders_snapshot()
         return {"status": "success", "message": "下單成功", "data": snapshot}
     else:
-        raise HTTPException(status_code=400, detail="下單失敗，請確認標的或庫存是否正確。")
+        raise HTTPException(status_code=400, detail={
+            "code": "ORDER_FAILED",
+            "user_msg": "下單失敗，請確認標的、保證金或庫存是否充足",
+        })
 
 
 @router.post("/update_order")
