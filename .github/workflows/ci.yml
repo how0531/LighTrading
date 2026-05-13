@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend (pytest)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lightning_trader
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install test deps (no shioaji / pyqt5)
+        # CI 不裝 shioaji（券商 wheel 沒上 PyPI）與 pyqt5（無圖形環境）
+        # tests/ 都是離線單元，會繞過 core/__init__.py 透過直接 import
+        run: |
+          pip install fastapi pydantic python-dotenv pytest
+
+      - name: Pytest
+        run: python -m pytest tests/ -q
+
+  frontend:
+    name: Frontend (tsc + eslint)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: lightning_trader/frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: lightning_trader/frontend/package-lock.json
+
+      - run: npm ci
+
+      - name: TypeScript compile
+        run: npx tsc -b --pretty false
+
+      - name: ESLint
+        run: npx eslint . --max-warnings 0
+        continue-on-error: true  # 漸進啟用：先記錄不擋 PR
