@@ -1,6 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { getOrderHistory, apiClient } from '../api/client';
+import { getOrderHistory, apiClient, normalizeApiError } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
+import { useToast } from '../contexts/ToastContext';
 
 interface Trade {
   time: string;
@@ -46,6 +47,7 @@ const formatStatusText = (status: string, failedMsg?: string): string => {
 
 const Panel_OrderHistory: React.FC = () => {
   const { accountSummary, cancelOrder } = useTradingContext();
+  const { toast } = useToast();
   const [trades, setTrades] = useState<Trade[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
@@ -65,14 +67,15 @@ const Panel_OrderHistory: React.FC = () => {
   };
 
   const handleUpdateQty = async (t: Trade) => {
+    // 減量 prompt 改用瀏覽器原生 prompt 仍可接受（單行數字輸入，後面想做美化再升級為 Modal）
     const remainingQty = t.qty - t.filled_qty;
-    const msg = `請輸入新的總委託數量\n(原委託量 ${t.qty}，已成交 ${t.filled_qty}，剩餘可減 ${remainingQty})\n\n💡 輸入的數字必須小於 ${t.qty} 且大於等於 ${t.filled_qty}`;
+    const msg = `輸入新的總委託數量\n原委託 ${t.qty}，已成交 ${t.filled_qty}，最多可減至 ${t.filled_qty}（最少）`;
     const input = window.prompt(msg, remainingQty.toString());
     if (!input) return;
-    
+
     const newQty = parseInt(input, 10);
     if (isNaN(newQty) || newQty >= t.qty || newQty < t.filled_qty) {
-      alert(`❌ 輸入無效！\n數量必須小於原委託量 (${t.qty})，且大於等於已成交量 (${t.filled_qty})`);
+      toast.error(`輸入無效：必須 ≥ ${t.filled_qty} 且 < ${t.qty}`);
       return;
     }
 
@@ -84,10 +87,11 @@ const Panel_OrderHistory: React.FC = () => {
         new_price: t.price,
         qty: newQty
       });
+      toast.success(`${t.symbol} 減量至 ${newQty}`);
       setTimeout(fetchHistory, 500);
-    } catch (err: any) {
-      console.error("Failed to update order:", err);
-      alert(`減量失敗：${err?.response?.data?.detail || err.message}`);
+    } catch (err) {
+      const e = normalizeApiError(err);
+      toast.error(e.user_msg || '減量失敗');
     }
   };
 
@@ -182,9 +186,11 @@ const Panel_OrderHistory: React.FC = () => {
                           </button>
                           <button
                             onClick={() => {
-                              if (window.confirm(`確定要取消 ${t.symbol} 委託單嗎？`)) {
-                                cancelOrder(t.action, t.price);
-                              }
+                              toast.warn(`刪除 ${t.symbol} ${t.action === 'Buy' ? '買' : '賣'} @${t.price}？`, {
+                                actionLabel: '確認刪單',
+                                durationMs: 6000,
+                                onAction: () => cancelOrder(t.action, t.price),
+                              });
                             }}
                             className="bg-slate-700 hover:bg-red-500 hover:text-white text-slate-300 rounded px-2 py-0.5 text-[10px] transition-colors shadow-sm"
                           >
