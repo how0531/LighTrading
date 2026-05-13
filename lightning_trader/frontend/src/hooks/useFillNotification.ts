@@ -15,7 +15,7 @@ import { useEffect, useRef } from 'react';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
 
-type SimpleOrder = {
+export type SimpleOrder = {
   order_id?: string;
   symbol: string;
   action: 'Buy' | 'Sell';
@@ -28,9 +28,33 @@ type SimpleOrder = {
 // 若 order_id 存在就拿它（最穩定）；只有完全缺 id 才走 compound fallback。
 // 之前 orderKey 一律拼 compound key，會在 backend 偶爾省略 order_id 時
 // 把同一張單看成兩張，造成 filled_qty 從 0 跳到 N 時觸發兩次 notification。
-function orderKey(o: SimpleOrder): string {
+export function orderKey(o: SimpleOrder): string {
   if (o.order_id) return `id:${o.order_id}`;
   return `c:${o.symbol}|${o.action}|${o.price}|${o.qty}`;
+}
+
+// 純函式：diff 上一輪 filled snapshot 與本輪 orders，吐出「新成交」清單。
+// 抽出來方便獨立測試（無 React、無 Notification）。
+export interface FillDelta {
+  order: SimpleOrder;
+  newFills: number;
+  key: string;
+}
+export function diffFills(
+  orders: SimpleOrder[],
+  lastFilled: Map<string, number>,
+): { deltas: FillDelta[]; nextFilled: Map<string, number> } {
+  const next = new Map<string, number>();
+  const deltas: FillDelta[] = [];
+  for (const o of orders) {
+    const k = orderKey(o);
+    const prev = lastFilled.get(k) ?? 0;
+    if (o.filled_qty > prev) {
+      deltas.push({ order: o, newFills: o.filled_qty - prev, key: k });
+    }
+    next.set(k, o.filled_qty);
+  }
+  return { deltas, nextFilled: next };
 }
 
 export function useFillNotification(): void {
@@ -57,41 +81,30 @@ export function useFillNotification(): void {
       return;
     }
 
-    const seen = new Set<string>();
-    for (const o of workingOrders as SimpleOrder[]) {
-      const k = orderKey(o);
-      seen.add(k);
-      const prev = lastFilledRef.current.get(k) ?? 0;
-      if (o.filled_qty > prev) {
-        const delta = o.filled_qty - prev;
-        const sideZh = o.action === 'Buy' ? '買進' : '賣出';
-        const title = `已成交 ${delta} 口 ${o.symbol}`;
-        const body = `${sideZh} @${o.price}  (累計 ${o.filled_qty}/${o.qty})`;
-        // 視窗在前景就不出系統通知，只走 Toast；後景才推送
-        const inFocus = typeof document !== 'undefined' && document.hasFocus();
-        const granted = typeof Notification !== 'undefined' && Notification.permission === 'granted';
-        if (granted && !inFocus) {
-          try {
-            const n = new Notification(title, {
-              body,
-              tag: `fill-${k}`, // 同單疊代不會跳多份
-              silent: false,
-            });
-            n.onclick = () => {
-              window.focus();
-              n.close();
-            };
-          } catch { /* iOS Safari 某些情境會拋；fallback to toast */ }
-        }
-        // 不論有沒有系統通知，都附一個 Toast；視窗在前景時這是唯一回饋
-        toast.success(`${title} — ${body}`);
+    const { deltas, nextFilled } = diffFills(workingOrders as SimpleOrder[], lastFilledRef.current);
+    for (const { order: o, newFills, key: k } of deltas) {
+      const sideZh = o.action === 'Buy' ? '買進' : '賣出';
+      const title = `已成交 ${newFills} 口 ${o.symbol}`;
+      const body = `${sideZh} @${o.price}  (累計 ${o.filled_qty}/${o.qty})`;
+      // 視窗在前景就不出系統通知，只走 Toast；後景才推送
+      const inFocus = typeof document !== 'undefined' && document.hasFocus();
+      const granted = typeof Notification !== 'undefined' && Notification.permission === 'granted';
+      if (granted && !inFocus) {
+        try {
+          const n = new Notification(title, {
+            body,
+            tag: `fill-${k}`,
+            silent: false,
+          });
+          n.onclick = () => {
+            window.focus();
+            n.close();
+          };
+        } catch { /* iOS Safari 某些情境會拋；fallback to toast */ }
       }
-      lastFilledRef.current.set(k, o.filled_qty);
+      // 不論有沒有系統通知，都附一個 Toast；視窗在前景時這是唯一回饋
+      toast.success(`${title} — ${body}`);
     }
-
-    // 清掉已不在 workingOrders 的 key（被全平倉/取消）
-    for (const k of Array.from(lastFilledRef.current.keys())) {
-      if (!seen.has(k)) lastFilledRef.current.delete(k);
-    }
+    lastFilledRef.current = nextFilled;
   }, [workingOrders, toast]);
 }

@@ -153,6 +153,14 @@ export const DOMPanel: React.FC = () => {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
+      // ★ R6b: 數字鍵 1–9 直接設定下單口數（不可在輸入框生效，已上面阻擋）
+      // 避免跟 Ctrl/Cmd 的快捷鍵衝突
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+        e.preventDefault();
+        logic.setOrderValue(Number(e.key));
+        return;
+      }
+
       const matched = hotkeys.find((hk: any) => hk.key === e.key);
       if (!matched) return;
 
