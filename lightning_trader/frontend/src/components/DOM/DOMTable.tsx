@@ -1,4 +1,12 @@
 import React, { useMemo } from 'react';
+
+// Native CSS virtualization：瀏覽器自動跳過渲染畫面外的 row。
+// h-8 = 32px；告訴瀏覽器每個 row 預設高度 32px，省下未顯示時的 paint/layout。
+// Chromium / WebKit / Firefox 都已支援（Electron 32 內嵌 Chromium ≥ 130 沒問題）。
+const DOM_ROW_VIRT_STYLE: React.CSSProperties = {
+  contentVisibility: 'auto',
+  containIntrinsicSize: '32px',
+};
 import { getTickSize, formatPrice } from '../../utils/instrument';
 
 
@@ -166,7 +174,7 @@ export const DOMTable: React.FC<DOMTableProps> = ({
           const smartSellLine = smartSellKeys.has(pKey);
 
           return (
-            <tr key={p} data-price={pKey} className={`h-8 transition-none relative ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-[#D4AF37]/10 border-y border-[#D4AF37]/50 box-border') : 'border-b border-slate-800/80'} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''} ${isCostLine ? 'border-y-2 border-dashed border-amber-500/50' : ''} ${smartBuyLine || smartSellLine ? 'border-y border-dashed border-purple-500/60' : ''} ${pnlZoneBg}`}>
+            <tr key={p} data-price={pKey} style={DOM_ROW_VIRT_STYLE} className={`h-8 transition-none relative ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-[#D4AF37]/10 border-y border-[#D4AF37]/50 box-border') : 'border-b border-slate-800/80'} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''} ${isCostLine ? 'border-y-2 border-dashed border-amber-500/50' : ''} ${smartBuyLine || smartSellLine ? 'border-y border-dashed border-purple-500/60' : ''} ${pnlZoneBg}`}>
               
               <td className="border-r border-slate-800 hover:bg-slate-700 cursor-pointer"
                 onClick={(e) => {
