@@ -10,8 +10,8 @@
  *
  * 與 ChartPanel 一樣 lazy-loaded。
  */
-import React, { useEffect, useState } from 'react';
-import { X, Eye } from 'lucide-react';
+import React, { useEffect, useRef, useState } from 'react';
+import { X, Eye, GripVertical } from 'lucide-react';
 import { useTradingContext } from '../contexts/TradingContext';
 import { SymbolPicker } from './SymbolPicker';
 import { formatPrice } from '../utils/instrument';
@@ -37,6 +37,9 @@ function saveList(list: string[]) {
 const WatchlistPanel: React.FC = () => {
   const { targetSymbol, subscribe, watchlistQuotes, watchSymbols } = useTradingContext();
   const [list, setList] = useState<string[]>(() => loadList());
+  // Sprint 12 R3：native HTML5 drag-and-drop reorder（不引入 dnd lib，~0 KB cost）
+  const dragSrcRef = useRef<string | null>(null);
+  const [dragOver, setDragOver] = useState<string | null>(null);
 
   // mount 與 list 變動：通知 context 訂閱
   useEffect(() => {
@@ -51,6 +54,37 @@ const WatchlistPanel: React.FC = () => {
   };
   const removeSymbol = (sym: string) => {
     setList((prev) => prev.filter((s) => s !== sym));
+  };
+
+  const handleDragStart = (e: React.DragEvent, sym: string) => {
+    dragSrcRef.current = sym;
+    e.dataTransfer.effectAllowed = 'move';
+    // 一些瀏覽器 DnD spec 要求 setData 才會 fire drop event
+    try { e.dataTransfer.setData('text/plain', sym); } catch { /* ignore */ }
+  };
+  const handleDragOver = (e: React.DragEvent, sym: string) => {
+    if (!dragSrcRef.current || dragSrcRef.current === sym) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dragOver !== sym) setDragOver(sym);
+  };
+  const handleDragEnd = () => {
+    dragSrcRef.current = null;
+    setDragOver(null);
+  };
+  const handleDrop = (e: React.DragEvent, targetSym: string) => {
+    e.preventDefault();
+    const src = dragSrcRef.current;
+    dragSrcRef.current = null;
+    setDragOver(null);
+    if (!src || src === targetSym) return;
+    setList((prev) => {
+      const next = prev.filter((s) => s !== src);
+      const idx = next.indexOf(targetSym);
+      if (idx === -1) return [...next, src];
+      next.splice(idx, 0, src);
+      return next;
+    });
   };
 
   return (
@@ -88,11 +122,17 @@ const WatchlistPanel: React.FC = () => {
               return (
                 <tr
                   key={sym}
-                  className={`group hover:bg-slate-700/40 cursor-pointer ${isCurrent ? 'bg-[#D4AF37]/10 border-l-2 border-[#D4AF37]' : ''}`}
+                  draggable
+                  onDragStart={(e) => handleDragStart(e, sym)}
+                  onDragOver={(e) => handleDragOver(e, sym)}
+                  onDragEnd={handleDragEnd}
+                  onDrop={(e) => handleDrop(e, sym)}
+                  className={`group hover:bg-slate-700/40 cursor-pointer ${isCurrent ? 'bg-[#D4AF37]/10 border-l-2 border-[#D4AF37]' : ''} ${dragOver === sym ? 'outline outline-1 outline-[#D4AF37]' : ''}`}
                   onClick={() => subscribe(sym)}
-                  title={`點擊切換到 ${sym}`}
+                  title={`點擊切換到 ${sym} · 拖曳排序`}
                 >
                   <td className="px-2 py-1 font-mono font-bold text-slate-200 flex items-center gap-1">
+                    <GripVertical className="w-3 h-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
                     {isCurrent && <Eye className="w-3 h-3 text-[#D4AF37]" />}
                     {sym}
                   </td>
