@@ -147,10 +147,18 @@ function spawnBackend() {
 
   // 同時把 backend stdout/stderr 鏡像寫到 userData/logs/backend.log，
   // 方便使用者在打包後的 app crash 後找到原因。
+  // R7b：超過 5MB 就輪替到 backend.log.1（保留一份歷史，更舊的丟掉）
   try {
     const logsDir = path.join(app.getPath('userData'), 'logs');
     fs.mkdirSync(logsDir, { recursive: true });
-    const logFile = fs.createWriteStream(path.join(logsDir, 'backend.log'), { flags: 'a' });
+    const logPath = path.join(logsDir, 'backend.log');
+    try {
+      const st = fs.statSync(logPath);
+      if (st.size > 5 * 1024 * 1024) {
+        fs.renameSync(logPath, path.join(logsDir, 'backend.log.1'));
+      }
+    } catch { /* 檔案不存在 → 跳過 rotate */ }
+    const logFile = fs.createWriteStream(logPath, { flags: 'a' });
     logFile.write(`\n=== ${new Date().toISOString()} backend spawn ===\n`);
     proc.stdout.pipe(logFile);
     proc.stderr.pipe(logFile);

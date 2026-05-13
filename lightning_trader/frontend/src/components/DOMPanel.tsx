@@ -6,6 +6,7 @@ import { DOMFooter } from './DOM/DOMFooter';
 import { getTickSize } from '../utils/tickSize';
 import { apiClient, normalizeApiError } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
+import { useSettings } from '../contexts/SettingsContext';
 import { getMultiplier } from '../types';
 
 // 精確四捨五入避免浮點漂移
@@ -14,6 +15,8 @@ const round2 = (n: number): number => Math.round(n * 100) / 100;
 export const DOMPanel: React.FC = () => {
   const logic = useDOMLogic();
   const { toast } = useToast();
+  const { settings } = useSettings();
+  const compactMode = settings.visuals.compactMode;
   const {
     qData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice, isSimulation,
     isStale, tableRef, hasScrolled, flashDir,
@@ -228,8 +231,8 @@ export const DOMPanel: React.FC = () => {
       />
       
       <div ref={tableRef} className="flex-1 overflow-auto bg-black/10 custom-scrollbar">
-        <DOMTable 
-          fullPrices={fullPrices} isStale={isStale} qData={qData} currentPrice={currentPrice} refPrice={refPrice}
+        <DOMTable
+          fullPrices={fullPrices} isStale={isStale} compactMode={compactMode} qData={qData} currentPrice={currentPrice} refPrice={refPrice}
           limitUp={limitUp} limitDown={limitDown} highPrice={highPrice} lowPrice={lowPrice} targetSymbol={targetSymbol}
           currentPosition={currentPosition} flashDir={flashDir} smartOrders={smartOrders}
           workingBuyMap={workingBuyMap} workingSellMap={workingSellMap} bData={bData}
