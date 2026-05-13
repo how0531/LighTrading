@@ -578,6 +578,69 @@ class ShioajiClient:
             logger.error(f"place_order 失敗: {symbol} {action} {qty}@{price} — {e}")
             return None
 
+    def search_contracts(self, query: str, limit: int = 20) -> List[Dict[str, str]]:
+        """
+        模糊搜尋商品代碼或名稱（不區分大小寫）。
+        範圍：Stocks（含上市櫃）+ Futures + Options。
+        """
+        q = (query or "").strip().upper()
+        if not q:
+            return []
+        out: List[Dict[str, str]] = []
+
+        def _match(c, kind: str) -> bool:
+            sym = str(getattr(c, "symbol", "") or "").upper()
+            code = str(getattr(c, "code", "") or "").upper()
+            name = str(getattr(c, "name", "") or "")
+            return (q in sym) or (q in code) or (q in name.upper())
+
+        def _emit(c, kind: str):
+            if len(out) >= limit:
+                return False
+            out.append({
+                "symbol": getattr(c, "symbol", ""),
+                "code":   getattr(c, "code", ""),
+                "name":   getattr(c, "name", ""),
+                "kind":   kind,
+            })
+            return True
+
+        try:
+            # Stocks: iter 直接拿到 contracts
+            for c in self.api.Contracts.Stocks:
+                if _match(c, "Stock") and not _emit(c, "Stock"):
+                    return out
+        except Exception as e:
+            logger.debug(f"search Stocks 失敗: {e}")
+
+        try:
+            for attr in dir(self.api.Contracts.Futures):
+                if attr.startswith("_"):
+                    continue
+                cat = getattr(self.api.Contracts.Futures, attr)
+                if not hasattr(cat, "__iter__"):
+                    continue
+                for c in cat:
+                    if _match(c, "Future") and not _emit(c, "Future"):
+                        return out
+        except Exception as e:
+            logger.debug(f"search Futures 失敗: {e}")
+
+        try:
+            for attr in dir(self.api.Contracts.Options):
+                if attr.startswith("_"):
+                    continue
+                cat = getattr(self.api.Contracts.Options, attr)
+                if not hasattr(cat, "__iter__"):
+                    continue
+                for c in cat:
+                    if _match(c, "Option") and not _emit(c, "Option"):
+                        return out
+        except Exception as e:
+            logger.debug(f"search Options 失敗: {e}")
+
+        return out
+
     def get_all_accounts(self) -> List[Dict[str, str]]:
         try:
             raw_accounts = self.api.list_accounts()

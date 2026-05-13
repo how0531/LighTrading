@@ -184,14 +184,32 @@ async def cancel_all(req: CancelAllRequest):
         raise HTTPException(status_code=500, detail="刪單過程遭遇錯誤")
 
 
+class FlattenRequest(BaseModel):
+    symbol: str = Field(min_length=2, max_length=12)
+    cancel_pending: bool = True   # F2: 預設先撤掉同商品兩側掛單
+
+
 @router.post("/flatten")
-async def flatten_position(req: SymbolRequest):
-    """一鍵平倉"""
+async def flatten_position(req: FlattenRequest):
+    """
+    一鍵平倉：可選擇先撤掉所有同商品掛單，再送反向市價單。
+    cancel_pending=True 時，平倉是 atomic-ish（先 cancel_all 兩側，再 flatten）。
+    """
+    if req.cancel_pending:
+        try:
+            await shared.run_in_qt_thread(shared.shioaji_client.cancel_all, req.symbol, Action.Buy)
+            await shared.run_in_qt_thread(shared.shioaji_client.cancel_all, req.symbol, Action.Sell)
+        except Exception as e:
+            logger.warning(f"flatten 前撤單失敗（仍會繼續平倉）: {e}")
+
     success = await shared.run_in_qt_thread(shared.shioaji_client.flatten_position, req.symbol)
     if success:
-        return {"status": "success", "message": "一鍵平倉指令已送出"}
+        return {"status": "success", "message": "一鍵平倉指令已送出", "cancelled_pending": req.cancel_pending}
     else:
-        raise HTTPException(status_code=400, detail="一鍵平倉失敗")
+        raise HTTPException(status_code=400, detail={
+            "code": "FLATTEN_FAILED",
+            "user_msg": "一鍵平倉失敗：可能沒有可平倉的部位",
+        })
 
 
 @router.post("/reverse")

@@ -203,6 +203,21 @@ async def get_accounts():
         return []
 
 
+@router.get("/symbols/search")
+async def search_symbols(q: str, limit: int = 20):
+    """模糊搜尋商品。query 至少 1 字。"""
+    if not q or len(q.strip()) < 1:
+        return []
+    if not getattr(shared.shioaji_client, "_is_connected", False):
+        return []
+    limit = max(1, min(50, int(limit)))
+    try:
+        return await shared.run_in_qt_thread(shared.shioaji_client.search_contracts, q.strip(), limit)
+    except Exception as e:
+        logger.error(f"search_symbols 失敗: {e}")
+        return []
+
+
 @router.post("/sync_all")
 async def sync_all():
     """

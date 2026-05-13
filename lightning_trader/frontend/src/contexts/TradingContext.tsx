@@ -42,7 +42,7 @@ interface TradingContextType {
   forceReconnect: () => void;
   subscribe: (symbol: string) => void; selectAccount: (accountId: string) => Promise<void>;
   cancelOrder: (action: 'Buy' | 'Sell', price?: number) => Promise<void>;
-  flattenPosition: (symbol: string) => Promise<void>;
+  flattenPosition: (symbol: string, cancelPending?: boolean) => Promise<void>;
   // 即時損益（前端隨 tick 計算）
   realtimePositions: RealtimePosition[];
   totalRealtimePnl: number;
@@ -428,9 +428,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     }
   }, []);
 
-  const flattenPosition = useCallback(async (symbol: string) => {
+  const flattenPosition = useCallback(async (symbol: string, cancelPending: boolean = true) => {
     try {
-      await apiClient.post('/flatten', { symbol });
+      await apiClient.post('/flatten', { symbol, cancel_pending: cancelPending });
       setTimeout(refreshOrders, 500);
     } catch (err) {
       console.error('Flatten position failed:', err);
