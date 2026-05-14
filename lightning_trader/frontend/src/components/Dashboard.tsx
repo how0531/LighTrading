@@ -26,6 +26,7 @@ import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
 import { useElectronUpdater } from '../hooks/useElectronUpdater';
 import { useFillNotification } from '../hooks/useFillNotification';
 import { useRiskStatus } from '../hooks/useRiskStatus';
+import { usePriceAlerts } from '../hooks/usePriceAlerts';
 import { Responsive, WidthProvider } from 'react-grid-layout';
 import { ShieldAlert, BarChart3, LayoutGrid } from 'lucide-react';
 import 'react-grid-layout/css/styles.css';
@@ -94,6 +95,8 @@ const DashboardContent: React.FC = () => {
   useFillNotification();
   // 30s 一次拉 backend RiskManager 狀態，給 banner 用
   const riskStatus = useRiskStatus();
+  // Sprint 26：本地價格穿越警報
+  usePriceAlerts();
   const tradingDisabled = riskStatus !== null && riskStatus.trading_enabled === false;
 
   const [layouts, setLayouts] = useState(() => {
