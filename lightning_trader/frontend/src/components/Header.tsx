@@ -13,6 +13,13 @@ interface BalanceState {
   pnl: number;
 }
 
+interface LatencyState {
+  count: number;
+  p50_ms: number | null;
+  p95_ms: number | null;
+  max_ms: number | null;
+}
+
 interface HeaderProps {
   onOpenSettings?: () => void;
   isLayoutLocked?: boolean;
@@ -25,6 +32,7 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
   const { isConnected, isTickStale, targetSymbol, subscribe, totalRealtimePnl, forceReconnect } = useTradingContext();
   const [symInput, setSymInput] = React.useState(targetSymbol);
   const [balance, setBalance] = useState<BalanceState | null>(null);
+  const [latency, setLatency] = useState<LatencyState | null>(null);
 
   useEffect(() => {
     if (!isConnected) return;
@@ -35,6 +43,23 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
     };
     fetchBalance();
     const t = setInterval(fetchBalance, 15000); // 每 15 秒拉一次
+    return () => clearInterval(t);
+  }, [isConnected]);
+
+  // Sprint 19：order latency 30s 拉一次
+  useEffect(() => {
+    if (!isConnected) return;
+    const fetchLat = () => {
+      // 用 fetch 而非 apiClient 以免循環引用；/api/metrics 不需登入
+      fetch('/api/metrics')
+        .then((r) => r.ok ? r.json() : null)
+        .then((d: { latency?: LatencyState } | null) => {
+          if (d?.latency) setLatency(d.latency);
+        })
+        .catch(() => { /* 靜默 */ });
+    };
+    fetchLat();
+    const t = setInterval(fetchLat, 30_000);
     return () => clearInterval(t);
   }, [isConnected]);
 
@@ -94,6 +119,20 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
               </div>
               <span className={`text-[9px] font-mono tabular-nums ${marginUsedPct >= 80 ? 'text-red-400' : 'text-slate-500'}`}>{marginUsedPct}%</span>
             </div>
+          </div>
+        )}
+
+        {/* Sprint 19：成交延遲 P50/P95 */}
+        {latency && latency.count > 0 && (
+          <div className="hidden xl:flex flex-col items-end mr-3" title={`量測 ${latency.count} 筆，max ${latency.max_ms}ms`}>
+            <span className="text-[10px] text-slate-500 font-bold tracking-widest uppercase mb-0.5">成交延遲</span>
+            <span className={`text-xs font-mono tabular-nums ${
+              (latency.p95_ms ?? 0) > 500 ? 'text-red-400'
+              : (latency.p95_ms ?? 0) > 200 ? 'text-amber-300'
+              : 'text-emerald-300'
+            }`}>
+              P50 {latency.p50_ms}ms · P95 {latency.p95_ms}ms
+            </span>
           </div>
         )}
 
