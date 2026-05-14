@@ -14,6 +14,8 @@ const ChartPanel            = lazy(() => import('./ChartPanel'));
 const WatchlistPanel        = lazy(() => import('./WatchlistPanel'));
 // Sprint 13：智慧單清單 lazy
 const SmartOrdersPanel      = lazy(() => import('./SmartOrdersPanel'));
+// Sprint 14：交易日誌 lazy
+const JournalPanel          = lazy(() => import('./JournalPanel'));
 import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
 import { useElectronUpdater } from '../hooks/useElectronUpdater';
 import { useFillNotification } from '../hooks/useFillNotification';
@@ -27,39 +29,42 @@ const ResponsiveGridLayout = WidthProvider(Responsive);
 
 const defaultLayouts = {
   lg: [
-    { i: 'watch', x: 0,  y: 0,  w: 2, h: 22 },
-    { i: 'dom',   x: 2,  y: 0,  w: 5, h: 22 },
-    { i: 'chart', x: 2,  y: 22, w: 5, h: 10 },
-    { i: 'bal',   x: 7,  y: 0,  w: 5, h: 8 },
-    { i: 'pos',   x: 7,  y: 8,  w: 5, h: 8 },
-    { i: 'smart', x: 7,  y: 16, w: 5, h: 8 },
-    { i: 'hist',  x: 7,  y: 24, w: 3, h: 8 },
-    { i: 'trade', x: 10, y: 24, w: 2, h: 8 },
+    { i: 'watch',   x: 0,  y: 0,  w: 2, h: 22 },
+    { i: 'dom',     x: 2,  y: 0,  w: 5, h: 22 },
+    { i: 'chart',   x: 2,  y: 22, w: 5, h: 10 },
+    { i: 'bal',     x: 7,  y: 0,  w: 5, h: 8 },
+    { i: 'pos',     x: 7,  y: 8,  w: 5, h: 8 },
+    { i: 'smart',   x: 7,  y: 16, w: 5, h: 8 },
+    { i: 'journal', x: 7,  y: 24, w: 5, h: 8 },
+    { i: 'hist',    x: 7,  y: 32, w: 3, h: 8 },
+    { i: 'trade',   x: 10, y: 32, w: 2, h: 8 },
   ],
   md: [
-    { i: 'watch', x: 0, y: 0,  w: 2, h: 22 },
-    { i: 'dom',   x: 2, y: 0,  w: 4, h: 22 },
-    { i: 'chart', x: 2, y: 22, w: 4, h: 10 },
-    { i: 'bal',   x: 6, y: 0,  w: 4, h: 8 },
-    { i: 'pos',   x: 6, y: 8,  w: 4, h: 8 },
-    { i: 'smart', x: 6, y: 16, w: 4, h: 8 },
-    { i: 'hist',  x: 6, y: 24, w: 2, h: 8 },
-    { i: 'trade', x: 8, y: 24, w: 2, h: 8 },
+    { i: 'watch',   x: 0, y: 0,  w: 2, h: 22 },
+    { i: 'dom',     x: 2, y: 0,  w: 4, h: 22 },
+    { i: 'chart',   x: 2, y: 22, w: 4, h: 10 },
+    { i: 'bal',     x: 6, y: 0,  w: 4, h: 8 },
+    { i: 'pos',     x: 6, y: 8,  w: 4, h: 8 },
+    { i: 'smart',   x: 6, y: 16, w: 4, h: 8 },
+    { i: 'journal', x: 6, y: 24, w: 4, h: 8 },
+    { i: 'hist',    x: 6, y: 32, w: 2, h: 8 },
+    { i: 'trade',   x: 8, y: 32, w: 2, h: 8 },
   ],
   sm: [
-    { i: 'watch', x: 0, y: 0,  w: 6, h: 8 },
-    { i: 'dom',   x: 0, y: 8,  w: 6, h: 20 },
-    { i: 'chart', x: 0, y: 28, w: 6, h: 10 },
-    { i: 'bal',   x: 0, y: 38, w: 6, h: 7 },
-    { i: 'pos',   x: 0, y: 45, w: 6, h: 8 },
-    { i: 'smart', x: 0, y: 53, w: 6, h: 8 },
-    { i: 'hist',  x: 0, y: 61, w: 3, h: 8 },
-    { i: 'trade', x: 3, y: 61, w: 3, h: 8 },
+    { i: 'watch',   x: 0, y: 0,  w: 6, h: 8 },
+    { i: 'dom',     x: 0, y: 8,  w: 6, h: 20 },
+    { i: 'chart',   x: 0, y: 28, w: 6, h: 10 },
+    { i: 'bal',     x: 0, y: 38, w: 6, h: 7 },
+    { i: 'pos',     x: 0, y: 45, w: 6, h: 8 },
+    { i: 'smart',   x: 0, y: 53, w: 6, h: 8 },
+    { i: 'journal', x: 0, y: 61, w: 6, h: 8 },
+    { i: 'hist',    x: 0, y: 69, w: 3, h: 8 },
+    { i: 'trade',   x: 3, y: 69, w: 3, h: 8 },
   ]
 };
 
-// Sprint 13：新增 smart-orders panel，bump key
-const LAYOUT_KEY = 'lighTrade_layout_v5';
+// Sprint 14：新增 journal panel，bump key
+const LAYOUT_KEY = 'lighTrade_layout_v6';
 
 
 
@@ -220,6 +225,11 @@ const DashboardContent: React.FC = () => {
             <div key="smart" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
               {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
               <div className="flex-1 h-full overflow-hidden flex flex-col"><SmartOrdersPanel /></div>
+            </div>
+
+            <div key="journal" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><JournalPanel /></div>
             </div>
           </ResponsiveGridLayout>
         </div>
