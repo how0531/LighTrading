@@ -8,12 +8,14 @@ const Panel_OrderHistory    = lazy(() => import('./Panel_OrderHistory'));
 const Panel_AccountBalance  = lazy(() => import('./Panel_AccountBalance'));
 const Panel_TradeHistory    = lazy(() => import('./Panel_TradeHistory'));
 const SettingsModal         = lazy(() => import('./SettingsModal'));
+// ChartPanel 也走 lazy：lightweight-charts ~30KB gzipped、不要進首載
+const ChartPanel            = lazy(() => import('./ChartPanel'));
 import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
 import { useElectronUpdater } from '../hooks/useElectronUpdater';
 import { useFillNotification } from '../hooks/useFillNotification';
 import { useRiskStatus } from '../hooks/useRiskStatus';
 import { Responsive, WidthProvider } from 'react-grid-layout';
-import { ShieldAlert } from 'lucide-react';
+import { ShieldAlert, BarChart3, LayoutGrid } from 'lucide-react';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
 
@@ -21,29 +23,33 @@ const ResponsiveGridLayout = WidthProvider(Responsive);
 
 const defaultLayouts = {
   lg: [
-    { i: 'dom', x: 0, y: 0, w: 7, h: 22 },
-    { i: 'bal', x: 7, y: 0, w: 5, h: 8 },
-    { i: 'pos', x: 7, y: 8, w: 5, h: 8 },
-    { i: 'hist', x: 7, y: 16, w: 3, h: 8 },
+    { i: 'dom',   x: 0, y: 0,  w: 7, h: 22 },
+    { i: 'chart', x: 0, y: 22, w: 7, h: 10 },
+    { i: 'bal',   x: 7, y: 0,  w: 5, h: 8 },
+    { i: 'pos',   x: 7, y: 8,  w: 5, h: 8 },
+    { i: 'hist',  x: 7, y: 16, w: 3, h: 8 },
     { i: 'trade', x: 10, y: 16, w: 2, h: 8 },
   ],
   md: [
-    { i: 'dom', x: 0, y: 0, w: 6, h: 22 },
-    { i: 'bal', x: 6, y: 0, w: 4, h: 8 },
-    { i: 'pos', x: 6, y: 8, w: 4, h: 8 },
-    { i: 'hist', x: 6, y: 16, w: 2, h: 8 },
+    { i: 'dom',   x: 0, y: 0,  w: 6, h: 22 },
+    { i: 'chart', x: 0, y: 22, w: 6, h: 10 },
+    { i: 'bal',   x: 6, y: 0,  w: 4, h: 8 },
+    { i: 'pos',   x: 6, y: 8,  w: 4, h: 8 },
+    { i: 'hist',  x: 6, y: 16, w: 2, h: 8 },
     { i: 'trade', x: 8, y: 16, w: 2, h: 8 },
   ],
   sm: [
-    { i: 'dom', x: 0, y: 0, w: 6, h: 20 },
-    { i: 'bal', x: 0, y: 20, w: 6, h: 7 },
-    { i: 'pos', x: 0, y: 27, w: 6, h: 8 },
-    { i: 'hist', x: 0, y: 35, w: 3, h: 8 },
-    { i: 'trade', x: 3, y: 35, w: 3, h: 8 },
+    { i: 'dom',   x: 0, y: 0,  w: 6, h: 20 },
+    { i: 'chart', x: 0, y: 20, w: 6, h: 10 },
+    { i: 'bal',   x: 0, y: 30, w: 6, h: 7 },
+    { i: 'pos',   x: 0, y: 37, w: 6, h: 8 },
+    { i: 'hist',  x: 0, y: 45, w: 3, h: 8 },
+    { i: 'trade', x: 3, y: 45, w: 3, h: 8 },
   ]
 };
 
-const LAYOUT_KEY = 'lighTrade_layout_v2';
+// Sprint 11：因新增 chart panel，bump key 讓既有使用者拿到內建 chart 位置
+const LAYOUT_KEY = 'lighTrade_layout_v3';
 
 
 
@@ -51,6 +57,8 @@ const DashboardContent: React.FC = () => {
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isLayoutLocked, setIsLayoutLocked] = useState(true);
   const [isFocusMode, setIsFocusMode] = useState(true); // 預設為專注模式
+  // Sprint 11 R1：focus mode 內的 DOM / Chart tab 切換
+  const [focusTab, setFocusTab] = useState<'dom' | 'chart'>('dom');
   const { accountSummary } = useTradingContext();
   const isLive = accountSummary.is_simulation === false;
   // 桌面版接 Electron auto-updater 事件→Toast；非 Electron 環境會自動 no-op。
@@ -116,8 +124,37 @@ const DashboardContent: React.FC = () => {
 
       {isFocusMode ? (
         <div className="flex-1 -mx-4 px-4 pb-6 flex flex-col min-h-0">
+          {/* Sprint 11 R1：focus mode 內加 tab — DOM vs Chart 切換 */}
+          <div className="flex items-center gap-1 mb-2">
+            <button
+              onClick={() => setFocusTab('dom')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-bold border transition-colors ${
+                focusTab === 'dom'
+                  ? 'bg-[#D4AF37]/20 text-[#D4AF37] border-[#D4AF37]'
+                  : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
+              }`}
+            >
+              <LayoutGrid className="w-3 h-3" /> 閃電下單
+            </button>
+            <button
+              onClick={() => setFocusTab('chart')}
+              className={`flex items-center gap-1.5 px-3 py-1 rounded text-xs font-bold border transition-colors ${
+                focusTab === 'chart'
+                  ? 'bg-[#D4AF37]/20 text-[#D4AF37] border-[#D4AF37]'
+                  : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
+              }`}
+            >
+              <BarChart3 className="w-3 h-3" /> K 線
+            </button>
+          </div>
           <div className="flex-1 overflow-hidden flex flex-col rounded-lg bg-[#101623] border border-slate-700/50 shadow-2xl">
-            <DOMPanel />
+            {focusTab === 'dom' ? (
+              <DOMPanel />
+            ) : (
+              <Suspense fallback={<div className="flex-1 flex items-center justify-center text-slate-500 text-xs">載入 K 線中…</div>}>
+                <ChartPanel />
+              </Suspense>
+            )}
           </div>
         </div>
       ) : (
@@ -158,6 +195,11 @@ const DashboardContent: React.FC = () => {
             <div key="trade" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
               {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
               <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_TradeHistory /></div>
+            </div>
+
+            <div key="chart" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ChartPanel /></div>
             </div>
           </ResponsiveGridLayout>
         </div>
