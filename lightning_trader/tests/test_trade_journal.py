@@ -87,6 +87,51 @@ def test_stats_aggregates_correctly(tmp_path):
     assert s["top_symbols"][0]["fills"] == 2
 
 
+def test_import_fills_basic(tmp_path):
+    tj = _fresh_module(tmp_path / "j.db")
+    result = tj.import_fills([
+        {"ts": 1715000000000, "symbol": "TXFR1", "action": "Buy",  "price": 17000, "qty": 1, "order_id": "A1"},
+        {"ts": 1715000060000, "symbol": "TXFR1", "action": "Sell", "price": 17020, "qty": 1, "order_id": "A2"},
+    ])
+    assert result["accepted"] == 2
+    assert result["skipped"] == 0
+    assert tj.fetch_fills(limit=10)[0]["symbol"] == "TXFR1"
+
+
+def test_import_fills_idempotent(tmp_path):
+    tj = _fresh_module(tmp_path / "j.db")
+    rows = [{"ts": 1715000000000, "symbol": "MXFR1", "action": "Buy", "price": 17000, "qty": 2, "order_id": "B1"}]
+    tj.import_fills(rows)
+    tj.import_fills(rows)  # 再跑一次同樣資料
+    fills = tj.fetch_fills(limit=10)
+    assert len(fills) == 1   # INSERT OR IGNORE 不會重複
+
+
+def test_import_fills_skips_invalid_rows(tmp_path):
+    tj = _fresh_module(tmp_path / "j.db")
+    result = tj.import_fills([
+        {"ts": 0,                 "symbol": "TXFR1", "action": "Buy",     "price": 17000, "qty": 1},   # 0 ts → skip
+        {"ts": 1715000000000,                       "action": "Buy",     "price": 17000, "qty": 1},   # 缺 symbol → skip
+        {"ts": 1715000000000, "symbol": "TXFR1",   "action": "INVALID", "price": 17000, "qty": 1},   # action 不認 → skip
+        {"ts": 1715000000000, "symbol": "TXFR1",   "action": "Buy",     "price": 0,     "qty": 1},   # price 0 → skip
+        {"ts": 1715000000000, "symbol": "TXFR1",   "action": "Buy",     "price": 17000, "qty": 0},   # qty 0 → skip
+        {"ts": 1715000000000, "symbol": "TXFR1",   "action": "Buy",     "price": 17000, "qty": 1},   # 合法
+    ])
+    assert result["accepted"] == 1
+    assert result["skipped"] == 5
+
+
+def test_import_fills_normalises_action_short_form(tmp_path):
+    tj = _fresh_module(tmp_path / "j.db")
+    tj.import_fills([
+        {"ts": 1715000000000, "symbol": "TXFR1", "action": "b", "price": 17000, "qty": 1, "order_id": "X"},
+        {"ts": 1715000060000, "symbol": "TXFR1", "action": "S", "price": 17020, "qty": 1, "order_id": "Y"},
+    ])
+    fills = tj.fetch_fills(limit=10)
+    actions = sorted(f["action"] for f in fills)
+    assert actions == ["Buy", "Sell"]
+
+
 def test_bad_input_returns_false(tmp_path):
     tj = _fresh_module(tmp_path / "j.db")
     # 缺價、缺量、缺商品都該被拒
