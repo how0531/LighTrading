@@ -12,6 +12,7 @@ from typing import Optional
 from fastapi import APIRouter
 from backend.services import trade_journal
 from backend.services.equity_curve import compute_realized_curve
+from backend.services.trade_stats import compute_stats
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/journal", tags=["journal"])
@@ -52,3 +53,20 @@ async def get_equity_curve(
     fills = trade_journal.fetch_fills(from_ts=from_ts, to_ts=to_ts, symbol=symbol, limit=limit)
     fills_asc = list(reversed(fills))
     return compute_realized_curve(fills_asc)
+
+
+@router.get("/stats_advanced")
+async def get_stats_advanced(
+    from_ts: Optional[int] = None,
+    to_ts: Optional[int] = None,
+    symbol: Optional[str] = None,
+    limit: int = 5000,
+):
+    """
+    Sprint 16：交易績效統計（win rate, max drawdown, profit factor, ...）
+    從 equity curve 衍生，所以同樣是 FIFO 結算後的數字。
+    """
+    fills = trade_journal.fetch_fills(from_ts=from_ts, to_ts=to_ts, symbol=symbol, limit=limit)
+    fills_asc = list(reversed(fills))
+    curve = compute_realized_curve(fills_asc)
+    return compute_stats(curve)
