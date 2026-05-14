@@ -32,6 +32,10 @@ type Stats = {
   sharpe_per_trade: number | null;
   expectancy: number;
   final_realized_pnl: number;
+  mean_interval_s: number | null;
+  median_interval_s: number | null;
+  shortest_interval_s: number | null;
+  peak_fills_per_minute: number;
 };
 
 const RANGES = [
@@ -59,6 +63,13 @@ function fmtDuration(s: number): string {
   if (h < 24) return `${h}h ${m % 60}m`;
   const d = Math.floor(h / 24);
   return `${d}d ${h % 24}h`;
+}
+function fmtInterval(s: number | null): string {
+  if (s === null || s === undefined) return '—';
+  if (s < 60) return `${s.toFixed(s < 10 ? 2 : 1)}s`;
+  const m = s / 60;
+  if (m < 60) return `${m.toFixed(1)}m`;
+  return `${(m / 60).toFixed(1)}h`;
 }
 
 const Tile: React.FC<{ label: string; value: string; sub?: string; tone?: 'pos' | 'neg' | 'neu' }> = ({ label, value, sub, tone = 'neu' }) => {
@@ -172,6 +183,21 @@ const StatsPanel: React.FC = () => {
               label="總成交數"
               value={fmt(stats.count_total)}
               sub={`${stats.count_closing} 平倉`}
+            />
+            <Tile
+              label="平均間隔"
+              value={fmtInterval(stats.mean_interval_s)}
+              sub={stats.median_interval_s !== null ? `中位 ${fmtInterval(stats.median_interval_s)}` : undefined}
+            />
+            <Tile
+              label="最快兩單"
+              value={fmtInterval(stats.shortest_interval_s)}
+              sub="連續成交間隔"
+            />
+            <Tile
+              label="尖峰 / 分"
+              value={fmt(stats.peak_fills_per_minute)}
+              sub="60s 視窗最大下單"
             />
           </div>
         )}

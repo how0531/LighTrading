@@ -107,3 +107,45 @@ def test_expectancy_calculation():
         P(4, -300, 1000),
     ])
     assert s["expectancy"] == 250
+
+
+# ── Sprint 27 操作節奏 ───────────────────────────────────────
+
+def test_pace_with_two_trades_returns_interval():
+    s = compute_stats([P(1000, 0, 0), P(6000, 0, 0)])
+    assert s["mean_interval_s"] == 5.0
+    assert s["median_interval_s"] == 5.0
+    assert s["shortest_interval_s"] == 5.0
+    assert s["peak_fills_per_minute"] == 2  # 兩筆都在 60s 內
+
+
+def test_pace_picks_shortest_correctly():
+    # 間隔：10s, 2s, 30s → shortest=2 （ts 必須 > 0，0 會被過濾）
+    s = compute_stats([
+        P(1_000,  0, 0),
+        P(11_000, 0, 0),
+        P(13_000, 0, 0),
+        P(43_000, 0, 0),
+    ])
+    assert s["shortest_interval_s"] == 2.0
+    assert s["mean_interval_s"] == round((10 + 2 + 30) / 3, 1)
+
+
+def test_pace_peak_per_minute_is_max_60s_window():
+    # ts in seconds (×1000 = ms): 1, 30, 50, 80, 110
+    # window [1, 50]:   3 筆；window [30, 80]: 3 筆；window [50, 110]: 3 筆
+    s = compute_stats([P(t * 1000, 0, 0) for t in (1, 30, 50, 80, 110)])
+    assert s["peak_fills_per_minute"] == 3
+
+
+def test_pace_single_trade_returns_nulls():
+    s = compute_stats([P(1, 0, 0)])
+    assert s["mean_interval_s"] is None
+    assert s["shortest_interval_s"] is None
+    assert s["peak_fills_per_minute"] == 1
+
+
+def test_pace_empty_returns_zero_peak():
+    s = compute_stats([])
+    assert s["peak_fills_per_minute"] == 0
+    assert s["mean_interval_s"] is None

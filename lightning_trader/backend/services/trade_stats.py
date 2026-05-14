@@ -1,5 +1,5 @@
 """
-trade_stats.py — 從 equity_curve 衍生交易績效統計
+trade_stats.py — 從 equity_curve 衍生交易績效統計 + 操作節奏
 
 Input: equity_curve.compute_realized_curve 吐出的 points list
        （`{ts, symbol, action, price, qty, delta, realized_pnl}`，已 FIFO 配對）
@@ -16,10 +16,48 @@ Output: 一份 stats dict 含：
   - max_drawdown_duration_s  最大回撤持續秒數
   - sharpe_per_trade       簡化版：avg(delta) / stdev(delta) — non-NaN 才算
   - expectancy             win_rate*avg_win - (1-win_rate)*avg_loss
+  - Sprint 27 操作節奏：
+    - mean_interval_s      平均兩筆間隔
+    - median_interval_s    中位數間隔
+    - shortest_interval_s  最快兩單間隔
+    - peak_fills_per_minute 60s 滑動視窗內最高下單數
 """
 from __future__ import annotations
 from typing import Iterable
 import statistics
+
+
+def _compute_pace(pts: list[dict]) -> dict:
+    """從 ts (ms) 序列算節奏 metrics。需至少 2 筆才有意義。"""
+    ts_list = sorted(int(p.get("ts") or 0) for p in pts if int(p.get("ts") or 0) > 0)
+    if len(ts_list) < 2:
+        return {
+            "mean_interval_s": None,
+            "median_interval_s": None,
+            "shortest_interval_s": None,
+            "peak_fills_per_minute": len(ts_list),
+        }
+    intervals_ms = [ts_list[i] - ts_list[i - 1] for i in range(1, len(ts_list))]
+    intervals_s = [ms / 1000.0 for ms in intervals_ms]
+    mean_s = statistics.mean(intervals_s)
+    median_s = statistics.median(intervals_s)
+    shortest_s = min(intervals_s)
+
+    # peak_fills_per_minute：60s 滑動視窗（兩根 pointer），找最大窗內筆數
+    window = 60_000
+    left = 0
+    peak = 1
+    for right in range(len(ts_list)):
+        while ts_list[right] - ts_list[left] > window:
+            left += 1
+        peak = max(peak, right - left + 1)
+
+    return {
+        "mean_interval_s": round(mean_s, 1),
+        "median_interval_s": round(median_s, 1),
+        "shortest_interval_s": round(shortest_s, 2),
+        "peak_fills_per_minute": peak,
+    }
 
 
 def compute_stats(curve_points: Iterable[dict]) -> dict:
@@ -35,6 +73,10 @@ def compute_stats(curve_points: Iterable[dict]) -> dict:
             "sharpe_per_trade": None,
             "expectancy": 0,
             "final_realized_pnl": 0,
+            "mean_interval_s": None,
+            "median_interval_s": None,
+            "shortest_interval_s": None,
+            "peak_fills_per_minute": 0,
         }
 
     deltas = [int(p.get("delta") or 0) for p in pts]
@@ -78,6 +120,8 @@ def compute_stats(curve_points: Iterable[dict]) -> dict:
     if win_rate is not None:
         expectancy = round(win_rate * avg_win - (1 - win_rate) * avg_loss)
 
+    pace = _compute_pace(pts)
+
     return {
         "count_total":   len(pts),
         "count_closing": n_closing,
@@ -94,4 +138,5 @@ def compute_stats(curve_points: Iterable[dict]) -> dict:
         "sharpe_per_trade": sharpe,
         "expectancy":    expectancy,
         "final_realized_pnl": int(pts[-1].get("realized_pnl") or 0),
+        **pace,
     }
