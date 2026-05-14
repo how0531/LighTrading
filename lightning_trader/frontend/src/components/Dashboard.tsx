@@ -7,6 +7,7 @@ import Panel_AccountBalance from './Panel_AccountBalance';
 import Panel_TradeHistory from './Panel_TradeHistory';
 import SettingsModal from './SettingsModal';
 import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
+import { useElectronUpdater } from '../hooks/useElectronUpdater';
 import { Responsive, WidthProvider } from 'react-grid-layout';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
@@ -47,6 +48,8 @@ const DashboardContent: React.FC = () => {
   const [isFocusMode, setIsFocusMode] = useState(true); // 預設為專注模式
   const { accountSummary } = useTradingContext();
   const isLive = accountSummary.is_simulation === false;
+  // 桌面版接 Electron auto-updater 事件→Toast；非 Electron 環境會自動 no-op。
+  useElectronUpdater();
 
   const [layouts, setLayouts] = useState(() => {
     try {

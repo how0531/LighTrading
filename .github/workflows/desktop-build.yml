@@ -1,0 +1,95 @@
+name: Desktop build & release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # NOTE: macos-13 is the last Intel (x86_64) GitHub-hosted runner.
+        # shioaji ships only x86_64 wheels (no arm64 / Apple Silicon build),
+        # so we must target macos-13 instead of the default arm64 macos-latest.
+        os: [macos-13, windows-latest, ubuntu-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: 'lightning_trader/frontend/package-lock.json'
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+          # 顯式指向 requirements 檔（兩份），不然 setup-python 找不到預設檔名就 fail
+          cache-dependency-path: |
+            lightning_trader/backend/requirements_backend.txt
+            lightning_trader/backend/requirements_build.txt
+
+      # --- Stage 1: Frontend build ---
+      - name: Build frontend
+        shell: bash
+        run: |
+          cd lightning_trader/frontend
+          npm ci
+          npm run build
+
+      # --- Stage 2: Backend single-binary build (PyInstaller) ---
+      # pyqt5 is optional and headless CI cannot install it on every OS,
+      # so we strip it from requirements_backend.txt before installing
+      # (mirrors the Dockerfile pattern). The bundled backend does not
+      # need pyqt5.
+      - name: Install backend deps (strip pyqt5)
+        shell: bash
+        run: |
+          cd lightning_trader/backend
+          grep -v -i "pyqt5" requirements_backend.txt > req-headless.txt
+          pip install -r req-headless.txt -r requirements_build.txt
+
+      - name: Build backend binary (PyInstaller)
+        shell: bash
+        run: |
+          cd lightning_trader/backend
+          pyinstaller --clean --noconfirm pyinstaller_backend.spec
+
+      # --- Stage 3: Electron installer (publishes to GitHub Releases) ---
+      - name: Build & publish Electron installer
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd electron
+          npm ci
+          npx electron-builder --publish always
+
+      # --- Upload raw installers as workflow artifacts ---
+      # Useful for manual workflow_dispatch runs / sanity checking
+      # without relying on a published GitHub Release.
+      - name: Upload installers
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: lightrade-${{ matrix.os }}
+          path: electron/release/
+          retention-days: 7
+          if-no-files-found: ignore
