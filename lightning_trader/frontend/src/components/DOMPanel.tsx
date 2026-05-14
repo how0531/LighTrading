@@ -8,6 +8,7 @@ import { apiClient, normalizeApiError } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { getMultiplier } from '../types';
+import type { SizingMode } from '../utils/sizing';
 
 // 精確四捨五入避免浮點漂移
 const round2 = (n: number): number => Math.round(n * 100) / 100;
@@ -15,19 +16,19 @@ const round2 = (n: number): number => Math.round(n * 100) / 100;
 export const DOMPanel: React.FC = () => {
   const logic = useDOMLogic();
   const { toast } = useToast();
-  const { settings } = useSettings();
+  const { settings, updateSetting } = useSettings();
   const compactMode = settings.visuals.compactMode;
   const {
     qData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice, isSimulation,
     isStale, tableRef, hasScrolled, flashDir,
     orderValue, setOrderValue, orderType, setOrderType, priceType, setPriceType,
-    orderCond, setOrderCond, orderLot, setOrderLot, calcAmount, setCalcAmount,
+    orderCond, setOrderCond, orderLot, setOrderLot,
     isSyncing, handleManualSync,
     workingBuyMap, workingSellMap, currentPosition,
     handlePlaceOrder, handleCancelOrder, handleAddStopOrder, handleDropOrder,
     orderFeedback, smartOrders, bData,
     targetSymbol, accounts, activeAccount, selectAccount,
-    hotkeys
+    hotkeys, accountEquity,
   } = logic;
 
   // --- 損益重算 ---
@@ -156,11 +157,28 @@ export const DOMPanel: React.FC = () => {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
-      // ★ R6b: 數字鍵 1–9 直接設定下單口數（不可在輸入框生效，已上面阻擋）
-      // 避免跟 Ctrl/Cmd 的快捷鍵衝突
+      // ★ R6b + Sprint 28: 數字鍵 1–9 隨 sizing.mode 切換語意
+      //   - lots:       N = N 張/口
+      //   - amount:     N = N × hotkeyAmountUnit （預設 10萬 → 1=10萬, 5=50萬）
+      //   - equity_pct: N = N × hotkeyEquityPctUnit（預設 5% → 1=5%, 4=20%，capped 100）
       if (!e.ctrlKey && !e.metaKey && !e.altKey && /^[1-9]$/.test(e.key)) {
         e.preventDefault();
-        logic.setOrderValue(Number(e.key));
+        const N = Number(e.key);
+        const mode: SizingMode = settings.sizing.mode;
+        if (mode === 'lots') {
+          logic.setOrderValue(N);
+        } else if (mode === 'amount') {
+          updateSetting({
+            sizing: { ...settings.sizing, amount: N * settings.sizing.hotkeyAmountUnit },
+          });
+        } else if (mode === 'equity_pct') {
+          updateSetting({
+            sizing: {
+              ...settings.sizing,
+              equityPct: Math.min(100, N * settings.sizing.hotkeyEquityPctUnit),
+            },
+          });
+        }
         return;
       }
 
@@ -194,7 +212,7 @@ export const DOMPanel: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [hotkeys, handlePlaceOrder, handleCancelOrder, scrollToCurrentPrice, currentPrice, refPrice, targetSymbol, logic]);
+  }, [hotkeys, handlePlaceOrder, handleCancelOrder, scrollToCurrentPrice, currentPrice, refPrice, targetSymbol, logic, settings.sizing, updateSetting]);
 
   const handleFlatten = async () => {
     try {
@@ -219,15 +237,15 @@ export const DOMPanel: React.FC = () => {
 
   return (
     <div className="flex flex-col flex-1 min-h-0 rounded-xl border border-slate-800 bg-[#101623] text-slate-100 relative overflow-hidden shadow-2xl">
-      <DOMHeader 
+      <DOMHeader
         qData={qData} targetSymbol={targetSymbol} currentPrice={currentPrice} refPrice={refPrice}
         limitUp={limitUp} limitDown={limitDown} isSimulation={isSimulation} fullPrices={fullPrices}
         accounts={accounts} activeAccount={activeAccount} selectAccount={selectAccount}
         currentPosition={currentPosition} realtimePnL={realtimePnL}
         orderType={orderType} setOrderType={setOrderType} priceType={priceType} setPriceType={setPriceType}
         orderCond={orderCond} setOrderCond={setOrderCond} orderLot={orderLot} setOrderLot={setOrderLot}
-        calcAmount={calcAmount} setCalcAmount={setCalcAmount} handleAmountConvert={logic.handleAmountConvert || (() => {})}
         orderValue={orderValue} setOrderValue={setOrderValue} scrollToCurrentPrice={scrollToCurrentPrice}
+        accountEquity={accountEquity}
       />
       
       <div ref={tableRef} className="flex-1 overflow-auto bg-black/10 custom-scrollbar">
