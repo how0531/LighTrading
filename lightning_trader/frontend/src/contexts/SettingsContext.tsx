@@ -39,6 +39,10 @@ export interface Settings {
   theme: 'dark' | 'light';
   hotkeys: HotkeyItem[];
   splitOrder: SplitOrderConfig;
+  /** Sprint 20：per-symbol 預設下單口數 / 張數
+   *  key 為 canonical symbol（全大寫），value 為正整數。
+   *  使用者切到該 symbol 時，UI 自動把 orderValue 設為此值；找不到就保持當前值。 */
+  qtyBySymbol: Record<string, number>;
 }
 
 /**
@@ -75,6 +79,7 @@ const DEFAULT_SETTINGS: Settings = {
     minDelay: 200,
     maxDelay: 800,
   },
+  qtyBySymbol: {},
 };
 
 interface SettingsContextType {
@@ -102,6 +107,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           visuals: { ...DEFAULT_SETTINGS.visuals, ...parsed.visuals },
           hotkeys: parsed.hotkeys || DEFAULT_SETTINGS.hotkeys,
           splitOrder: { ...DEFAULT_SETTINGS.splitOrder, ...parsed.splitOrder },
+          qtyBySymbol: { ...DEFAULT_SETTINGS.qtyBySymbol, ...(parsed.qtyBySymbol || {}) },
         };
       } catch (e) {
         console.error("Failed to parse settings from localStorage", e);

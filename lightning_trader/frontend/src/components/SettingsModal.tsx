@@ -280,6 +280,11 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                     <ToggleItem label="平倉確認" description="在全平或單向平倉前顯示確認對話框" enabled={settings.confirmations.flatten} onToggle={() => handleToggle('confirmations', 'flatten')} />
                   </div>
                 </section>
+                <section>
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">商品預設口數</h3>
+                  <p className="text-[11px] text-slate-500 mb-3">切換到該商品時自動套用此預設口數；股票單位是「張」，期權單位是「口」。</p>
+                  <QtyBySymbolEditor settings={settings} updateSetting={updateSetting} />
+                </section>
               </div>
             )}
 
@@ -567,6 +572,72 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
 };
 
 // Helper Components
+// Sprint 20：per-symbol 預設口數編輯器
+const QtyBySymbolEditor: React.FC<{ settings: Settings; updateSetting: (u: Partial<Settings>) => void }> = ({ settings, updateSetting }) => {
+  const [sym, setSym] = React.useState('');
+  const [qty, setQty] = React.useState(1);
+  const map = settings.qtyBySymbol || {};
+  const entries = Object.entries(map).sort(([a], [b]) => a.localeCompare(b));
+
+  const add = () => {
+    const s = sym.trim().toUpperCase();
+    if (!s || qty <= 0) return;
+    updateSetting({ qtyBySymbol: { ...map, [s]: qty } });
+    setSym('');
+    setQty(1);
+  };
+  const remove = (s: string) => {
+    const next = { ...map };
+    delete next[s];
+    updateSetting({ qtyBySymbol: next });
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          placeholder="商品代號（如 TXFR1 / 2330）"
+          value={sym}
+          onChange={(e) => setSym(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') add(); }}
+          className="flex-1 bg-[#101623] border border-[#29344A] rounded text-slate-200 px-2 py-1 text-sm font-mono outline-none focus:border-[#D4AF37]/50"
+        />
+        <input
+          type="number" min={1} max={9999} value={qty}
+          onChange={(e) => setQty(Math.max(1, parseInt(e.target.value || '1', 10)))}
+          className="w-20 bg-[#101623] border border-[#29344A] rounded text-right text-slate-200 px-2 py-1 text-sm font-mono outline-none focus:border-[#D4AF37]/50"
+        />
+        <button
+          onClick={add}
+          disabled={!sym.trim() || qty <= 0}
+          className="px-3 py-1 bg-[#D4AF37] hover:bg-[#E5A344] text-[#101623] rounded text-xs font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          加入
+        </button>
+      </div>
+      {entries.length === 0 ? (
+        <p className="text-xs text-slate-600 italic px-2">尚未設定任何預設口數</p>
+      ) : (
+        <div className="space-y-1 max-h-48 overflow-auto custom-scrollbar">
+          {entries.map(([s, q]) => (
+            <div key={s} className="flex items-center justify-between bg-white/5 border border-white/5 rounded px-3 py-1.5 text-xs">
+              <span className="font-mono font-bold text-slate-200">{s}</span>
+              <div className="flex items-center gap-2">
+                <span className="font-mono tabular-nums text-[#D4AF37]">{q}</span>
+                <button
+                  onClick={() => remove(s)}
+                  className="text-slate-500 hover:text-red-400 transition-colors text-[10px]"
+                >移除</button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+};
+
 const ToggleItem = ({ label, description, enabled, onToggle }: any) => (
   <div className="flex items-center justify-between p-4 rounded-lg bg-white/5 border border-white/5 hover:border-white/10 transition-all">
     <div>

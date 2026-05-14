@@ -95,6 +95,14 @@ export function useDOMLogic() {
     stickyDerivedRef.current = { currentPrice: 0, refPrice: 0, limitUp: 0, limitDown: 0, highPrice: 0, lowPrice: 0 };
   }, [targetSymbol]);
 
+  // Sprint 20：切換商品時若 settings.qtyBySymbol 有對應預設口數，自動套用
+  useEffect(() => {
+    const map = settings.qtyBySymbol;
+    if (!targetSymbol || !map) return;
+    const preset = map[targetSymbol.toUpperCase()];
+    if (preset && preset > 0) setOrderValue(preset);
+  }, [targetSymbol, settings.qtyBySymbol]);
+
   const isSimulation = accountSummary?.is_simulation ?? true;
 
   const currentPriceRef = useRef(currentPrice);
