@@ -10,6 +10,8 @@ const Panel_TradeHistory    = lazy(() => import('./Panel_TradeHistory'));
 const SettingsModal         = lazy(() => import('./SettingsModal'));
 // ChartPanel 也走 lazy：lightweight-charts ~30KB gzipped、不要進首載
 const ChartPanel            = lazy(() => import('./ChartPanel'));
+// Sprint 12：自選 watchlist 也 lazy
+const WatchlistPanel        = lazy(() => import('./WatchlistPanel'));
 import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
 import { useElectronUpdater } from '../hooks/useElectronUpdater';
 import { useFillNotification } from '../hooks/useFillNotification';
@@ -23,33 +25,36 @@ const ResponsiveGridLayout = WidthProvider(Responsive);
 
 const defaultLayouts = {
   lg: [
-    { i: 'dom',   x: 0, y: 0,  w: 7, h: 22 },
-    { i: 'chart', x: 0, y: 22, w: 7, h: 10 },
+    { i: 'watch', x: 0, y: 0,  w: 2, h: 22 },
+    { i: 'dom',   x: 2, y: 0,  w: 5, h: 22 },
+    { i: 'chart', x: 2, y: 22, w: 5, h: 10 },
     { i: 'bal',   x: 7, y: 0,  w: 5, h: 8 },
     { i: 'pos',   x: 7, y: 8,  w: 5, h: 8 },
     { i: 'hist',  x: 7, y: 16, w: 3, h: 8 },
     { i: 'trade', x: 10, y: 16, w: 2, h: 8 },
   ],
   md: [
-    { i: 'dom',   x: 0, y: 0,  w: 6, h: 22 },
-    { i: 'chart', x: 0, y: 22, w: 6, h: 10 },
+    { i: 'watch', x: 0, y: 0,  w: 2, h: 22 },
+    { i: 'dom',   x: 2, y: 0,  w: 4, h: 22 },
+    { i: 'chart', x: 2, y: 22, w: 4, h: 10 },
     { i: 'bal',   x: 6, y: 0,  w: 4, h: 8 },
     { i: 'pos',   x: 6, y: 8,  w: 4, h: 8 },
     { i: 'hist',  x: 6, y: 16, w: 2, h: 8 },
     { i: 'trade', x: 8, y: 16, w: 2, h: 8 },
   ],
   sm: [
-    { i: 'dom',   x: 0, y: 0,  w: 6, h: 20 },
-    { i: 'chart', x: 0, y: 20, w: 6, h: 10 },
-    { i: 'bal',   x: 0, y: 30, w: 6, h: 7 },
-    { i: 'pos',   x: 0, y: 37, w: 6, h: 8 },
-    { i: 'hist',  x: 0, y: 45, w: 3, h: 8 },
-    { i: 'trade', x: 3, y: 45, w: 3, h: 8 },
+    { i: 'watch', x: 0, y: 0,  w: 6, h: 8 },
+    { i: 'dom',   x: 0, y: 8,  w: 6, h: 20 },
+    { i: 'chart', x: 0, y: 28, w: 6, h: 10 },
+    { i: 'bal',   x: 0, y: 38, w: 6, h: 7 },
+    { i: 'pos',   x: 0, y: 45, w: 6, h: 8 },
+    { i: 'hist',  x: 0, y: 53, w: 3, h: 8 },
+    { i: 'trade', x: 3, y: 53, w: 3, h: 8 },
   ]
 };
 
-// Sprint 11：因新增 chart panel，bump key 讓既有使用者拿到內建 chart 位置
-const LAYOUT_KEY = 'lighTrade_layout_v3';
+// Sprint 12：新增 watchlist panel，bump key 讓既有使用者拿到內建 watch 位置
+const LAYOUT_KEY = 'lighTrade_layout_v4';
 
 
 
@@ -200,6 +205,11 @@ const DashboardContent: React.FC = () => {
             <div key="chart" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
               {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
               <div className="flex-1 h-full overflow-hidden flex flex-col"><ChartPanel /></div>
+            </div>
+
+            <div key="watch" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><WatchlistPanel /></div>
             </div>
           </ResponsiveGridLayout>
         </div>
