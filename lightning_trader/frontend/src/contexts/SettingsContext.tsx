@@ -55,6 +55,18 @@ export interface Settings {
   /** Sprint 23：自選清單跨裝置同步 — 從 localStorage 搬進 SettingsContext，
    *  自動透過 /api/user_settings 跨裝置同步。 */
   watchlist: string[];
+  /** Sprint 26：本地價格穿越警報 — 在 quote stream 內偵測，純前端觸發 toast/notification */
+  priceAlerts: PriceAlert[];
+}
+
+/** 單一價格警報。symbol 是 canonical symbol。op above = 價格 >= price；below = <=。 */
+export interface PriceAlert {
+  id: string;
+  symbol: string;
+  op: 'above' | 'below';
+  price: number;
+  enabled: boolean;
+  triggeredAt?: number;   // unix ms；已觸發後不再 fire，直到使用者 reset
 }
 
 /**
@@ -97,6 +109,7 @@ const DEFAULT_SETTINGS: Settings = {
     events: { fill: false, risk_breach: false },
   },
   watchlist: ['TXFR1', 'MXFR1', '2330', '2454', '0050'],
+  priceAlerts: [],
 };
 
 interface SettingsContextType {
@@ -130,6 +143,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             events: { ...DEFAULT_SETTINGS.notifications.events, ...(parsed.notifications?.events || {}) },
           },
           watchlist: Array.isArray(parsed.watchlist) ? parsed.watchlist : DEFAULT_SETTINGS.watchlist,
+          priceAlerts: Array.isArray(parsed.priceAlerts) ? parsed.priceAlerts : DEFAULT_SETTINGS.priceAlerts,
         };
       } catch (e) {
         console.error("Failed to parse settings from localStorage", e);

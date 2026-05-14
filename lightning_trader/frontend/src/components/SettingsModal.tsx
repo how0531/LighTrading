@@ -501,6 +501,14 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                     送一則測試訊息
                   </button>
                 </section>
+                <section>
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-2">本地價格警報</h3>
+                  <p className="text-[11px] text-slate-500 mb-3">
+                    當 watchlist / target 商品價格穿越設定線時，立即跳出 Toast + 後景時推系統通知。
+                    觸發後該條變成 ⏸（已觸發），手動 reset 才再次啟用——避免來回震盪連發。
+                  </p>
+                  <PriceAlertsEditor settings={settings} updateSetting={updateSetting} />
+                </section>
               </div>
             )}
 
@@ -647,6 +655,100 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
 };
 
 // Helper Components
+// Sprint 26：價格穿越警報編輯器
+const PriceAlertsEditor: React.FC<{ settings: Settings; updateSetting: (u: Partial<Settings>) => void }> = ({ settings, updateSetting }) => {
+  const [sym, setSym] = React.useState('');
+  const [op, setOp] = React.useState<'above' | 'below'>('above');
+  const [price, setPrice] = React.useState(0);
+  const alerts = settings.priceAlerts || [];
+
+  const add = () => {
+    const s = sym.trim().toUpperCase();
+    if (!s || price <= 0) return;
+    const next = [
+      ...alerts,
+      { id: `a${Date.now()}`, symbol: s, op, price, enabled: true },
+    ];
+    updateSetting({ priceAlerts: next });
+    setSym(''); setPrice(0);
+  };
+  const toggle = (id: string) => {
+    updateSetting({
+      priceAlerts: alerts.map((a) => a.id === id ? { ...a, enabled: !a.enabled } : a),
+    });
+  };
+  const reset = (id: string) => {
+    updateSetting({
+      priceAlerts: alerts.map((a) => a.id === id ? { ...a, triggeredAt: undefined } : a),
+    });
+  };
+  const remove = (id: string) => {
+    updateSetting({ priceAlerts: alerts.filter((a) => a.id !== id) });
+  };
+
+  return (
+    <div className="space-y-2">
+      <div className="flex items-center gap-2 flex-wrap">
+        <input
+          type="text"
+          placeholder="商品（如 TXFR1）"
+          value={sym}
+          onChange={(e) => setSym(e.target.value)}
+          onKeyDown={(e) => { if (e.key === 'Enter') add(); }}
+          className="flex-1 min-w-[120px] bg-[#101623] border border-[#29344A] rounded text-slate-200 px-2 py-1 text-sm font-mono outline-none focus:border-[#D4AF37]/50"
+        />
+        <select
+          value={op}
+          onChange={(e) => setOp(e.target.value as 'above' | 'below')}
+          className="bg-[#101623] border border-[#29344A] rounded text-slate-200 px-2 py-1 text-sm cursor-pointer"
+        >
+          <option value="above">≥ 突破</option>
+          <option value="below">≤ 跌破</option>
+        </select>
+        <input
+          type="number" step={0.01} value={price || ''}
+          onChange={(e) => setPrice(parseFloat(e.target.value || '0') || 0)}
+          placeholder="價格"
+          className="w-24 bg-[#101623] border border-[#29344A] rounded text-right text-slate-200 px-2 py-1 text-sm font-mono outline-none focus:border-[#D4AF37]/50"
+        />
+        <button
+          onClick={add}
+          disabled={!sym.trim() || price <= 0}
+          className="px-3 py-1 bg-[#D4AF37] hover:bg-[#E5A344] text-[#101623] rounded text-xs font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          新增
+        </button>
+      </div>
+      {alerts.length === 0 ? (
+        <p className="text-xs text-slate-600 italic px-2">尚未設定任何警報</p>
+      ) : (
+        <div className="space-y-1 max-h-56 overflow-auto custom-scrollbar">
+          {alerts.map((a) => {
+            const triggered = !!(a.triggeredAt && a.triggeredAt > 0);
+            return (
+              <div key={a.id} className={`flex items-center gap-2 px-3 py-1.5 text-xs rounded border ${triggered ? 'bg-amber-950/30 border-amber-700/40' : 'bg-white/5 border-white/5'}`}>
+                <span className="font-mono font-bold text-slate-200 min-w-[60px]">{a.symbol}</span>
+                <span className="text-slate-500">{a.op === 'above' ? '≥' : '≤'}</span>
+                <span className="font-mono tabular-nums text-[#D4AF37] min-w-[60px]">{a.price}</span>
+                {triggered && <span className="text-amber-400 text-[10px]">⏸ 已觸發</span>}
+                <div className="ml-auto flex items-center gap-2">
+                  {triggered && (
+                    <button onClick={() => reset(a.id)} className="text-amber-400 hover:text-amber-200 text-[10px]">重啟</button>
+                  )}
+                  <button onClick={() => toggle(a.id)} className={`text-[10px] ${a.enabled ? 'text-emerald-400 hover:text-emerald-200' : 'text-slate-500 hover:text-slate-300'}`}>
+                    {a.enabled ? '啟用中' : '已停用'}
+                  </button>
+                  <button onClick={() => remove(a.id)} className="text-slate-500 hover:text-red-400 text-[10px]">移除</button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+};
+
 // Sprint 20：per-symbol 預設口數編輯器
 const QtyBySymbolEditor: React.FC<{ settings: Settings; updateSetting: (u: Partial<Settings>) => void }> = ({ settings, updateSetting }) => {
   const [sym, setSym] = React.useState('');
