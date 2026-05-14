@@ -14,14 +14,25 @@ import {
   createChart,
   CandlestickSeries,
   HistogramSeries,
+  LineSeries,
   type IChartApi,
   type ISeriesApi,
   type CandlestickData,
   type HistogramData,
+  type LineData,
   type Time,
 } from 'lightweight-charts';
 import { useTradingContext } from '../contexts/TradingContext';
 import { apiClient } from '../api/client';
+import { computeSMA as _sma, computeVWAP as _vwap } from '../utils/indicators';
+
+// 包成 LineData<Time>[]：indicator utils 用 number；lightweight-charts 要 Time 型別 cast
+function computeSMA(bars: KBarApi[], period: number): LineData<Time>[] {
+  return _sma(bars, period).map((p) => ({ time: p.time as Time, value: p.value }));
+}
+function computeVWAP(bars: KBarApi[]): LineData<Time>[] {
+  return _vwap(bars).map((p) => ({ time: p.time as Time, value: p.value }));
+}
 
 const PNL_COLOR_UP = '#EF4444';     // 台灣：紅 = 漲
 const PNL_COLOR_DOWN = '#10B981';   // 台灣：綠 = 跌
@@ -65,13 +76,22 @@ function aggregate1mBars(bars: KBarApi[], bucketSecs: number): KBarApi[] {
 const ChartPanel: React.FC = () => {
   const { targetSymbol, quote } = useTradingContext();
   const [timeframe, setTimeframe] = useState<Timeframe>('1m');
+  // Sprint 17：指標 toggles
+  const [showMA20, setShowMA20] = useState(true);
+  const [showMA60, setShowMA60] = useState(true);
+  const [showVWAP, setShowVWAP] = useState(true);
   const tfMeta = useMemo(() => TIMEFRAMES.find((t) => t.id === timeframe)!, [timeframe]);
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
   const volSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
+  const ma20SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const ma60SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const vwapSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const lastBarRef = useRef<CandlestickData<Time> | null>(null);
   const lastVolRef = useRef<HistogramData<Time> | null>(null);
+  // 保留最近的聚合 bars，給指標重算用
+  const aggregatedBarsRef = useRef<KBarApi[]>([]);
 
   // 初始化圖表（mount 一次）
   useEffect(() => {
@@ -110,15 +130,36 @@ const ChartPanel: React.FC = () => {
     });
     vol.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
 
+    // Sprint 17：MA20 / MA60 / VWAP overlay。三條都共用 candle 的價格 scale，
+    // 不另開 priceScaleId 避免疊壓 candle。lineWidth=1 保持輕量。
+    const ma20 = chart.addSeries(LineSeries, {
+      color: '#60a5fa', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+      crosshairMarkerVisible: false, title: 'MA20',
+    });
+    const ma60 = chart.addSeries(LineSeries, {
+      color: '#a855f7', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+      crosshairMarkerVisible: false, title: 'MA60',
+    });
+    const vwap = chart.addSeries(LineSeries, {
+      color: '#D4AF37', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+      crosshairMarkerVisible: false, title: 'VWAP',
+    });
+
     chartRef.current = chart;
     candleSeriesRef.current = candle;
     volSeriesRef.current = vol;
+    ma20SeriesRef.current = ma20;
+    ma60SeriesRef.current = ma60;
+    vwapSeriesRef.current = vwap;
 
     return () => {
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
       volSeriesRef.current = null;
+      ma20SeriesRef.current = null;
+      ma60SeriesRef.current = null;
+      vwapSeriesRef.current = null;
     };
   }, []);
 
@@ -144,18 +185,37 @@ const ChartPanel: React.FC = () => {
         volSeriesRef.current!.setData(vols);
         lastBarRef.current = candles[candles.length - 1] ?? null;
         lastVolRef.current = vols[vols.length - 1] ?? null;
+        // Sprint 17：存原 bars 供指標 toggle 時重算
+        aggregatedBarsRef.current = bars;
+        // 初始指標填入（如果 toggle 開）
+        ma20SeriesRef.current?.setData(showMA20 ? computeSMA(bars, 20) : []);
+        ma60SeriesRef.current?.setData(showMA60 ? computeSMA(bars, 60) : []);
+        vwapSeriesRef.current?.setData(showVWAP ? computeVWAP(bars) : []);
         chartRef.current?.timeScale().fitContent();
       })
       .catch(() => {
         // 沒登入或拉不到就清空；避免顯示其他商品殘留
         candleSeriesRef.current!.setData([]);
         volSeriesRef.current!.setData([]);
+        ma20SeriesRef.current?.setData([]);
+        ma60SeriesRef.current?.setData([]);
+        vwapSeriesRef.current?.setData([]);
+        aggregatedBarsRef.current = [];
         lastBarRef.current = null;
         lastVolRef.current = null;
       });
 
     return () => { cancelled = true; };
   }, [targetSymbol, tfMeta.seconds, tfMeta.days]);
+
+  // Sprint 17：toggle 指標 → 從快取 bars 重算（無需 refetch）
+  useEffect(() => {
+    const bars = aggregatedBarsRef.current;
+    if (!bars || bars.length === 0) return;
+    ma20SeriesRef.current?.setData(showMA20 ? computeSMA(bars, 20) : []);
+    ma60SeriesRef.current?.setData(showMA60 ? computeSMA(bars, 60) : []);
+    vwapSeriesRef.current?.setData(showVWAP ? computeVWAP(bars) : []);
+  }, [showMA20, showMA60, showVWAP]);
 
   // Live update：每次 quote 變動，更新或新增當分鐘 bar
   useEffect(() => {
@@ -217,7 +277,30 @@ const ChartPanel: React.FC = () => {
           <span className="w-1 h-3.5 bg-amber-500 rounded-full"></span>
           K 線圖 ({targetSymbol || '—'})
         </h3>
-        <div className="flex items-center gap-1">
+        <div className="flex items-center gap-1 flex-wrap">
+          {/* Sprint 17：指標 toggles，色碼跟 series 一致 */}
+          <button
+            onClick={() => setShowMA20((v) => !v)}
+            className={`px-1.5 py-0.5 text-[10px] font-bold rounded border transition-colors ${
+              showMA20 ? 'bg-blue-500/20 text-blue-300 border-blue-400' : 'bg-slate-900 text-slate-500 border-slate-700'
+            }`}
+            title="20 期簡單移動平均"
+          >MA20</button>
+          <button
+            onClick={() => setShowMA60((v) => !v)}
+            className={`px-1.5 py-0.5 text-[10px] font-bold rounded border transition-colors ${
+              showMA60 ? 'bg-purple-500/20 text-purple-300 border-purple-400' : 'bg-slate-900 text-slate-500 border-slate-700'
+            }`}
+            title="60 期簡單移動平均"
+          >MA60</button>
+          <button
+            onClick={() => setShowVWAP((v) => !v)}
+            className={`px-1.5 py-0.5 text-[10px] font-bold rounded border transition-colors ${
+              showVWAP ? 'bg-amber-500/20 text-amber-300 border-amber-400' : 'bg-slate-900 text-slate-500 border-slate-700'
+            }`}
+            title="累積成交量加權均價"
+          >VWAP</button>
+          <div className="w-px h-4 bg-slate-700 mx-1" />
           {TIMEFRAMES.map((tf) => (
             <button
               key={tf.id}
