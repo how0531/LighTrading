@@ -2,41 +2,62 @@
  * WatchlistPanel — 多 symbol 即時報價側欄
  *
  * 功能：
- *   - localStorage 持久化清單（key: `lightrade_watchlist`）
+ *   - Sprint 23：從 SettingsContext.watchlist 讀寫 → 自動透過 /api/user_settings
+ *     跨裝置同步（不再用 localStorage）
+ *   - 舊版 localStorage 鍵 `lightrade_watchlist` 第一次 mount 時自動 migrate
  *   - mount 時把目前 watchlist 透過 TradingContext.watchSymbols 送給後端
  *   - 渲染每個 symbol 的 mini-quote（價、漲跌、漲跌%）
  *   - 點擊 row → 把它變成 target symbol（subscribe）
  *   - 用 SymbolPicker 加入；hover 顯示 X 按鈕移除
+ *   - HTML5 native drag 排序
  *
  * 與 ChartPanel 一樣 lazy-loaded。
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Eye, GripVertical, ListPlus } from 'lucide-react';
 import { useTradingContext } from '../contexts/TradingContext';
+import { useSettings } from '../contexts/SettingsContext';
 import { SymbolPicker } from './SymbolPicker';
 import { formatPrice } from '../utils/instrument';
 
-const STORAGE_KEY = 'lightrade_watchlist';
-const DEFAULT_LIST = ['TXFR1', 'MXFR1', '2330', '2454', '0050'];
+const LEGACY_STORAGE_KEY = 'lightrade_watchlist';   // Sprint 12 用過的 key，搬完後刪
 const MAX_ITEMS = 20;
 
-function loadList(): string[] {
+/** Sprint 23：從舊 localStorage 撈一次，回傳合法的字串陣列。沒有就回 null。 */
+function readLegacyList(): string[] | null {
   try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const arr = JSON.parse(raw);
-      if (Array.isArray(arr)) return arr.filter((x) => typeof x === 'string').slice(0, MAX_ITEMS);
-    }
-  } catch { /* noop */ }
-  return DEFAULT_LIST;
-}
-function saveList(list: string[]) {
-  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(list.slice(0, MAX_ITEMS))); } catch { /* noop */ }
+    const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
+    if (!raw) return null;
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return null;
+    return arr.filter((x) => typeof x === 'string').slice(0, MAX_ITEMS);
+  } catch { return null; }
 }
 
 const WatchlistPanel: React.FC = () => {
   const { targetSymbol, subscribe, watchlistQuotes, watchSymbols, accountSummary } = useTradingContext();
-  const [list, setList] = useState<string[]>(() => loadList());
+  const { settings, updateSetting } = useSettings();
+  const list = settings.watchlist;
+  const setList = (next: string[] | ((prev: string[]) => string[])) => {
+    const resolved = typeof next === 'function' ? (next as (p: string[]) => string[])(list) : next;
+    updateSetting({ watchlist: resolved.slice(0, MAX_ITEMS) });
+  };
+
+  // Sprint 23：第一次 mount 時把舊 localStorage 資料搬進 settings.watchlist
+  // 條件：legacy 有資料，且 settings.watchlist 還是 DEFAULT（避免覆蓋使用者已調整的清單）
+  useEffect(() => {
+    const legacy = readLegacyList();
+    if (!legacy || legacy.length === 0) return;
+    const isStillDefault =
+      settings.watchlist.length === 5 &&
+      settings.watchlist[0] === 'TXFR1' && settings.watchlist[2] === '2330';
+    if (isStillDefault) {
+      updateSetting({ watchlist: legacy.slice(0, MAX_ITEMS) });
+    }
+    // 不管 migrate 與否都把 legacy 鍵清掉，避免未來再次誤觸
+    try { localStorage.removeItem(LEGACY_STORAGE_KEY); } catch { /* noop */ }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Sprint 12 R5：算出「持倉但不在 watchlist 內」的 symbol，用來啟用「+ 加入持倉」按鈕
   const missingPositions = useMemo(() => {
@@ -58,10 +79,9 @@ const WatchlistPanel: React.FC = () => {
   const dragSrcRef = useRef<string | null>(null);
   const [dragOver, setDragOver] = useState<string | null>(null);
 
-  // mount 與 list 變動：通知 context 訂閱
+  // list 變動：通知 backend 訂閱（settings 端的 persistence 由 SettingsContext 處理）
   useEffect(() => {
     watchSymbols(list);
-    saveList(list);
   }, [list, watchSymbols]);
 
   const addSymbol = (sym: string) => {

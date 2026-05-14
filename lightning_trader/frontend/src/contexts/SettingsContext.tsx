@@ -52,6 +52,9 @@ export interface Settings {
       risk_breach: boolean;
     };
   };
+  /** Sprint 23：自選清單跨裝置同步 — 從 localStorage 搬進 SettingsContext，
+   *  自動透過 /api/user_settings 跨裝置同步。 */
+  watchlist: string[];
 }
 
 /**
@@ -93,6 +96,7 @@ const DEFAULT_SETTINGS: Settings = {
     webhookUrl: '',
     events: { fill: false, risk_breach: false },
   },
+  watchlist: ['TXFR1', 'MXFR1', '2330', '2454', '0050'],
 };
 
 interface SettingsContextType {
@@ -125,6 +129,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
             webhookUrl: parsed.notifications?.webhookUrl ?? DEFAULT_SETTINGS.notifications.webhookUrl,
             events: { ...DEFAULT_SETTINGS.notifications.events, ...(parsed.notifications?.events || {}) },
           },
+          watchlist: Array.isArray(parsed.watchlist) ? parsed.watchlist : DEFAULT_SETTINGS.watchlist,
         };
       } catch (e) {
         console.error("Failed to parse settings from localStorage", e);
