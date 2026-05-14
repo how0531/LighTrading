@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors, ShieldAlert, RotateCcw, FileDown } from 'lucide-react';
+import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors, ShieldAlert, RotateCcw, FileDown, Bell } from 'lucide-react';
 import { useSettings } from '../contexts/SettingsContext';
 import type { Settings, HotkeyItem } from '../contexts/SettingsContext';
 import { apiClient, normalizeApiError } from '../api/client';
@@ -10,7 +10,7 @@ interface SettingsModalProps {
   onClose: () => void;
 }
 
-type TabType = 'transaction' | 'dom' | 'risk' | 'hotkeys' | 'splitOrder' | 'appearance';
+type TabType = 'transaction' | 'dom' | 'risk' | 'notifications' | 'hotkeys' | 'splitOrder' | 'appearance';
 
 interface RiskConfigShape {
   max_position_per_symbol: number;
@@ -153,6 +153,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     { id: 'transaction' as TabType, label: '交易設定',  icon: MousePointer2 },
     { id: 'dom'         as TabType, label: '閃電下單',  icon: Monitor },
     { id: 'risk'        as TabType, label: '風險控管',  icon: ShieldAlert },
+    { id: 'notifications' as TabType, label: '通知',    icon: Bell },
     { id: 'hotkeys'     as TabType, label: '快捷鍵',    icon: Keyboard },
     { id: 'splitOrder'  as TabType, label: '拆單設定',  icon: Scissors },
     { id: 'appearance'  as TabType, label: '外觀設定',  icon: Palette },
@@ -426,6 +427,80 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                     </section>
                   </>
                 )}
+              </div>
+            )}
+
+            {/* ── 通知 webhook ── */}
+            {activeTab === 'notifications' && (
+              <div className="space-y-6">
+                <section>
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-2">Webhook URL</h3>
+                  <p className="text-[11px] text-slate-500 mb-3">
+                    Discord Incoming Webhook / Slack Incoming Webhook / 自架 endpoint 都接得到。
+                    backend 會 POST <code className="text-slate-300">{`{event, text, content, source, extra}`}</code> 給此 URL。
+                  </p>
+                  <input
+                    type="url"
+                    placeholder="https://discord.com/api/webhooks/... 或 https://hooks.slack.com/..."
+                    value={settings.notifications.webhookUrl}
+                    onChange={(e) => handleUpdate({
+                      notifications: { ...settings.notifications, webhookUrl: e.target.value },
+                    })}
+                    className="w-full bg-[#101623] border border-[#29344A] rounded text-slate-200 px-3 py-2 text-sm font-mono outline-none focus:border-[#D4AF37]/50"
+                  />
+                  <p className="text-[10px] text-slate-600 italic mt-1">⚠️ URL 等同密鑰，請勿外洩。設定存於 backend 機器，不會經 git 上傳。</p>
+                </section>
+                <section>
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">觸發事件</h3>
+                  <div className="space-y-3">
+                    <ToggleItem
+                      label="成交時通知"
+                      description="每筆 Filled/Deal 回報送一則訊息"
+                      enabled={settings.notifications.events.fill}
+                      onToggle={() => handleUpdate({
+                        notifications: {
+                          ...settings.notifications,
+                          events: { ...settings.notifications.events, fill: !settings.notifications.events.fill },
+                        },
+                      })}
+                    />
+                    <ToggleItem
+                      label="風控警示時通知"
+                      description="RiskManager block / warning 觸發時送通知"
+                      enabled={settings.notifications.events.risk_breach}
+                      onToggle={() => handleUpdate({
+                        notifications: {
+                          ...settings.notifications,
+                          events: { ...settings.notifications.events, risk_breach: !settings.notifications.events.risk_breach },
+                        },
+                      })}
+                    />
+                  </div>
+                </section>
+                <section>
+                  <button
+                    onClick={async () => {
+                      const url = settings.notifications.webhookUrl.trim();
+                      if (!url) { toast.error('請先設定 Webhook URL'); return; }
+                      try {
+                        await fetch(url, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({
+                            event: 'test', text: 'LighTrade webhook 測試訊息',
+                            content: 'LighTrade webhook 測試訊息', source: 'LighTrade',
+                          }),
+                        });
+                        toast.success('測試訊息已送出（請到目的端確認）');
+                      } catch (e) {
+                        toast.error(`測試失敗：${e instanceof Error ? e.message : 'unknown'}`);
+                      }
+                    }}
+                    className="px-3 py-1.5 bg-slate-700/40 hover:bg-slate-700/60 text-slate-200 rounded text-xs font-bold border border-slate-700/50 transition-colors cursor-pointer"
+                  >
+                    送一則測試訊息
+                  </button>
+                </section>
               </div>
             )}
 

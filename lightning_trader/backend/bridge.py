@@ -164,6 +164,13 @@ def on_shioaji_trade_update(trade_data: dict):
             trade_journal.record_trade(trade_data)
         except Exception:
             pass
+
+        # ★ Sprint 22：把成交丟給 webhook dispatcher（async，永不擋）
+        try:
+            from backend.services import alert_dispatcher
+            alert_dispatcher.on_fill(trade_data)
+        except Exception:
+            pass
     except Exception as e:
         logger.error(f"廣播交易回報時發生錯誤: {e}")
 
@@ -202,6 +209,12 @@ def wire_callbacks():
     eng.event_bus.on_smart_order_triggered.connect(on_smart_order_update)
     # ★ event-driven PnL：tick 一進來就喚醒重算
     eng.event_bus.on_tick.connect(on_shioaji_tick_for_pnl)
+    # ★ Sprint 22：risk_breach → webhook 通知
+    try:
+        from backend.services.alert_dispatcher import on_risk_breach
+        eng.event_bus.on_risk_breach.connect(on_risk_breach)
+    except Exception as e:
+        logger.warning(f"無法連接 risk_breach → alert_dispatcher: {e}")
 
     # 高頻報價使用直接回呼（繞過 Signal）
     client._direct_quote_callback = on_shioaji_quote
