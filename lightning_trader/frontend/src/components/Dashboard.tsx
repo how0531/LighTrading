@@ -20,6 +20,8 @@ const JournalPanel          = lazy(() => import('./JournalPanel'));
 const EquityCurvePanel      = lazy(() => import('./EquityCurvePanel'));
 // Sprint 16：交易績效統計面板 lazy
 const StatsPanel            = lazy(() => import('./StatsPanel'));
+// Sprint 18：hotkey 速查表（非 lazy；很小、且 ? 觸發要永遠 mounted）
+import { HotkeyCheatSheet } from './HotkeyCheatSheet';
 import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
 import { useElectronUpdater } from '../hooks/useElectronUpdater';
 import { useFillNotification } from '../hooks/useFillNotification';
@@ -265,6 +267,9 @@ const DashboardContent: React.FC = () => {
           />
         </Suspense>
       )}
+
+      {/* Sprint 18：永遠 mount，自己監聽 `?` 鍵；無作用時不渲染。 */}
+      <HotkeyCheatSheet />
     </div>
   );
 };

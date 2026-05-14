@@ -54,6 +54,10 @@ export const DOMFooter: React.FC<DOMFooterProps> = ({
             <span className="text-slate-400">{ACTION_LABEL[hk.action] || hk.action}</span>
           </span>
         ))}
+        <span className="flex items-center gap-1 ml-auto opacity-70">
+          <kbd className="px-1 py-0.5 bg-slate-800/80 border border-slate-700 rounded text-[9px] font-mono text-slate-300">?</kbd>
+          <span className="text-slate-500">全部速查表</span>
+        </span>
       </div>
 
       {/* 主操作列 */}
