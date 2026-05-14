@@ -43,6 +43,15 @@ export interface Settings {
    *  key 為 canonical symbol（全大寫），value 為正整數。
    *  使用者切到該 symbol 時，UI 自動把 orderValue 設為此值；找不到就保持當前值。 */
   qtyBySymbol: Record<string, number>;
+  /** Sprint 22：通知 webhook（Discord/Slack/Telegram 通用）
+   *  backend 直接從 ~/.lightrade/user_settings.json 讀，前端負責編輯。 */
+  notifications: {
+    webhookUrl: string;
+    events: {
+      fill: boolean;
+      risk_breach: boolean;
+    };
+  };
 }
 
 /**
@@ -80,6 +89,10 @@ const DEFAULT_SETTINGS: Settings = {
     maxDelay: 800,
   },
   qtyBySymbol: {},
+  notifications: {
+    webhookUrl: '',
+    events: { fill: false, risk_breach: false },
+  },
 };
 
 interface SettingsContextType {
@@ -108,6 +121,10 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           hotkeys: parsed.hotkeys || DEFAULT_SETTINGS.hotkeys,
           splitOrder: { ...DEFAULT_SETTINGS.splitOrder, ...parsed.splitOrder },
           qtyBySymbol: { ...DEFAULT_SETTINGS.qtyBySymbol, ...(parsed.qtyBySymbol || {}) },
+          notifications: {
+            webhookUrl: parsed.notifications?.webhookUrl ?? DEFAULT_SETTINGS.notifications.webhookUrl,
+            events: { ...DEFAULT_SETTINGS.notifications.events, ...(parsed.notifications?.events || {}) },
+          },
         };
       } catch (e) {
         console.error("Failed to parse settings from localStorage", e);
