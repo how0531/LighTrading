@@ -8,7 +8,8 @@
  *   - JournalPanel 看的是「歷史 fills」，已落地 SQLite，跨重啟、跨登入都在
  */
 import React, { useEffect, useState } from 'react';
-import { History, RefreshCw } from 'lucide-react';
+import { History, RefreshCw, Upload } from 'lucide-react';
+import { useRef } from 'react';
 import { apiClient, normalizeApiError } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
 import { formatPrice } from '../utils/instrument';
@@ -79,6 +80,31 @@ const JournalPanel: React.FC = () => {
 
   useEffect(() => { fetchAll(); }, [range]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Sprint 24：CSV import
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const handleImport = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    const form = new FormData();
+    form.append('file', f);
+    try {
+      const res = await apiClient.post('/journal/import', form, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const r = res.data as { total_rows: number; accepted: number; skipped: number; errors: string[] };
+      toast.success(`匯入完成：${r.accepted} 筆寫入 / ${r.skipped} 略過 / ${r.errors.length} 錯誤`);
+      if (r.errors.length > 0) {
+        toast.warn(`前幾筆錯誤：${r.errors.slice(0, 3).join(' | ')}`);
+      }
+      fetchAll();
+    } catch (err) {
+      const ne = normalizeApiError(err);
+      toast.error(ne.user_msg || '匯入失敗');
+    } finally {
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
       <div className="px-3 py-2 border-b border-slate-700/50 flex items-center justify-between gap-2">
@@ -100,6 +126,20 @@ const JournalPanel: React.FC = () => {
               {r.label}
             </button>
           ))}
+          <button
+            onClick={() => fileInputRef.current?.click()}
+            className="ml-1 p-1 hover:bg-slate-700 rounded text-slate-400 hover:text-slate-200 transition-colors"
+            title="從 CSV 匯入歷史成交（columns: time, symbol, action, price, qty）"
+          >
+            <Upload className="w-3.5 h-3.5" />
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".csv,text/csv"
+            onChange={handleImport}
+            className="hidden"
+          />
           <button
             onClick={fetchAll}
             disabled={loading}

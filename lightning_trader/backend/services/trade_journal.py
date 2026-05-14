@@ -179,6 +179,58 @@ def fetch_fills(from_ts: Optional[int] = None, to_ts: Optional[int] = None,
         return []
 
 
+def import_fills(rows: list[dict]) -> dict:
+    """
+    Sprint 24：批次匯入既有成交（給 CSV import 用）。
+    每筆 row 需要 ts(ms) / symbol / action / price / qty；order_id 可選。
+    回傳 {accepted, skipped, errors[]}。已存在的 id 走 INSERT OR IGNORE 不會重複。
+    """
+    import time as _t
+    accepted = 0
+    skipped = 0
+    errors: list[str] = []
+    if not rows:
+        return {"accepted": 0, "skipped": 0, "errors": []}
+    try:
+        with _DB_LOCK:
+            conn = _connect()
+            for i, r in enumerate(rows):
+                try:
+                    ts = int(r.get("ts") or 0)
+                    symbol = str(r.get("symbol") or "").strip().upper()
+                    action = str(r.get("action") or "").strip()
+                    price = float(r.get("price") or 0)
+                    qty = int(float(r.get("qty") or 0))
+                    order_id = str(r.get("order_id") or "")
+                    if ts <= 0 or not symbol or price <= 0 or qty <= 0:
+                        skipped += 1
+                        continue
+                    if action.lower() in ("b", "buy"):
+                        action = "Buy"
+                    elif action.lower() in ("s", "sell"):
+                        action = "Sell"
+                    else:
+                        skipped += 1
+                        continue
+                    # 自動生成 id：用 order_id + ts + symbol 組成（不易撞）
+                    fill_id = r.get("id") or f"imp:{order_id}#{ts}#{symbol}#{action}#{price}#{qty}"
+                    conn.execute(
+                        "INSERT OR IGNORE INTO fills (id, ts, symbol, action, price, qty, order_id, raw, created_at)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        (str(fill_id), ts, symbol, action, price, qty, order_id, "", int(_t.time() * 1000)),
+                    )
+                    if conn.total_changes > 0:
+                        # SQLite total_changes 是 connection 級累計；不適合判單筆，用 INSERT OR IGNORE 不影響
+                        pass
+                    accepted += 1
+                except Exception as e:
+                    errors.append(f"row {i}: {e}")
+        return {"accepted": accepted, "skipped": skipped, "errors": errors[:10]}
+    except Exception as e:
+        logger.error(f"import_fills 失敗: {e}")
+        return {"accepted": accepted, "skipped": skipped, "errors": [str(e)] + errors[:9]}
+
+
 def fetch_stats(from_ts: Optional[int] = None, to_ts: Optional[int] = None) -> dict:
     """總筆數、最早最新時間、買賣口數。粗估 PnL 不在這層做，避免重複實作。"""
     where: list[str] = []
