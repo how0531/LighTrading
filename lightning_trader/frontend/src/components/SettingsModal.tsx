@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors, ShieldAlert, RotateCcw } from 'lucide-react';
+import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors, ShieldAlert, RotateCcw, FileDown } from 'lucide-react';
 import { useSettings } from '../contexts/SettingsContext';
 import type { Settings, HotkeyItem } from '../contexts/SettingsContext';
 import { apiClient, normalizeApiError } from '../api/client';
@@ -57,6 +57,81 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     } catch (e) {
       const err = normalizeApiError(e);
       toast.error(err.user_msg || '更新風控失敗');
+    }
+  };
+
+  const downloadDailyReport = async () => {
+    try {
+      const res = await apiClient.get('/daily_report');
+      const r = res.data as {
+        date: string;
+        generated_at: string;
+        error?: string;
+        summary: null | {
+          trades_count: number; fills_count: number;
+          realized_pnl_estimate: number; buy_lots: number; sell_lots: number;
+          top_symbol: string | null;
+        };
+        by_symbol: Array<{
+          symbol: string; fills: number; buy_lots: number; sell_lots: number;
+          net_lots: number; avg_buy: number; avg_sell: number; est_pnl: number;
+        }>;
+      };
+      if (r.error) {
+        toast.error(`日報失敗：${r.error}`);
+        return;
+      }
+      // 組 CSV
+      const header = 'symbol,fills,buy_lots,sell_lots,net_lots,avg_buy,avg_sell,est_pnl\n';
+      const rows = r.by_symbol.map((s) =>
+        [s.symbol, s.fills, s.buy_lots, s.sell_lots, s.net_lots, s.avg_buy, s.avg_sell, s.est_pnl].join(',')
+      ).join('\n');
+      const summaryComment = r.summary
+        ? `# date=${r.date}, generated_at=${r.generated_at}\n# trades=${r.summary.trades_count}, fills=${r.summary.fills_count}, est_realized_pnl=${r.summary.realized_pnl_estimate}, top=${r.summary.top_symbol ?? ''}\n`
+        : `# date=${r.date}, generated_at=${r.generated_at}\n# (no data)\n`;
+      const csv = summaryComment + header + rows + '\n';
+      // 觸發下載
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `lightrade-daily-${r.date}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      const pnl = r.summary?.realized_pnl_estimate ?? 0;
+      toast.success(`日報已下載：${r.by_symbol.length} 商品 / 估算 PnL ${pnl.toLocaleString()}`);
+    } catch (e) {
+      const err = normalizeApiError(e);
+      toast.error(err.user_msg || '取得日報失敗');
+    }
+  };
+
+  const copyDiagnostics = async () => {
+    try {
+      const [healthRes, metricsRes] = await Promise.all([
+        apiClient.get('/health').catch((e) => ({ data: { error: String(e) } })),
+        apiClient.get('/metrics').catch((e) => ({ data: { error: String(e) } })),
+      ]);
+      const payload = {
+        ts: new Date().toISOString(),
+        ua: typeof navigator !== 'undefined' ? navigator.userAgent : 'n/a',
+        location: typeof window !== 'undefined' ? window.location.href : 'n/a',
+        health: healthRes.data,
+        metrics: metricsRes.data,
+      };
+      const text = JSON.stringify(payload, null, 2);
+      if (navigator?.clipboard?.writeText) {
+        await navigator.clipboard.writeText(text);
+        toast.success('系統診斷已複製到剪貼簿');
+      } else {
+        // Fallback：丟到 toast 讓使用者自己複製
+        toast.info(`系統診斷：\n${text}`, { durationMs: 30000 });
+      }
+    } catch (e) {
+      const err = normalizeApiError(e);
+      toast.error(err.user_msg || '取得診斷失敗');
     }
   };
 
@@ -214,6 +289,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                 <section>
                   <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">視覺呈現</h3>
                   <div className="space-y-3">
+                    <ToggleItem label="緊湊模式" description="DOM 列高 32px → 24px，多顯示約 33% 檔位" enabled={settings.visuals.compactMode} onToggle={() => handleToggle('visuals', 'compactMode')} />
                     <ToggleItem label="顯示 VWAP" description="在閃電下單列顯示成交均價線" enabled={settings.visuals.showVWAP} onToggle={() => handleToggle('visuals', 'showVWAP')} />
                     <ToggleItem label="顯示 今日高低點" description="標記今日最高價與最低價" enabled={settings.visuals.showHL} onToggle={() => handleToggle('visuals', 'showHL')} />
                     <ToggleItem label="顯示 成交量分布 (Volume Profile)" description="顯示各價位成交量分布圖" enabled={settings.visuals.showVolumeProfile} onToggle={() => handleToggle('visuals', 'showVolumeProfile')} />
@@ -238,12 +314,28 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                         enabled={riskCfg.trading_enabled}
                         onToggle={() => saveRisk({ trading_enabled: !riskCfg.trading_enabled })}
                       />
-                      <button
-                        onClick={resetDailyPnl}
-                        className="mt-3 flex items-center gap-2 px-3 py-1.5 bg-amber-700/40 hover:bg-amber-700/60 text-amber-200 rounded text-xs font-bold border border-amber-700/50 transition-colors cursor-pointer"
-                      >
-                        <RotateCcw className="w-3.5 h-3.5" /> 重置日虧損計數
-                      </button>
+                      <div className="mt-3 flex flex-wrap gap-2">
+                        <button
+                          onClick={resetDailyPnl}
+                          className="flex items-center gap-2 px-3 py-1.5 bg-amber-700/40 hover:bg-amber-700/60 text-amber-200 rounded text-xs font-bold border border-amber-700/50 transition-colors cursor-pointer"
+                        >
+                          <RotateCcw className="w-3.5 h-3.5" /> 重置日虧損計數
+                        </button>
+                        <button
+                          onClick={copyDiagnostics}
+                          className="flex items-center gap-2 px-3 py-1.5 bg-slate-700/40 hover:bg-slate-700/60 text-slate-200 rounded text-xs font-bold border border-slate-700/50 transition-colors cursor-pointer"
+                          title="抓取 /api/health + /api/metrics 並複製到剪貼簿，方便回報問題"
+                        >
+                          <ShieldAlert className="w-3.5 h-3.5" /> 複製系統診斷
+                        </button>
+                        <button
+                          onClick={downloadDailyReport}
+                          className="flex items-center gap-2 px-3 py-1.5 bg-emerald-700/40 hover:bg-emerald-700/60 text-emerald-200 rounded text-xs font-bold border border-emerald-700/50 transition-colors cursor-pointer"
+                          title="下載當日交易彙整 CSV"
+                        >
+                          <FileDown className="w-3.5 h-3.5" /> 下載當日 CSV
+                        </button>
+                      </div>
                     </section>
 
                     <section>

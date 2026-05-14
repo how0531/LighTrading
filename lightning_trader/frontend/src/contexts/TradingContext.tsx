@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 import type { QuoteData, BidAskData } from '../types';
 import { apiClient } from '../api/client';
 import { computeLocalPnL } from '../utils/pnl';
+import { useToast } from './ToastContext';
 
 interface AccountPosition {
   symbol: string; qty: number; direction: 'Buy' | 'Sell'; price: number; pnl: number; account?: string; raw_qty?: number;
@@ -137,6 +138,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const isSwitchingAccountRef = useRef(false);
   const lastMessageTimeRef = useRef<number>(Date.now());
   const isStaleRef = useRef(false); // 避免 onmessage closure 中讀到舊值
+  const wsAttemptCountRef = useRef(0); // 0=首次, 1+=重連
+  const { toast } = useToast();
 
   // 穩定的 quote 緩衝區
   const latestQuoteRef = useRef<QuoteData | null>(null);
@@ -269,6 +272,11 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       lastMessageTimeRef.current = Date.now();
       // ★ 重連後立即強制三合一同步：確保斷線期間外部下單的單也會出現
       syncAll();
+      // 區分首次連線 vs 重連：重連時主動告知使用者「已重新連線」
+      wsAttemptCountRef.current += 1;
+      if (wsAttemptCountRef.current > 1) {
+        toast.success('已重新連線到交易引擎');
+      }
     };
 
     ws.onmessage = (event) => {

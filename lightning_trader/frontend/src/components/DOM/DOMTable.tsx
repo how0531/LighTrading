@@ -1,10 +1,23 @@
 import React, { useMemo } from 'react';
 import { getTickSize, formatPrice } from '../../utils/instrument';
 
+// Native CSS virtualization：瀏覽器自動跳過渲染畫面外的 row。
+// Chromium / WebKit / Firefox 都已支援（Electron 32 內嵌 Chromium ≥ 130 沒問題）。
+// 高度依 compactMode 切換：h-8 (32px) 標準 / h-6 (24px) 緊湊。
+const NORMAL_ROW_STYLE: React.CSSProperties = {
+  contentVisibility: 'auto',
+  containIntrinsicSize: '32px',
+};
+const COMPACT_ROW_STYLE: React.CSSProperties = {
+  contentVisibility: 'auto',
+  containIntrinsicSize: '24px',
+};
+
 
 interface DOMTableProps {
   fullPrices: number[];
   isStale: boolean;
+  compactMode?: boolean;        // ★ Sprint 10 R7a: h-6 vs h-8
   qData: any;
   currentPrice: number;
   refPrice: number;
@@ -27,7 +40,7 @@ interface DOMTableProps {
 }
 
 export const DOMTable: React.FC<DOMTableProps> = ({
-  fullPrices, isStale, qData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice,
+  fullPrices, isStale, compactMode = false, qData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice,
   targetSymbol, currentPosition, flashDir, smartOrders, workingBuyMap, workingSellMap, bData,
   orderFeedback, handleAddStopOrder, handleCancelOrder, handlePlaceOrder, handleDropOrder
 }) => {
@@ -166,7 +179,7 @@ export const DOMTable: React.FC<DOMTableProps> = ({
           const smartSellLine = smartSellKeys.has(pKey);
 
           return (
-            <tr key={p} data-price={pKey} className={`h-8 transition-none relative ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-[#D4AF37]/10 border-y border-[#D4AF37]/50 box-border') : 'border-b border-slate-800/80'} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''} ${isCostLine ? 'border-y-2 border-dashed border-amber-500/50' : ''} ${smartBuyLine || smartSellLine ? 'border-y border-dashed border-purple-500/60' : ''} ${pnlZoneBg}`}>
+            <tr key={p} data-price={pKey} style={compactMode ? COMPACT_ROW_STYLE : NORMAL_ROW_STYLE} className={`${compactMode ? 'h-6' : 'h-8'} transition-none relative ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-[#D4AF37]/10 border-y border-[#D4AF37]/50 box-border') : 'border-b border-slate-800/80'} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''} ${isCostLine ? 'border-y-2 border-dashed border-amber-500/50' : ''} ${smartBuyLine || smartSellLine ? 'border-y border-dashed border-purple-500/60' : ''} ${pnlZoneBg}`}>
               
               <td className="border-r border-slate-800 hover:bg-slate-700 cursor-pointer"
                 onClick={(e) => {

@@ -1,14 +1,19 @@
-import React, { useState } from 'react';
+import React, { useState, Suspense, lazy } from 'react';
 import Header from './Header';
 import DOMPanel from './DOMPanel';
-import Panel_Positions from './Panel_Positions';
-import Panel_OrderHistory from './Panel_OrderHistory';
-import Panel_AccountBalance from './Panel_AccountBalance';
-import Panel_TradeHistory from './Panel_TradeHistory';
-import SettingsModal from './SettingsModal';
+// Focus mode 預設為 true → 以下 panels 在首載時不會顯示，懶載入掉
+// 進入 layout 模式時 Suspense 會閃 100~200ms（網路慢時更明顯），可接受
+const Panel_Positions       = lazy(() => import('./Panel_Positions'));
+const Panel_OrderHistory    = lazy(() => import('./Panel_OrderHistory'));
+const Panel_AccountBalance  = lazy(() => import('./Panel_AccountBalance'));
+const Panel_TradeHistory    = lazy(() => import('./Panel_TradeHistory'));
+const SettingsModal         = lazy(() => import('./SettingsModal'));
 import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
 import { useElectronUpdater } from '../hooks/useElectronUpdater';
+import { useFillNotification } from '../hooks/useFillNotification';
+import { useRiskStatus } from '../hooks/useRiskStatus';
 import { Responsive, WidthProvider } from 'react-grid-layout';
+import { ShieldAlert } from 'lucide-react';
 import 'react-grid-layout/css/styles.css';
 import 'react-resizable/css/styles.css';
 
@@ -50,6 +55,11 @@ const DashboardContent: React.FC = () => {
   const isLive = accountSummary.is_simulation === false;
   // 桌面版接 Electron auto-updater 事件→Toast；非 Electron 環境會自動 no-op。
   useElectronUpdater();
+  // 成交回報 → 系統通知 + Toast（視窗在後景才推系統通知）
+  useFillNotification();
+  // 30s 一次拉 backend RiskManager 狀態，給 banner 用
+  const riskStatus = useRiskStatus();
+  const tradingDisabled = riskStatus !== null && riskStatus.trading_enabled === false;
 
   const [layouts, setLayouts] = useState(() => {
     try {
@@ -75,6 +85,27 @@ const DashboardContent: React.FC = () => {
           </div>
         </div>
       )}
+      {tradingDisabled && (
+        <div className="mb-2 -mx-4 px-4 py-1.5 bg-red-700/30 border-y border-red-500/60 flex items-center gap-2 text-red-200 text-xs font-bold">
+          <ShieldAlert className="w-4 h-4 flex-shrink-0" />
+          <span>
+            風控已停止交易：可能因日虧損達上限。
+            {riskStatus && (
+              <>
+                {' 目前損益 '}
+                <span className="font-mono tabular-nums text-red-100">
+                  {Math.round(riskStatus.daily_realized_pnl + riskStatus.daily_unrealized_pnl).toLocaleString()}
+                </span>
+                {' / 上限 '}
+                <span className="font-mono tabular-nums text-red-100">
+                  {Math.round(riskStatus.max_daily_loss).toLocaleString()}
+                </span>
+              </>
+            )}
+            <span className="ml-2 opacity-80">到「設定 → 風險控管」重置日虧損計數即可恢復。</span>
+          </span>
+        </div>
+      )}
       <Header
         onOpenSettings={() => setIsSettingsOpen(true)} 
         isLayoutLocked={isLayoutLocked}
@@ -90,6 +121,7 @@ const DashboardContent: React.FC = () => {
           </div>
         </div>
       ) : (
+        <Suspense fallback={<div className="flex-1 flex items-center justify-center text-slate-500 text-xs">載入面板中…</div>}>
         <div className="flex-1 overflow-auto -mx-4 px-4 pb-12 min-h-0">
           <ResponsiveGridLayout
             className="layout"
@@ -129,12 +161,18 @@ const DashboardContent: React.FC = () => {
             </div>
           </ResponsiveGridLayout>
         </div>
+        </Suspense>
       )}
 
-      <SettingsModal 
-        isOpen={isSettingsOpen} 
-        onClose={() => setIsSettingsOpen(false)} 
-      />
+      {/* SettingsModal 也走 lazy；isOpen=false 時 lazy chunk 不會載 */}
+      {isSettingsOpen && (
+        <Suspense fallback={null}>
+          <SettingsModal
+            isOpen={isSettingsOpen}
+            onClose={() => setIsSettingsOpen(false)}
+          />
+        </Suspense>
+      )}
     </div>
   );
 };

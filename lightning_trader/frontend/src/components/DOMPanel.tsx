@@ -6,6 +6,7 @@ import { DOMFooter } from './DOM/DOMFooter';
 import { getTickSize } from '../utils/tickSize';
 import { apiClient, normalizeApiError } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
+import { useSettings } from '../contexts/SettingsContext';
 import { getMultiplier } from '../types';
 
 // 精確四捨五入避免浮點漂移
@@ -14,6 +15,8 @@ const round2 = (n: number): number => Math.round(n * 100) / 100;
 export const DOMPanel: React.FC = () => {
   const logic = useDOMLogic();
   const { toast } = useToast();
+  const { settings } = useSettings();
+  const compactMode = settings.visuals.compactMode;
   const {
     qData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice, isSimulation,
     isStale, tableRef, hasScrolled, flashDir,
@@ -103,12 +106,63 @@ export const DOMPanel: React.FC = () => {
     hasScrolled.current = false;
   }, [targetSymbol, hasScrolled]);
 
+  // ★ 跟隨價格：每 10 秒檢查當前價是不是還在可視範圍。若飄出去就靜默捲回。
+  //   不直接綁在 price tick 上，避免使用者手動滾動研究 ladder 時被搶回去。
+  //   只有「飄出畫面 > 10 秒」才會校正一次，且不打斷使用者的拖曳。
+  useEffect(() => {
+    const containerEl = tableRef.current;
+    if (!containerEl) return;
+    const FOLLOW_INTERVAL_MS = 10_000;
+    let userScrolledRecently = false;
+    let scrollResetTimer: ReturnType<typeof setTimeout> | null = null;
+
+    // 偵測「最近 3 秒內使用者有手動 scroll」→ 暫不自動跟隨
+    const onUserScroll = () => {
+      userScrolledRecently = true;
+      if (scrollResetTimer) clearTimeout(scrollResetTimer);
+      scrollResetTimer = setTimeout(() => { userScrolledRecently = false; }, 3000);
+    };
+    // wheel / touchmove 才算「使用者主動」；programmatic scroll 不觸發這些事件
+    containerEl.addEventListener('wheel',     onUserScroll, { passive: true });
+    containerEl.addEventListener('touchmove', onUserScroll, { passive: true });
+
+    const timer = setInterval(() => {
+      if (userScrolledRecently || currentPrice <= 0) return;
+      const pKey = Math.round(currentPrice * 100);
+      const row = containerEl.querySelector<HTMLElement>(`[data-price="${pKey}"]`);
+      if (!row) return;
+      const containerRect = containerEl.getBoundingClientRect();
+      const rowRect = row.getBoundingClientRect();
+      // 飄出可視範圍才捲回
+      const isVisible = rowRect.top >= containerRect.top
+                     && rowRect.bottom <= containerRect.bottom;
+      if (!isVisible) {
+        row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      }
+    }, FOLLOW_INTERVAL_MS);
+
+    return () => {
+      containerEl.removeEventListener('wheel',     onUserScroll);
+      containerEl.removeEventListener('touchmove', onUserScroll);
+      if (scrollResetTimer) clearTimeout(scrollResetTimer);
+      clearInterval(timer);
+    };
+  }, [tableRef, currentPrice]);
+
 
   // ★ 全域快捷鍵監聽
   useEffect(() => {
     const onKeyDown = async (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      // ★ R6b: 數字鍵 1–9 直接設定下單口數（不可在輸入框生效，已上面阻擋）
+      // 避免跟 Ctrl/Cmd 的快捷鍵衝突
+      if (!e.ctrlKey && !e.metaKey && !e.altKey && /^[1-9]$/.test(e.key)) {
+        e.preventDefault();
+        logic.setOrderValue(Number(e.key));
+        return;
+      }
 
       const matched = hotkeys.find((hk: any) => hk.key === e.key);
       if (!matched) return;
@@ -177,8 +231,8 @@ export const DOMPanel: React.FC = () => {
       />
       
       <div ref={tableRef} className="flex-1 overflow-auto bg-black/10 custom-scrollbar">
-        <DOMTable 
-          fullPrices={fullPrices} isStale={isStale} qData={qData} currentPrice={currentPrice} refPrice={refPrice}
+        <DOMTable
+          fullPrices={fullPrices} isStale={isStale} compactMode={compactMode} qData={qData} currentPrice={currentPrice} refPrice={refPrice}
           limitUp={limitUp} limitDown={limitDown} highPrice={highPrice} lowPrice={lowPrice} targetSymbol={targetSymbol}
           currentPosition={currentPosition} flashDir={flashDir} smartOrders={smartOrders}
           workingBuyMap={workingBuyMap} workingSellMap={workingSellMap} bData={bData}
