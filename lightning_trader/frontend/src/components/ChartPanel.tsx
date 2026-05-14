@@ -24,7 +24,7 @@ import {
 } from 'lightweight-charts';
 import { useTradingContext } from '../contexts/TradingContext';
 import { apiClient } from '../api/client';
-import { computeSMA as _sma, computeVWAP as _vwap } from '../utils/indicators';
+import { computeSMA as _sma, computeVWAP as _vwap, computeRSI as _rsi } from '../utils/indicators';
 
 // 包成 LineData<Time>[]：indicator utils 用 number；lightweight-charts 要 Time 型別 cast
 function computeSMA(bars: KBarApi[], period: number): LineData<Time>[] {
@@ -32,6 +32,9 @@ function computeSMA(bars: KBarApi[], period: number): LineData<Time>[] {
 }
 function computeVWAP(bars: KBarApi[]): LineData<Time>[] {
   return _vwap(bars).map((p) => ({ time: p.time as Time, value: p.value }));
+}
+function computeRSI(bars: KBarApi[], period: number = 14): LineData<Time>[] {
+  return _rsi(bars, period).map((p) => ({ time: p.time as Time, value: p.value }));
 }
 
 const PNL_COLOR_UP = '#EF4444';     // 台灣：紅 = 漲
@@ -80,6 +83,7 @@ const ChartPanel: React.FC = () => {
   const [showMA20, setShowMA20] = useState(true);
   const [showMA60, setShowMA60] = useState(true);
   const [showVWAP, setShowVWAP] = useState(true);
+  const [showRSI, setShowRSI] = useState(false);   // Sprint 25 預設關（不在 candle 同 scale）
   const tfMeta = useMemo(() => TIMEFRAMES.find((t) => t.id === timeframe)!, [timeframe]);
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -88,6 +92,7 @@ const ChartPanel: React.FC = () => {
   const ma20SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const ma60SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const vwapSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
+  const rsiSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const lastBarRef = useRef<CandlestickData<Time> | null>(null);
   const lastVolRef = useRef<HistogramData<Time> | null>(null);
   // 保留最近的聚合 bars，給指標重算用
@@ -144,6 +149,13 @@ const ChartPanel: React.FC = () => {
       color: '#D4AF37', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
       crosshairMarkerVisible: false, title: 'VWAP',
     });
+    // Sprint 25: RSI 走自己的 priceScale（0-100 範圍），與 candle 不共軸
+    const rsi = chart.addSeries(LineSeries, {
+      color: '#fb7185', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
+      crosshairMarkerVisible: false, title: 'RSI14',
+      priceScaleId: 'rsi',
+    });
+    rsi.priceScale().applyOptions({ scaleMargins: { top: 0.7, bottom: 0 } });
 
     chartRef.current = chart;
     candleSeriesRef.current = candle;
@@ -151,6 +163,7 @@ const ChartPanel: React.FC = () => {
     ma20SeriesRef.current = ma20;
     ma60SeriesRef.current = ma60;
     vwapSeriesRef.current = vwap;
+    rsiSeriesRef.current = rsi;
 
     return () => {
       chart.remove();
@@ -160,6 +173,7 @@ const ChartPanel: React.FC = () => {
       ma20SeriesRef.current = null;
       ma60SeriesRef.current = null;
       vwapSeriesRef.current = null;
+      rsiSeriesRef.current = null;
     };
   }, []);
 
@@ -191,6 +205,7 @@ const ChartPanel: React.FC = () => {
         ma20SeriesRef.current?.setData(showMA20 ? computeSMA(bars, 20) : []);
         ma60SeriesRef.current?.setData(showMA60 ? computeSMA(bars, 60) : []);
         vwapSeriesRef.current?.setData(showVWAP ? computeVWAP(bars) : []);
+        rsiSeriesRef.current?.setData(showRSI ? computeRSI(bars, 14) : []);
         chartRef.current?.timeScale().fitContent();
       })
       .catch(() => {
@@ -200,6 +215,7 @@ const ChartPanel: React.FC = () => {
         ma20SeriesRef.current?.setData([]);
         ma60SeriesRef.current?.setData([]);
         vwapSeriesRef.current?.setData([]);
+        rsiSeriesRef.current?.setData([]);
         aggregatedBarsRef.current = [];
         lastBarRef.current = null;
         lastVolRef.current = null;
@@ -215,7 +231,8 @@ const ChartPanel: React.FC = () => {
     ma20SeriesRef.current?.setData(showMA20 ? computeSMA(bars, 20) : []);
     ma60SeriesRef.current?.setData(showMA60 ? computeSMA(bars, 60) : []);
     vwapSeriesRef.current?.setData(showVWAP ? computeVWAP(bars) : []);
-  }, [showMA20, showMA60, showVWAP]);
+    rsiSeriesRef.current?.setData(showRSI ? computeRSI(bars, 14) : []);
+  }, [showMA20, showMA60, showVWAP, showRSI]);
 
   // Live update：每次 quote 變動，更新或新增當分鐘 bar
   useEffect(() => {
@@ -300,6 +317,13 @@ const ChartPanel: React.FC = () => {
             }`}
             title="累積成交量加權均價"
           >VWAP</button>
+          <button
+            onClick={() => setShowRSI((v) => !v)}
+            className={`px-1.5 py-0.5 text-[10px] font-bold rounded border transition-colors ${
+              showRSI ? 'bg-pink-500/20 text-pink-300 border-pink-400' : 'bg-slate-900 text-slate-500 border-slate-700'
+            }`}
+            title="Wilder RSI (14)，獨立 scale 在圖下緣"
+          >RSI</button>
           <div className="w-px h-4 bg-slate-700 mx-1" />
           {TIMEFRAMES.map((tf) => (
             <button
