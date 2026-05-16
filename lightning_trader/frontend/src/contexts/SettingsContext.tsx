@@ -43,7 +43,6 @@ export interface SplitOrderConfig {
  * 交易系統設定介面
  */
 export interface Settings {
-  orderMode: 'Qty' | 'Amount';
   isCombatMode: boolean;
   confirmations: {
     placeOrder: boolean;
@@ -102,7 +101,6 @@ export interface PriceAlert {
  * 預設設定值 (DAWHO 風格建議預設為 dark)
  */
 const DEFAULT_SETTINGS: Settings = {
-  orderMode: 'Qty',
   isCombatMode: false,
   confirmations: {
     placeOrder: true,
