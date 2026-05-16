@@ -1,6 +1,8 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { apiClient } from '../api/client';
 import type { SizingMode } from '../utils/sizing';
+import type { FeeConfig } from '../utils/fees';
+import { DEFAULT_FEE_CONFIG } from '../utils/fees';
 
 /** Sprint 28：智慧下單尺寸。
  *  mode 決定按下下單時最終口數的來源：
@@ -78,6 +80,10 @@ export interface Settings {
   priceAlerts: PriceAlert[];
   /** Sprint 28：智慧下單尺寸（金額 / % 權益 / 張數） */
   sizing: SizingSettings;
+  /** Sprint 29：交易成本模型 — 把毛 PnL 換算成扣費後實際入袋 */
+  fees: FeeConfig;
+  /** Sprint 29：PnL 是否以「淨額（扣費後）」顯示；false = 顯示毛額 */
+  showNetPnL: boolean;
 }
 
 /** 單一價格警報。symbol 是 canonical symbol。op above = 價格 >= price；below = <=。 */
@@ -140,6 +146,8 @@ const DEFAULT_SETTINGS: Settings = {
     hotkeyAmountUnit: 100_000,
     hotkeyEquityPctUnit: 5,
   },
+  fees: DEFAULT_FEE_CONFIG,
+  showNetPnL: false,
 };
 
 interface SettingsContextType {
@@ -175,6 +183,8 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           watchlist: Array.isArray(parsed.watchlist) ? parsed.watchlist : DEFAULT_SETTINGS.watchlist,
           priceAlerts: Array.isArray(parsed.priceAlerts) ? parsed.priceAlerts : DEFAULT_SETTINGS.priceAlerts,
           sizing: { ...DEFAULT_SETTINGS.sizing, ...(parsed.sizing || {}) },
+          fees: { ...DEFAULT_SETTINGS.fees, ...(parsed.fees || {}) },
+          showNetPnL: typeof parsed.showNetPnL === 'boolean' ? parsed.showNetPnL : DEFAULT_SETTINGS.showNetPnL,
         };
       } catch (e) {
         console.error("Failed to parse settings from localStorage", e);
@@ -199,6 +209,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           hotkeys: remote.hotkeys || prev.hotkeys,
           splitOrder: { ...prev.splitOrder, ...(remote.splitOrder || {}) },
           sizing: { ...prev.sizing, ...(remote.sizing || {}) },
+          fees: { ...prev.fees, ...(remote.fees || {}) },
         }));
       }
       hydratedFromServerRef.current = true;
@@ -234,6 +245,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (updates.visuals) next.visuals = { ...prev.visuals, ...updates.visuals };
       if (updates.splitOrder) next.splitOrder = { ...prev.splitOrder, ...updates.splitOrder };
       if (updates.sizing) next.sizing = { ...prev.sizing, ...updates.sizing };
+      if (updates.fees) next.fees = { ...prev.fees, ...updates.fees };
       return next;
     });
   };

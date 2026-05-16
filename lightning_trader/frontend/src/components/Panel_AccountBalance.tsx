@@ -1,6 +1,8 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { apiClient } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
+import { useSettings } from '../contexts/SettingsContext';
+import { netPnL as computeNetPnL } from '../utils/fees';
 
 interface BalanceData {
   equity: number;
@@ -10,7 +12,8 @@ interface BalanceData {
 }
 
 const Panel_AccountBalance: React.FC = () => {
-  const { isConnected, totalRealtimePnl, totalRealizedPnl } = useTradingContext();
+  const { isConnected, totalRealtimePnl, totalRealizedPnl, realtimePositions } = useTradingContext();
+  const { settings } = useSettings();
   const [balance, setBalance] = useState<BalanceData | null>(null);
   const [isLoading, setIsLoading] = useState(true);
 
@@ -44,8 +47,16 @@ const Panel_AccountBalance: React.FC = () => {
   const realizedPnl = totalRealizedPnl;
   // 未實現損益（前端即時計算）
   const unrealizedPnl = totalRealtimePnl;
-  // 當日合計
-  const totalDayPnl = realizedPnl + unrealizedPnl;
+  // Sprint 29：未實現淨額 — 逐持倉用現價估算立即平倉成本後加總
+  const showNet = settings.showNetPnL;
+  const unrealizedNet = showNet
+    ? (realtimePositions || []).reduce((sum, p) => {
+        if (!p.price || !p.currentPrice || !p.qty) return sum + (p.realtimePnl || 0);
+        return sum + computeNetPnL(p.realtimePnl || 0, p.symbol, Math.abs(p.qty), p.price, p.currentPrice, settings.fees);
+      }, 0)
+    : unrealizedPnl;
+  // 當日合計（未實現隨毛/淨切換；已實現仍為毛，fill 級淨額待後端 Sprint 30）
+  const totalDayPnl = realizedPnl + unrealizedNet;
 
   return (
     <div className="bg-slate-800/50 rounded-lg p-3 border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
@@ -59,10 +70,10 @@ const Panel_AccountBalance: React.FC = () => {
             {realizedPnl > 0 ? '+' : ''}{realizedPnl.toLocaleString()}
           </div>
         </div>
-        <div className={`rounded border px-2 py-1.5 text-center ${unrealizedPnl >= 0 ? 'border-red-800/40 bg-red-950/20' : 'border-emerald-800/40 bg-emerald-950/20'}`}>
-          <div className="text-[8px] text-slate-500 font-bold uppercase">未實現</div>
-          <div className={`text-[12px] font-mono font-black tabular-nums ${unrealizedPnl >= 0 ? 'text-red-400' : 'text-emerald-400'}`}>
-            {unrealizedPnl > 0 ? '+' : ''}{unrealizedPnl.toLocaleString()}
+        <div className={`rounded border px-2 py-1.5 text-center ${unrealizedNet >= 0 ? 'border-red-800/40 bg-red-950/20' : 'border-emerald-800/40 bg-emerald-950/20'}`}>
+          <div className="text-[8px] text-slate-500 font-bold uppercase">未實現{showNet ? '(淨)' : ''}</div>
+          <div className={`text-[12px] font-mono font-black tabular-nums ${unrealizedNet >= 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+            {unrealizedNet > 0 ? '+' : ''}{unrealizedNet.toLocaleString()}
           </div>
         </div>
         <div className={`rounded border px-2 py-1.5 text-center ${totalDayPnl >= 0 ? 'border-amber-600/40 bg-amber-950/20' : 'border-emerald-800/40 bg-emerald-950/20'}`}>

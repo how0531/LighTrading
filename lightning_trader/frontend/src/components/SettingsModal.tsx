@@ -323,6 +323,72 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                   <p className="text-[11px] text-slate-500 mb-3">切換到該商品時自動套用此預設口數；股票單位是「張」，期權單位是「口」。</p>
                   <QtyBySymbolEditor settings={settings} updateSetting={updateSetting} />
                 </section>
+                <section>
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">交易成本（手續費 + 稅）</h3>
+                  <p className="text-[11px] text-slate-500 mb-3">
+                    用於把「毛 PnL」換算成「扣費後實際入袋」。閃電下單面板點 PnL 標籤可切換毛/淨顯示。
+                  </p>
+                  <div className="mb-4">
+                    <ToggleItem
+                      label="預設顯示淨額 PnL"
+                      description="開啟後 PnL 數字以扣手續費 + 稅後呈現"
+                      enabled={settings.showNetPnL}
+                      onToggle={() => handleUpdate({ showNetPnL: !settings.showNetPnL })}
+                    />
+                    <div className="mt-3">
+                      <ToggleItem
+                        label="當沖（賣方證交稅減半）"
+                        description="台股當沖賣出證交稅 0.3% → 0.15%"
+                        enabled={settings.fees.stockDayTrade}
+                        onToggle={() => handleUpdate({ fees: { ...settings.fees, stockDayTrade: !settings.fees.stockDayTrade } })}
+                      />
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <NumInput
+                      label="股票手續費率 %"
+                      description="券商牌價，預設 0.1425"
+                      value={settings.fees.stockFeeRatePct}
+                      min={0} max={1}
+                      onChange={(v) => handleUpdate({ fees: { ...settings.fees, stockFeeRatePct: v } })}
+                    />
+                    <NumInput
+                      label="手續費折數 (0~1)"
+                      description="2.8 折填 0.28；無折扣填 1"
+                      value={settings.fees.stockFeeDiscount}
+                      min={0} max={1}
+                      onChange={(v) => handleUpdate({ fees: { ...settings.fees, stockFeeDiscount: Math.min(1, Math.max(0, v)) } })}
+                    />
+                    <NumInput
+                      label="股票證交稅率 %"
+                      description="現股賣出，預設 0.3"
+                      value={settings.fees.stockTaxRatePct}
+                      min={0} max={1}
+                      onChange={(v) => handleUpdate({ fees: { ...settings.fees, stockTaxRatePct: v } })}
+                    />
+                    <NumInput
+                      label="股票手續費低消 (NT$)"
+                      description="每筆最低手續費，預設 20"
+                      value={settings.fees.minStockFee}
+                      min={0} max={1000}
+                      onChange={(v) => handleUpdate({ fees: { ...settings.fees, minStockFee: v } })}
+                    />
+                    <NumInput
+                      label="期貨每口手續費 (NT$)"
+                      description="單邊單口，預設 40"
+                      value={settings.fees.futFeePerLot}
+                      min={0} max={1000}
+                      onChange={(v) => handleUpdate({ fees: { ...settings.fees, futFeePerLot: v } })}
+                    />
+                    <NumInput
+                      label="期交稅率 %"
+                      description="預設 0.002（= 十萬分之二）"
+                      value={settings.fees.futTaxRatePct}
+                      min={0} max={1}
+                      onChange={(v) => handleUpdate({ fees: { ...settings.fees, futTaxRatePct: v } })}
+                    />
+                  </div>
+                </section>
               </div>
             )}
 
