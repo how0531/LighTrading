@@ -5,6 +5,8 @@ import { apiClient, normalizeApiError } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
 import { splitOrders, randomDelay } from '../utils/splitOrder';
 import { symbolMatches } from '../utils/instrument';
+import { resolveLots } from '../utils/sizing';
+import { useAccountEquity } from './useAccountEquity';
 import type { WorkingOrder } from '../contexts/TradingContext';
 import { getMultiplier } from '../types';
 
@@ -22,7 +24,6 @@ export function useDOMLogic() {
   const [priceType, setPriceType] = useState('LMT');
   const [orderCond, setOrderCond] = useState('Cash');
   const [orderLot, setOrderLot] = useState('Common');
-  const [calcAmount, setCalcAmount] = useState<number | ''>('');
   const [isSyncing, setIsSyncing] = useState(false);
 
   // 設定
@@ -96,12 +97,29 @@ export function useDOMLogic() {
   }, [targetSymbol]);
 
   // Sprint 20：切換商品時若 settings.qtyBySymbol 有對應預設口數，自動套用
+  //   只在 sizing.mode === 'lots' 時生效，避免覆蓋金額 / % 模式即時換算的結果
   useEffect(() => {
+    if (settings.sizing.mode !== 'lots') return;
     const map = settings.qtyBySymbol;
     if (!targetSymbol || !map) return;
     const preset = map[targetSymbol.toUpperCase()];
     if (preset && preset > 0) setOrderValue(preset);
-  }, [targetSymbol, settings.qtyBySymbol]);
+  }, [targetSymbol, settings.qtyBySymbol, settings.sizing.mode]);
+
+  // Sprint 28：智慧 sizing — 金額 / % 權益模式下，依當前價自動重算 orderValue
+  const accountEquity = useAccountEquity();
+  useEffect(() => {
+    const sz = settings.sizing;
+    if (sz.mode === 'lots') return;
+    const price = currentPrice || refPrice;
+    if (!price || !targetSymbol) return;
+    const multiplier = getMultiplier(targetSymbol);
+    const value = sz.mode === 'amount' ? sz.amount : sz.equityPct;
+    const lots = resolveLots(sz.mode, value, { price, multiplier, equity: accountEquity });
+    if (lots > 0) {
+      setOrderValue((prev) => (prev === lots ? prev : lots));
+    }
+  }, [settings.sizing, currentPrice, refPrice, targetSymbol, accountEquity]);
 
   const isSimulation = accountSummary?.is_simulation ?? true;
 
@@ -169,16 +187,6 @@ export function useDOMLogic() {
       symbolMatches(targetSymbol, p.symbol)
     ) || null;
   }, [accountSummary.positions, targetSymbol]);
-
-  // --- 金額換算 ---
-  const handleAmountConvert = useCallback(() => {
-    const cp = currentPrice || refPrice;
-    if (cp > 0 && typeof calcAmount === 'number' && calcAmount > 0) {
-      const multiplier = getMultiplier(targetSymbol || '');
-      const lots = Math.floor(calcAmount / (cp * multiplier));
-      if (lots > 0) setOrderValue(lots);
-    }
-  }, [currentPrice, refPrice, calcAmount, targetSymbol]);
 
   // --- 下單邏輯 ---
   const handlePlaceOrder = useCallback(async (price: number, action: 'Buy' | 'Sell') => {
@@ -309,13 +317,13 @@ export function useDOMLogic() {
     qData, bData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice, isSimulation,
     isStale, tableRef, hasScrolled, flashDir,
     orderValue, setOrderValue, orderType, setOrderType, priceType, setPriceType,
-    orderCond, setOrderCond, orderLot, setOrderLot, calcAmount, setCalcAmount,
+    orderCond, setOrderCond, orderLot, setOrderLot,
     isSyncing, handleManualSync,
     workingBuyMap, workingSellMap, currentPosition,
     handlePlaceOrder, handleCancelOrder, handleAddStopOrder, handleDropOrder,
-    handleAmountConvert, // Added missing export
     orderFeedback, smartOrders,
     targetSymbol, accountSummary, accounts, activeAccount, selectAccount,
-    hotkeys
+    hotkeys,
+    accountEquity,
   };
 }

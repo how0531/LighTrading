@@ -256,21 +256,58 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
             {activeTab === 'transaction' && (
               <div className="space-y-6">
                 <section>
-                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">交易模式</h3>
-                  <div className="flex gap-2">
-                    {(['Qty', 'Amount'] as const).map((mode) => (
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">預設下單尺寸</h3>
+                  <p className="text-[11px] text-slate-500 mb-3">
+                    下單時要以「張/口」、「固定金額」或「總權益的 %」決定數量。金額 / % 模式會在每次報價變動時自動重算口數。
+                  </p>
+                  <div className="flex gap-2 mb-4">
+                    {([
+                      { id: 'lots',       label: '張數 / 口數' },
+                      { id: 'amount',     label: '固定金額' },
+                      { id: 'equity_pct', label: '% 權益' },
+                    ] as const).map((opt) => (
                       <button
-                        key={mode}
-                        onClick={() => handleUpdate({ orderMode: mode })}
+                        key={opt.id}
+                        onClick={() => handleUpdate({ sizing: { ...settings.sizing, mode: opt.id } })}
                         className={`px-4 py-2 rounded border text-sm transition-all ${
-                          settings.orderMode === mode
+                          settings.sizing.mode === opt.id
                             ? 'bg-[#D4AF37] border-[#D4AF37] text-[#101623] font-bold'
                             : 'border-[#29344A] text-slate-400 hover:border-slate-500'
                         }`}
                       >
-                        {mode === 'Qty' ? '張數 (Qty)' : '金額 (Amount)'}
+                        {opt.label}
                       </button>
                     ))}
+                  </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <NumInput
+                      label="預設金額 (NT$)"
+                      description="金額模式下的初始金額"
+                      value={settings.sizing.amount}
+                      min={0} max={100_000_000}
+                      onChange={(v) => handleUpdate({ sizing: { ...settings.sizing, amount: v } })}
+                    />
+                    <NumInput
+                      label="預設權益 %"
+                      description="% 權益模式下的初始百分比 (0-100)"
+                      value={settings.sizing.equityPct}
+                      min={0} max={100}
+                      onChange={(v) => handleUpdate({ sizing: { ...settings.sizing, equityPct: Math.min(100, Math.max(0, v)) } })}
+                    />
+                    <NumInput
+                      label="熱鍵 1-9 金額單位 (NT$)"
+                      description="金額模式下，按 N = N × 此單位（預設 10 萬 → 1=10萬、5=50萬）"
+                      value={settings.sizing.hotkeyAmountUnit}
+                      min={1} max={10_000_000}
+                      onChange={(v) => handleUpdate({ sizing: { ...settings.sizing, hotkeyAmountUnit: v } })}
+                    />
+                    <NumInput
+                      label="熱鍵 1-9 權益 % 單位"
+                      description="% 權益模式下，按 N = N × 此單位（預設 5 → 1=5%、4=20%）"
+                      value={settings.sizing.hotkeyEquityPctUnit}
+                      min={1} max={50}
+                      onChange={(v) => handleUpdate({ sizing: { ...settings.sizing, hotkeyEquityPctUnit: Math.min(50, Math.max(1, v)) } })}
+                    />
                   </div>
                 </section>
                 <section>

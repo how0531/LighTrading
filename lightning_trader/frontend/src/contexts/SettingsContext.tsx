@@ -1,5 +1,24 @@
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { apiClient } from '../api/client';
+import type { SizingMode } from '../utils/sizing';
+
+/** Sprint 28：智慧下單尺寸。
+ *  mode 決定按下下單時最終口數的來源：
+ *    - lots：傳統，直接以張/口（向後相容 orderValue UI）
+ *    - amount：固定金額，按當下價自動換算口數
+ *    - equity_pct：以總權益百分比下單，按當下價自動換算
+ *  presets 為快捷鈕；hotkeyMultiplier 是熱鍵 1-9 在該模式下的單位倍率
+ *  （amount=100000 = 1=10萬, 5=50萬；equity_pct=5 = 1=5%, 4=20%）。
+ */
+export interface SizingSettings {
+  mode: SizingMode;
+  amount: number;
+  equityPct: number;
+  amountPresets: number[];
+  equityPctPresets: number[];
+  hotkeyAmountUnit: number;
+  hotkeyEquityPctUnit: number;
+}
 
 // 快捷鍵行為定義
 export interface HotkeyItem {
@@ -57,6 +76,8 @@ export interface Settings {
   watchlist: string[];
   /** Sprint 26：本地價格穿越警報 — 在 quote stream 內偵測，純前端觸發 toast/notification */
   priceAlerts: PriceAlert[];
+  /** Sprint 28：智慧下單尺寸（金額 / % 權益 / 張數） */
+  sizing: SizingSettings;
 }
 
 /** 單一價格警報。symbol 是 canonical symbol。op above = 價格 >= price；below = <=。 */
@@ -110,6 +131,15 @@ const DEFAULT_SETTINGS: Settings = {
   },
   watchlist: ['TXFR1', 'MXFR1', '2330', '2454', '0050'],
   priceAlerts: [],
+  sizing: {
+    mode: 'lots',
+    amount: 100_000,
+    equityPct: 5,
+    amountPresets: [100_000, 200_000, 500_000, 1_000_000],
+    equityPctPresets: [5, 10, 20],
+    hotkeyAmountUnit: 100_000,
+    hotkeyEquityPctUnit: 5,
+  },
 };
 
 interface SettingsContextType {
@@ -144,6 +174,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           },
           watchlist: Array.isArray(parsed.watchlist) ? parsed.watchlist : DEFAULT_SETTINGS.watchlist,
           priceAlerts: Array.isArray(parsed.priceAlerts) ? parsed.priceAlerts : DEFAULT_SETTINGS.priceAlerts,
+          sizing: { ...DEFAULT_SETTINGS.sizing, ...(parsed.sizing || {}) },
         };
       } catch (e) {
         console.error("Failed to parse settings from localStorage", e);
@@ -167,6 +198,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           visuals: { ...prev.visuals, ...(remote.visuals || {}) },
           hotkeys: remote.hotkeys || prev.hotkeys,
           splitOrder: { ...prev.splitOrder, ...(remote.splitOrder || {}) },
+          sizing: { ...prev.sizing, ...(remote.sizing || {}) },
         }));
       }
       hydratedFromServerRef.current = true;
@@ -201,6 +233,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (updates.confirmations) next.confirmations = { ...prev.confirmations, ...updates.confirmations };
       if (updates.visuals) next.visuals = { ...prev.visuals, ...updates.visuals };
       if (updates.splitOrder) next.splitOrder = { ...prev.splitOrder, ...updates.splitOrder };
+      if (updates.sizing) next.sizing = { ...prev.sizing, ...updates.sizing };
       return next;
     });
   };

@@ -1,5 +1,9 @@
 import React from 'react';
 import { formatPrice } from '../../utils/instrument';
+import { useSettings } from '../../contexts/SettingsContext';
+import type { SizingMode } from '../../utils/sizing';
+import { lotsToAmount } from '../../utils/sizing';
+import { getMultiplier } from '../../types';
 
 interface DOMHeaderProps {
   qData: any;
@@ -23,23 +27,43 @@ interface DOMHeaderProps {
   setOrderCond: (v: string) => void;
   orderLot: string;
   setOrderLot: (v: string) => void;
-  calcAmount: number | '';
-  setCalcAmount: (v: number | '') => void;
-  handleAmountConvert: (amt: number | '') => void;
   orderValue: number;
   setOrderValue: (v: number) => void;
   scrollToCurrentPrice: () => void;
+  accountEquity: number;
 }
+
+function formatNT(n: number): string {
+  if (!Number.isFinite(n) || n <= 0) return '—';
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n % 1_000_000 === 0 ? 0 : 1)}M`;
+  if (n >= 10_000)    return `${Math.round(n / 10_000)}萬`;
+  return n.toLocaleString();
+}
+
+const MODE_LABEL: Record<SizingMode, string> = {
+  lots: '張/口',
+  amount: '金額',
+  equity_pct: '%權益',
+};
 
 export const DOMHeader: React.FC<DOMHeaderProps> = ({
   qData, targetSymbol, currentPrice, refPrice, limitUp, limitDown, isSimulation, fullPrices,
   accounts, activeAccount, selectAccount, currentPosition, realtimePnL,
   orderType, setOrderType, priceType, setPriceType,
   orderCond, setOrderCond, orderLot, setOrderLot,
-  calcAmount, setCalcAmount, handleAmountConvert,
-  orderValue, setOrderValue, scrollToCurrentPrice
+  orderValue, setOrderValue, scrollToCurrentPrice,
+  accountEquity,
 }) => {
   const netQty = currentPosition ? (currentPosition.direction === 'Buy' ? currentPosition.qty : -currentPosition.qty) : 0;
+  const { settings, updateSetting } = useSettings();
+  const sizing = settings.sizing;
+  const priceForSizing = currentPrice || refPrice;
+  const multiplier = getMultiplier(targetSymbol || '');
+  const resolvedAmount = orderValue > 0 && priceForSizing > 0
+    ? lotsToAmount(orderValue, { price: priceForSizing, multiplier, equity: 0 })
+    : 0;
+
+  const setSizingMode = (mode: SizingMode) => updateSetting({ sizing: { ...sizing, mode } });
 
   return (
     <div className="flex flex-col shrink-0 shadow-lg z-20 bg-[#1c2331]">
@@ -171,57 +195,122 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
           </>
         )}
 
-        {/* 金額換算 */}
+        {/* Sprint 28：Sizing — 三模式（張/口、金額、% 權益），mode 持久於 settings */}
         <div className="flex flex-col gap-1">
-          <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">Amount to QTY</span>
-          <div className="flex items-center gap-1.5">
-            <div className="flex items-center bg-[#101623] rounded border border-slate-700 overflow-hidden focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500">
-              <input
-                type="number"
-                placeholder="輸入金額..."
-                value={calcAmount}
-                onChange={(e) => setCalcAmount(e.target.value ? Number(e.target.value) : '')}
-                onKeyDown={(e) => e.key === 'Enter' && handleAmountConvert(calcAmount)}
-                className="w-20 sm:w-24 bg-transparent text-right text-slate-300 px-1 py-1 text-[11px] font-mono focus:outline-none placeholder:text-slate-600 [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-              />
-              <button onClick={() => handleAmountConvert(calcAmount)} className="bg-slate-800 hover:bg-slate-700 text-slate-400 hover:text-white px-2 py-1 text-[10px] font-bold border-l border-slate-700 transition-colors">
-                換算
-              </button>
-            </div>
-            <div className="flex gap-1">
-              {[10, 20, 50, 100].map(amt => (
+          <div className="flex items-center gap-2">
+            <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">Sizing</span>
+            <div className="flex bg-[#101623] rounded border border-slate-700 overflow-hidden">
+              {(['lots', 'amount', 'equity_pct'] as SizingMode[]).map((m) => (
                 <button
-                  key={`amt-${amt}`}
-                  onClick={() => { const val = amt * 10000; setCalcAmount(val); handleAmountConvert(val); }}
-                  className="px-1.5 py-1 bg-[#101623] hover:bg-slate-700 rounded text-[10px] font-bold text-slate-300 transition-colors border border-slate-700 hover:border-slate-500 cursor-pointer shadow-sm"
+                  key={m}
+                  onClick={() => setSizingMode(m)}
+                  className={`px-2 py-0.5 text-[10px] font-bold transition-colors ${
+                    sizing.mode === m
+                      ? 'bg-[#D4AF37] text-[#101623]'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
                 >
-                  {amt}W
+                  {MODE_LABEL[m]}
                 </button>
               ))}
             </div>
           </div>
-        </div>
 
-        {/* QTY 直播輸入 */}
-        <div className="flex flex-col gap-1 ml-1 md:ml-2">
-          <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">QTY</span>
           <div className="flex items-center gap-1.5">
-            <div className="flex items-center bg-[#101623] rounded border border-slate-700 p-[1px]">
-              <button onClick={() => setOrderValue(Math.max(1, orderValue - 1))} className="w-6 h-6 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors cursor-pointer text-sm font-black leading-none">-</button>
-              <input type="number" value={orderValue} onChange={(e) => setOrderValue(Math.max(1, Number(e.target.value)))} className="w-10 bg-transparent text-center text-[#D4AF37] text-[13px] font-black focus:outline-none tabular-nums [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
-              <button onClick={() => setOrderValue(orderValue + 1)} className="w-6 h-6 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors cursor-pointer text-sm font-black leading-none">+</button>
-            </div>
-            <div className="flex gap-1">
-              {[1, 2, 5, 10].map(qty => (
-                <button
-                  key={`qty-${qty}`}
-                  onClick={() => setOrderValue(qty)}
-                  className="px-2 py-1 bg-[#101623] hover:bg-slate-700 rounded text-[10px] font-bold text-[#D4AF37] opacity-80 hover:opacity-100 transition-all border border-slate-700 hover:border-[#D4AF37]/50 cursor-pointer shadow-sm"
-                >
-                  {qty}
-                </button>
-              ))}
-            </div>
+            {sizing.mode === 'lots' && (
+              <>
+                <div className="flex items-center bg-[#101623] rounded border border-slate-700 p-[1px]">
+                  <button onClick={() => setOrderValue(Math.max(1, orderValue - 1))} className="w-6 h-6 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors cursor-pointer text-sm font-black leading-none">-</button>
+                  <input type="number" value={orderValue} onChange={(e) => setOrderValue(Math.max(1, Number(e.target.value)))} className="w-10 bg-transparent text-center text-[#D4AF37] text-[13px] font-black focus:outline-none tabular-nums [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none" />
+                  <button onClick={() => setOrderValue(orderValue + 1)} className="w-6 h-6 text-slate-400 hover:text-white hover:bg-slate-700 rounded transition-colors cursor-pointer text-sm font-black leading-none">+</button>
+                </div>
+                <div className="flex gap-1">
+                  {[1, 2, 5, 10].map(qty => (
+                    <button
+                      key={`qty-${qty}`}
+                      onClick={() => setOrderValue(qty)}
+                      className="px-2 py-1 bg-[#101623] hover:bg-slate-700 rounded text-[10px] font-bold text-[#D4AF37] opacity-80 hover:opacity-100 transition-all border border-slate-700 hover:border-[#D4AF37]/50 cursor-pointer shadow-sm"
+                    >
+                      {qty}
+                    </button>
+                  ))}
+                </div>
+                {resolvedAmount > 0 && (
+                  <span className="text-[9px] text-slate-500 font-mono">≈ {formatNT(resolvedAmount)}</span>
+                )}
+              </>
+            )}
+
+            {sizing.mode === 'amount' && (
+              <>
+                <div className="flex items-center bg-[#101623] rounded border border-slate-700 overflow-hidden focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500">
+                  <span className="px-1.5 text-[10px] text-slate-500 font-bold">NT$</span>
+                  <input
+                    type="number"
+                    value={sizing.amount}
+                    onChange={(e) => updateSetting({ sizing: { ...sizing, amount: Math.max(0, Number(e.target.value) || 0) } })}
+                    className="w-24 bg-transparent text-right text-slate-200 px-1 py-1 text-[11px] font-mono focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                  />
+                </div>
+                <div className="flex gap-1">
+                  {sizing.amountPresets.map(amt => (
+                    <button
+                      key={`amt-${amt}`}
+                      onClick={() => updateSetting({ sizing: { ...sizing, amount: amt } })}
+                      className={`px-1.5 py-1 rounded text-[10px] font-bold transition-colors border cursor-pointer shadow-sm ${
+                        sizing.amount === amt
+                          ? 'bg-[#D4AF37]/20 text-[#D4AF37] border-[#D4AF37]/50'
+                          : 'bg-[#101623] hover:bg-slate-700 text-slate-300 border-slate-700 hover:border-slate-500'
+                      }`}
+                    >
+                      {formatNT(amt)}
+                    </button>
+                  ))}
+                </div>
+                <span className="text-[10px] font-mono font-bold tabular-nums px-1.5 py-1 rounded bg-[#D4AF37]/10 text-[#D4AF37] border border-[#D4AF37]/30">
+                  → {orderValue > 0 ? `${orderValue} ${multiplier === 1000 ? '張' : '口'}` : '—'}
+                </span>
+              </>
+            )}
+
+            {sizing.mode === 'equity_pct' && (
+              <>
+                <div className="flex items-center bg-[#101623] rounded border border-slate-700 overflow-hidden focus-within:border-slate-500 focus-within:ring-1 focus-within:ring-slate-500">
+                  <input
+                    type="number"
+                    value={sizing.equityPct}
+                    min={1}
+                    max={100}
+                    onChange={(e) => updateSetting({ sizing: { ...sizing, equityPct: Math.min(100, Math.max(0, Number(e.target.value) || 0)) } })}
+                    className="w-12 bg-transparent text-right text-slate-200 px-1 py-1 text-[11px] font-mono focus:outline-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
+                  />
+                  <span className="px-1.5 text-[10px] text-slate-500 font-bold">%</span>
+                </div>
+                <div className="flex gap-1">
+                  {sizing.equityPctPresets.map(pct => (
+                    <button
+                      key={`pct-${pct}`}
+                      onClick={() => updateSetting({ sizing: { ...sizing, equityPct: pct } })}
+                      className={`px-1.5 py-1 rounded text-[10px] font-bold transition-colors border cursor-pointer shadow-sm ${
+                        sizing.equityPct === pct
+                          ? 'bg-[#D4AF37]/20 text-[#D4AF37] border-[#D4AF37]/50'
+                          : 'bg-[#101623] hover:bg-slate-700 text-slate-300 border-slate-700 hover:border-slate-500'
+                      }`}
+                    >
+                      {pct}%
+                    </button>
+                  ))}
+                </div>
+                {accountEquity > 0 ? (
+                  <span className="text-[10px] font-mono font-bold tabular-nums px-1.5 py-1 rounded bg-[#D4AF37]/10 text-[#D4AF37] border border-[#D4AF37]/30">
+                    → {orderValue > 0 ? `${orderValue} ${multiplier === 1000 ? '張' : '口'}` : '—'}
+                    <span className="text-slate-500 font-normal ml-1">({formatNT(accountEquity * sizing.equityPct / 100)})</span>
+                  </span>
+                ) : (
+                  <span className="text-[9px] text-amber-400/80 italic">等待帳戶餘額…</span>
+                )}
+              </>
+            )}
           </div>
         </div>
       </div>
