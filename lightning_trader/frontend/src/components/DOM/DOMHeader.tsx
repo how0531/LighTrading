@@ -3,6 +3,7 @@ import { formatPrice } from '../../utils/instrument';
 import { useSettings } from '../../contexts/SettingsContext';
 import type { SizingMode } from '../../utils/sizing';
 import { lotsToAmount } from '../../utils/sizing';
+import { netPnL as computeNetPnL } from '../../utils/fees';
 import { getMultiplier } from '../../types';
 
 interface DOMHeaderProps {
@@ -65,6 +66,22 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
 
   const setSizingMode = (mode: SizingMode) => updateSetting({ sizing: { ...sizing, mode } });
 
+  // Sprint 29：淨 PnL — 把現價當立即平倉價估算來回成本
+  const cpForNet = currentPrice || refPrice;
+  const netRealtimePnL = currentPosition && cpForNet > 0
+    ? computeNetPnL(
+        realtimePnL,
+        currentPosition.symbol || targetSymbol,
+        Math.abs(netQty),
+        currentPosition.price,
+        cpForNet,
+        settings.fees,
+      )
+    : realtimePnL;
+  const showNet = settings.showNetPnL;
+  const primaryPnL = showNet ? netRealtimePnL : realtimePnL;
+  const secondaryPnL = showNet ? realtimePnL : netRealtimePnL;
+
   return (
     <div className="flex flex-col shrink-0 shadow-lg z-20 bg-[#1c2331]">
       {/* Row 1: Account, Position, PnL & Status */}
@@ -90,11 +107,17 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
             </span>
           </div>
 
-          <div className={`flex flex-col items-center justify-center px-3 py-1 rounded border gap-0.5 ${realtimePnL >= 0 ? 'bg-red-900/20 border-red-800/50' : 'bg-emerald-900/20 border-emerald-800/50'}`}>
+          <div className={`flex flex-col items-center justify-center px-3 py-1 rounded border gap-0.5 ${primaryPnL >= 0 ? 'bg-red-900/20 border-red-800/50' : 'bg-emerald-900/20 border-emerald-800/50'}`}>
             <div className="flex items-center gap-1.5 w-full justify-between">
-              <span className="text-[8px] opacity-70 uppercase font-bold leading-none">PnL</span>
+              <button
+                onClick={() => updateSetting({ showNetPnL: !showNet })}
+                className="text-[8px] opacity-70 hover:opacity-100 uppercase font-bold leading-none cursor-pointer transition-opacity"
+                title="點擊切換 毛 / 淨（扣手續費+稅後）"
+              >
+                {showNet ? '淨 PnL' : '毛 PnL'}
+              </button>
               {currentPosition && (currentPrice > 0 || refPrice > 0) && (
-                <span className={`text-[9px] font-mono font-bold leading-none tracking-tighter ${realtimePnL >= 0 ? 'text-red-500/80' : 'text-emerald-500/80'}`}>
+                <span className={`text-[9px] font-mono font-bold leading-none tracking-tighter ${primaryPnL >= 0 ? 'text-red-500/80' : 'text-emerald-500/80'}`}>
                   {(() => {
                     const cp = currentPrice || refPrice;
                     const pts = (cp - currentPosition.price) * (currentPosition.direction === 'Buy' ? 1 : -1);
@@ -103,9 +126,14 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
                 </span>
               )}
             </div>
-            <span key={realtimePnL} className={`inline-block pnl-animate text-sm font-mono font-black leading-none tabular-nums ${realtimePnL >= 0 ? 'text-red-400 drop-shadow-[0_0_5px_rgba(248,113,113,0.3)]' : 'text-emerald-400 drop-shadow-[0_0_5px_rgba(52,211,153,0.3)]'}`}>
-              {realtimePnL > 0 ? '+' : ''}{realtimePnL.toLocaleString()}
+            <span key={primaryPnL} className={`inline-block pnl-animate text-sm font-mono font-black leading-none tabular-nums ${primaryPnL >= 0 ? 'text-red-400 drop-shadow-[0_0_5px_rgba(248,113,113,0.3)]' : 'text-emerald-400 drop-shadow-[0_0_5px_rgba(52,211,153,0.3)]'}`}>
+              {primaryPnL > 0 ? '+' : ''}{primaryPnL.toLocaleString()}
             </span>
+            {currentPosition && netRealtimePnL !== realtimePnL && (
+              <span className="text-[9px] font-mono text-slate-500 leading-none tabular-nums">
+                {showNet ? '毛' : '淨'} {secondaryPnL > 0 ? '+' : ''}{secondaryPnL.toLocaleString()}
+              </span>
+            )}
           </div>
         </div>
 
