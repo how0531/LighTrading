@@ -96,8 +96,8 @@ export function useDOMLogic() {
     stickyDerivedRef.current = { currentPrice: 0, refPrice: 0, limitUp: 0, limitDown: 0, highPrice: 0, lowPrice: 0 };
   }, [targetSymbol]);
 
-  // Sprint 20：切換商品時若 settings.qtyBySymbol 有對應預設口數，自動套用
-  //   只在 sizing.mode === 'lots' 時生效，避免覆蓋金額 / % 模式即時換算的結果
+  // Sprint 20：切換商品時若 settings.qtyBySymbol 有對應預設口數，自動套用；
+  //   找不到就保持當前值。只在 sizing.mode === 'lots' 時生效。
   useEffect(() => {
     if (settings.sizing.mode !== 'lots') return;
     const map = settings.qtyBySymbol;
@@ -105,6 +105,20 @@ export function useDOMLogic() {
     const preset = map[targetSymbol.toUpperCase()];
     if (preset && preset > 0) setOrderValue(preset);
   }, [targetSymbol, settings.qtyBySymbol, settings.sizing.mode]);
+
+  // Sprint 32 QA fix：從 amount/% 模式「切回」lots 的瞬間，orderValue 會殘留
+  //   前一模式依價格換算出的張數（例：8 張），對 lots 使用者是非預期下單量。
+  //   只在 mode 真的由非 lots → lots 轉換時校正：有 per-symbol 預設就套用，否則回 1。
+  const prevSizingModeRef = useRef(settings.sizing.mode);
+  useEffect(() => {
+    const mode = settings.sizing.mode;
+    const prev = prevSizingModeRef.current;
+    prevSizingModeRef.current = mode;
+    if (mode === 'lots' && prev !== 'lots') {
+      const preset = settings.qtyBySymbol?.[(targetSymbol || '').toUpperCase()];
+      setOrderValue(preset && preset > 0 ? preset : 1);
+    }
+  }, [settings.sizing.mode, settings.qtyBySymbol, targetSymbol]);
 
   // Sprint 28：智慧 sizing — 金額 / % 權益模式下，依當前價自動重算 orderValue
   const accountEquity = useAccountEquity();
