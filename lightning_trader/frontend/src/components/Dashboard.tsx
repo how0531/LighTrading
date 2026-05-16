@@ -23,6 +23,8 @@ const StatsPanel            = lazy(() => import('./StatsPanel'));
 // Sprint 18：hotkey 速查表（非 lazy；很小、且 ? 觸發要永遠 mounted）
 import { HotkeyCheatSheet } from './HotkeyCheatSheet';
 import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
+import { useSettings } from '../contexts/SettingsContext';
+import { LAYOUT_PRESETS, type LayoutPresetId } from '../utils/layoutPresets';
 import { useElectronUpdater } from '../hooks/useElectronUpdater';
 import { useFillNotification } from '../hooks/useFillNotification';
 import { useRiskStatus } from '../hooks/useRiskStatus';
@@ -82,9 +84,14 @@ const LAYOUT_KEY = 'lighTrade_layout_v8';
 
 
 const DashboardContent: React.FC = () => {
+  const { settings, updateSetting } = useSettings();
+  const activePreset = settings.layoutPreset;
+  const presetDef = activePreset !== 'custom' ? LAYOUT_PRESETS[activePreset] : null;
+
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isLayoutLocked, setIsLayoutLocked] = useState(true);
-  const [isFocusMode, setIsFocusMode] = useState(true); // 預設為專注模式
+  // Sprint 31：focus 預設依 preset；custom 維持原本「預設專注模式」
+  const [isFocusMode, setIsFocusMode] = useState(presetDef ? presetDef.focusMode : true);
   // Sprint 11 R1：focus mode 內的 DOM / Chart tab 切換
   const [focusTab, setFocusTab] = useState<'dom' | 'chart'>('dom');
   const { accountSummary } = useTradingContext();
@@ -100,6 +107,8 @@ const DashboardContent: React.FC = () => {
   const tradingDisabled = riskStatus !== null && riskStatus.trading_enabled === false;
 
   const [layouts, setLayouts] = useState(() => {
+    // preset 模式：lg 用 preset，md/sm 沿用既有預設（行動端不差異化）
+    if (presetDef) return { ...defaultLayouts, lg: presetDef.lg };
     try {
       const saved = localStorage.getItem(LAYOUT_KEY);
       if (saved) return JSON.parse(saved);
@@ -109,9 +118,33 @@ const DashboardContent: React.FC = () => {
     return defaultLayouts;
   });
 
+  const applyPreset = (id: LayoutPresetId) => {
+    updateSetting({ layoutPreset: id });
+    if (id === 'custom') {
+      try {
+        const saved = localStorage.getItem(LAYOUT_KEY);
+        setLayouts(saved ? JSON.parse(saved) : defaultLayouts);
+      } catch {
+        setLayouts(defaultLayouts);
+      }
+      return;
+    }
+    const def = LAYOUT_PRESETS[id];
+    setLayouts({ ...defaultLayouts, lg: def.lg });
+    setIsFocusMode(def.focusMode);
+  };
+
   const handleLayoutChange = (_currentLayout: Array<{i: string; x: number; y: number; w: number; h: number}>, allLayouts: Record<string, Array<{i: string; x: number; y: number; w: number; h: number}>>) => {
     setLayouts(allLayouts);
-    localStorage.setItem(LAYOUT_KEY, JSON.stringify(allLayouts));
+    if (settings.layoutPreset === 'custom') {
+      // 自訂模式：維持原行為，任何版面變動都持久化
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify(allLayouts));
+    } else if (!isLayoutLocked) {
+      // preset 模式下「解鎖手動拖曳」→ 轉為自訂並持久化
+      localStorage.setItem(LAYOUT_KEY, JSON.stringify(allLayouts));
+      updateSetting({ layoutPreset: 'custom' });
+    }
+    // preset 模式 + 鎖定：純 responsive reflow，不覆蓋使用者既有自訂版面
   };
 
   return (
@@ -145,11 +178,13 @@ const DashboardContent: React.FC = () => {
         </div>
       )}
       <Header
-        onOpenSettings={() => setIsSettingsOpen(true)} 
+        onOpenSettings={() => setIsSettingsOpen(true)}
         isLayoutLocked={isLayoutLocked}
         onToggleLayoutLock={() => setIsLayoutLocked(!isLayoutLocked)}
         isFocusMode={isFocusMode}
         onToggleFocusMode={() => setIsFocusMode(!isFocusMode)}
+        layoutPreset={activePreset}
+        onSelectPreset={applyPreset}
       />
 
       {isFocusMode ? (

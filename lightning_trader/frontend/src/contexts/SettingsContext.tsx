@@ -84,6 +84,8 @@ export interface Settings {
   fees: FeeConfig;
   /** Sprint 29：PnL 是否以「淨額（扣費後）」顯示；false = 顯示毛額 */
   showNetPnL: boolean;
+  /** Sprint 31：版面 preset。custom = 沿用使用者拖曳儲存的版面（向後相容預設）。 */
+  layoutPreset: 'momentum' | 'daytrade' | 'swing' | 'custom';
 }
 
 /** 單一價格警報。symbol 是 canonical symbol。op above = 價格 >= price；below = <=。 */
@@ -148,6 +150,7 @@ const DEFAULT_SETTINGS: Settings = {
   },
   fees: DEFAULT_FEE_CONFIG,
   showNetPnL: false,
+  layoutPreset: 'custom',
 };
 
 interface SettingsContextType {
@@ -185,6 +188,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           sizing: { ...DEFAULT_SETTINGS.sizing, ...(parsed.sizing || {}) },
           fees: { ...DEFAULT_SETTINGS.fees, ...(parsed.fees || {}) },
           showNetPnL: typeof parsed.showNetPnL === 'boolean' ? parsed.showNetPnL : DEFAULT_SETTINGS.showNetPnL,
+          layoutPreset: parsed.layoutPreset || DEFAULT_SETTINGS.layoutPreset,
         };
       } catch (e) {
         console.error("Failed to parse settings from localStorage", e);
