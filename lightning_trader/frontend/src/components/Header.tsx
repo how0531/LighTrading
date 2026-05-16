@@ -3,6 +3,7 @@ import { useTradingContext } from '../contexts/TradingContext';
 import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw } from 'lucide-react';
 import { getAccountBalance } from '../api/client';
 import { SymbolPicker } from './SymbolPicker';
+import { PRESET_ORDER, presetLabel, LAYOUT_PRESETS, type LayoutPresetId } from '../utils/layoutPresets';
 
 const QUICK_SYMBOLS = ['TXFR1', 'MXFR1', '2330', '2454'] as const;
 
@@ -26,9 +27,11 @@ interface HeaderProps {
   onToggleLayoutLock?: () => void;
   isFocusMode?: boolean;
   onToggleFocusMode?: () => void;
+  layoutPreset?: LayoutPresetId;
+  onSelectPreset?: (id: LayoutPresetId) => void;
 }
 
-const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode }) => {
+const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode, layoutPreset = 'custom', onSelectPreset }) => {
   const { isConnected, isTickStale, targetSymbol, subscribe, totalRealtimePnl, forceReconnect } = useTradingContext();
   const [symInput, setSymInput] = React.useState(targetSymbol);
   const [balance, setBalance] = useState<BalanceState | null>(null);
@@ -181,7 +184,22 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
           </div>
         </form>
 
-        <button 
+        {/* Sprint 31：版面 preset 選擇 — 依交易風格一鍵切版 */}
+        <div className="hidden md:flex flex-col items-end mr-1">
+          <span className="text-[9px] text-slate-500 font-bold tracking-widest uppercase mb-0.5">版面</span>
+          <select
+            value={layoutPreset}
+            onChange={(e) => onSelectPreset?.(e.target.value as LayoutPresetId)}
+            title={layoutPreset !== 'custom' ? LAYOUT_PRESETS[layoutPreset as Exclude<LayoutPresetId, 'custom'>]?.desc : '使用者自訂拖曳版面'}
+            className="bg-slate-900 border border-slate-700 rounded text-[11px] font-bold py-1 px-1.5 text-[#D4AF37] outline-none cursor-pointer hover:border-[#D4AF37]/50 transition-colors"
+          >
+            {PRESET_ORDER.map((id) => (
+              <option key={id} value={id}>{presetLabel(id)}</option>
+            ))}
+          </select>
+        </div>
+
+        <button
           onClick={onToggleFocusMode}
           className={`p-2 rounded-lg transition-all border ${isFocusMode ? 'bg-[#D4AF37]/20 text-[#D4AF37] border-[#D4AF37] hover:bg-[#D4AF37]/30 shadow-[0_0_8px_rgba(212,175,55,0.4)]' : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-300'}`}
           title={isFocusMode ? "退出專注模式 (展開帳務)" : "專注模式 (隱藏帳務)"}
