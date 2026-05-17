@@ -87,6 +87,88 @@ def test_stats_aggregates_correctly(tmp_path):
     assert s["top_symbols"][0]["fills"] == 2
 
 
+def test_tag_notes_default_null_and_update(tmp_path):
+    tj = _fresh_module(tmp_path / "j.db")
+    tj.record_trade({"state": "deal", "ordno": "T1", "dealseq": 1, "code": "TXFR1",
+                      "action": "Buy", "price": 17000, "quantity": 1})
+    row = tj.fetch_fills(limit=1)[0]
+    # 新欄位預設為 None
+    assert row["tag"] is None
+    assert row["notes"] is None
+    fid = row["id"]
+    # 標 tag + notes
+    assert tj.update_fill_meta(fid, tag="突破追多", notes="照計畫進場，停損 16950") is True
+    updated = tj.fetch_fills(limit=1)[0]
+    assert updated["tag"] == "突破追多"
+    assert updated["notes"] == "照計畫進場，停損 16950"
+
+
+def test_update_fill_meta_partial_and_clear(tmp_path):
+    tj = _fresh_module(tmp_path / "j.db")
+    tj.record_trade({"state": "deal", "ordno": "T2", "dealseq": 1, "code": "MXFR1",
+                      "action": "Sell", "price": 17000, "quantity": 1})
+    fid = tj.fetch_fills(limit=1)[0]["id"]
+    tj.update_fill_meta(fid, tag="逆勢", notes="不該做")
+    # 只更新 notes，tag 不動（傳 None）
+    tj.update_fill_meta(fid, notes="復盤：違反紀律")
+    r = tj.fetch_fills(limit=1)[0]
+    assert r["tag"] == "逆勢"
+    assert r["notes"] == "復盤：違反紀律"
+    # 空字串 = 清空 tag
+    tj.update_fill_meta(fid, tag="")
+    assert tj.fetch_fills(limit=1)[0]["tag"] == ""
+
+
+def test_update_fill_meta_unknown_id_returns_false(tmp_path):
+    tj = _fresh_module(tmp_path / "j.db")
+    assert tj.update_fill_meta("no-such-id", tag="x") is False
+    assert tj.update_fill_meta("", tag="x") is False
+    # 沒帶任何欄位也回 False
+    tj.record_trade({"state": "deal", "ordno": "T3", "dealseq": 1, "code": "TXFR1",
+                      "action": "Buy", "price": 17000, "quantity": 1})
+    fid = tj.fetch_fills(limit=1)[0]["id"]
+    assert tj.update_fill_meta(fid) is False
+
+
+def test_stats_by_tag_aggregation(tmp_path):
+    tj = _fresh_module(tmp_path / "j.db")
+    for i, (code, tag) in enumerate([("TXFR1", "突破"), ("TXFR1", "突破"), ("MXFR1", "")]):
+        tj.record_trade({"state": "deal", "ordno": f"S{i}", "dealseq": 1, "code": code,
+                          "action": "Buy", "price": 17000, "quantity": 1})
+        fid = tj.fetch_fills(limit=1)[0]["id"]
+        if tag:
+            tj.update_fill_meta(fid, tag=tag)
+    s = tj.fetch_stats()
+    by_tag = {x["tag"]: x["fills"] for x in s["by_tag"]}
+    assert by_tag["突破"] == 2
+    assert by_tag["(未標記)"] == 1
+
+
+def test_migration_adds_columns_to_legacy_db(tmp_path):
+    """模擬舊 DB（無 tag/notes 欄），_connect 應自動補欄不報錯。"""
+    import sqlite3
+    db = tmp_path / "legacy.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("""
+        CREATE TABLE fills (
+            id TEXT PRIMARY KEY, ts INTEGER NOT NULL, symbol TEXT NOT NULL,
+            action TEXT NOT NULL, price REAL NOT NULL, qty INTEGER NOT NULL,
+            order_id TEXT, raw TEXT, created_at INTEGER NOT NULL
+        )
+    """)
+    conn.execute(
+        "INSERT INTO fills VALUES ('old1', 1715000000000, 'TXFR1', 'Buy', 17000, 1, 'O1', '', 1715000000000)"
+    )
+    conn.commit()
+    conn.close()
+    tj = _fresh_module(db)
+    row = tj.fetch_fills(limit=1)[0]
+    assert row["id"] == "old1"
+    assert row["tag"] is None and row["notes"] is None
+    assert tj.update_fill_meta("old1", tag="回測標的") is True
+    assert tj.fetch_fills(limit=1)[0]["tag"] == "回測標的"
+
+
 def test_import_fills_basic(tmp_path):
     tj = _fresh_module(tmp_path / "j.db")
     result = tj.import_fills([

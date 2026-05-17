@@ -67,9 +67,19 @@ def _connect() -> sqlite3.Connection:
     """)
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fills_ts ON fills(ts)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_fills_symbol ON fills(symbol)")
+    _ensure_columns(conn)
     _CONN = conn
     logger.info(f"📓 trade journal opened: {path}")
     return conn
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Sprint 32：對既有 DB 補上 tag / notes 欄（idempotent migration）。"""
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(fills)").fetchall()}
+    if "tag" not in cols:
+        conn.execute("ALTER TABLE fills ADD COLUMN tag TEXT")
+    if "notes" not in cols:
+        conn.execute("ALTER TABLE fills ADD COLUMN notes TEXT")
 
 
 def _extract_fill(trade_data: dict) -> Optional[dict]:
@@ -163,7 +173,7 @@ def fetch_fills(from_ts: Optional[int] = None, to_ts: Optional[int] = None,
         where.append("ts <= ?"); args.append(int(to_ts))
     if symbol:
         where.append("symbol = ?"); args.append(symbol.upper())
-    sql = "SELECT id, ts, symbol, action, price, qty, order_id FROM fills"
+    sql = "SELECT id, ts, symbol, action, price, qty, order_id, tag, notes FROM fills"
     if where:
         sql += " WHERE " + " AND ".join(where)
     sql += " ORDER BY ts DESC LIMIT ?"
@@ -172,11 +182,41 @@ def fetch_fills(from_ts: Optional[int] = None, to_ts: Optional[int] = None,
         with _DB_LOCK:
             conn = _connect()
             rows = conn.execute(sql, args).fetchall()
-        cols = ["id", "ts", "symbol", "action", "price", "qty", "order_id"]
+        cols = ["id", "ts", "symbol", "action", "price", "qty", "order_id", "tag", "notes"]
         return [dict(zip(cols, r)) for r in rows]
     except Exception as e:
         logger.error(f"trade_journal.fetch_fills 失敗: {e}")
         return []
+
+
+def update_fill_meta(fill_id: str, tag: Optional[str] = None,
+                     notes: Optional[str] = None) -> bool:
+    """
+    Sprint 32：替某筆成交標記策略 tag / 寫紀律檢討 notes。
+    tag/notes 任一為 None 代表「不更動該欄」；空字串代表「清空」。
+    回傳是否有更新到列（fill_id 不存在 → False）。
+    """
+    if not fill_id:
+        return False
+    sets: list[str] = []
+    args: list = []
+    if tag is not None:
+        sets.append("tag = ?"); args.append(str(tag)[:64])
+    if notes is not None:
+        sets.append("notes = ?"); args.append(str(notes)[:500])
+    if not sets:
+        return False
+    args.append(str(fill_id))
+    try:
+        with _DB_LOCK:
+            conn = _connect()
+            cur = conn.execute(
+                f"UPDATE fills SET {', '.join(sets)} WHERE id = ?", args
+            )
+        return cur.rowcount > 0
+    except Exception as e:
+        logger.error(f"trade_journal.update_fill_meta 失敗: {e}")
+        return False
 
 
 def import_fills(rows: list[dict]) -> dict:
@@ -253,6 +293,11 @@ def fetch_stats(from_ts: Optional[int] = None, to_ts: Optional[int] = None) -> d
                 "SELECT symbol, COUNT(*) AS n " + sql_base + " GROUP BY symbol ORDER BY n DESC LIMIT 5",
                 args,
             ).fetchall()
+            tags = conn.execute(
+                "SELECT COALESCE(NULLIF(tag, ''), '(未標記)') AS t, COUNT(*) AS n "
+                + sql_base + " GROUP BY t ORDER BY n DESC LIMIT 10",
+                args,
+            ).fetchall()
         return {
             "fills": int(count or 0),
             "first_ts": int(agg[0]) if agg[0] else None,
@@ -260,6 +305,7 @@ def fetch_stats(from_ts: Optional[int] = None, to_ts: Optional[int] = None) -> d
             "buy_lots": int(agg[2] or 0),
             "sell_lots": int(agg[3] or 0),
             "top_symbols": [{"symbol": s, "fills": n} for s, n in symbols],
+            "by_tag": [{"tag": t, "fills": n} for t, n in tags],
         }
     except Exception as e:
         logger.error(f"trade_journal.fetch_stats 失敗: {e}")

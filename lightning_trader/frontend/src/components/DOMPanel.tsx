@@ -3,7 +3,7 @@ import { useDOMLogic } from '../hooks/useDOMLogic';
 import { DOMHeader } from './DOM/DOMHeader';
 import { DOMTable } from './DOM/DOMTable';
 import { DOMFooter } from './DOM/DOMFooter';
-import { getTickSize } from '../utils/tickSize';
+import { getTickSize } from '../utils/instrument';
 import { apiClient, normalizeApiError } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
 import { useSettings } from '../contexts/SettingsContext';
