@@ -194,6 +194,42 @@ CI 會跨 macOS-13 (Intel) / Windows / Linux runner 各 build 一份，上傳到
 
 桌面版仍是「單一帳號的工具」——backend 是 Shioaji 單例設計，一台機器跑一個 process，對應一組永豐金憑證。憑證從 `.env` 或登入畫面輸入，不會寫進 binary。
 
+#### 首次開啟放行（未簽章說明）
+
+安裝包目前**未做程式碼簽章**（Apple Developer / Windows 簽章憑證屬商業憑證採購，非開發項目）。功能完全不受影響，但首次開啟時作業系統會跳安全警告，依下列步驟放行一次即可，之後正常雙擊開啟：
+
+**macOS（Gatekeeper）**
+
+```
+1. 雙擊 LighTrade.app → 出現「無法打開，因為無法驗證開發者」
+2. 在 Finder 對 LighTrade.app 按右鍵 →「打開」→ 再按一次「打開」
+   （或：系統設定 → 隱私權與安全性 → 捲到底「仍要打開」）
+3. 之後即可正常雙擊開啟，不會再跳
+```
+
+若仍被擋（macOS 較新版本），可在終端機執行一次：
+
+```bash
+xattr -dr com.apple.quarantine /Applications/LighTrade.app
+```
+
+**Windows（SmartScreen）**
+
+```
+1. 執行 LighTrade Setup x.x.x.exe → 跳「Windows 已保護您的電腦」
+2. 點「其他資訊」→「仍要執行」
+3. 安裝完成後正常使用，不會再跳
+```
+
+**Linux（AppImage）**
+
+```bash
+chmod +x LighTrade-x.x.x.AppImage
+./LighTrade-x.x.x.AppImage
+```
+
+> 這些警告只是因為安裝包沒有付費簽章憑證，**不代表程式有問題**。原始碼與建置流程皆公開於本 repo，可自行 build 驗證（見上方「本機打包成桌面 app」）。日後若採購簽章憑證，警告會自動消失，使用者無需重裝。
+
 ---
 
 ## 開發
