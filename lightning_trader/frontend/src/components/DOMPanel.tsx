@@ -9,6 +9,7 @@ import { useToast } from '../contexts/ToastContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { getMultiplier } from '../types';
 import type { SizingMode } from '../utils/sizing';
+import { nearestLadderPrice, resolveAnchorTarget, type DomAnchor } from '../utils/domAnchor';
 
 // 精確四捨五入避免浮點漂移
 const round2 = (n: number): number => Math.round(n * 100) / 100;
@@ -85,16 +86,26 @@ export const DOMPanel: React.FC = () => {
     return [...upper, ...lower];
   }, [priceBase, limitUp, limitDown, targetSymbol]);
 
-  // --- 自動捲動到當前價 ---
+  // --- 置中錨點（BACKLOG B9）：現價 vs 持倉成本價 ---
+  const [scrollAnchor, setScrollAnchor] = useState<DomAnchor>('price');
+
+  // 依錨點捲動到對應列。成本可能不在 tick 上 → 找最接近的 ladder 列。
+  // anchorOverride 讓 ScrollCenter 熱鍵/初始捲動維持「現價」行為不變。
+  const scrollToAnchor = React.useCallback((anchorOverride?: DomAnchor) => {
+    const anchor = anchorOverride ?? scrollAnchor;
+    const cost = currentPosition?.price ?? 0;
+    const target = resolveAnchorTarget(anchor, currentPrice, cost);
+    const ladderTarget = nearestLadderPrice(target, fullPrices);
+    if (ladderTarget == null) return;
+    const pKey = Math.round(ladderTarget * 100);
+    const row = document.querySelector(`[data-price="${pKey}"]`);
+    if (row) row.scrollIntoView({ block: 'center', behavior: 'smooth' });
+  }, [scrollAnchor, currentPrice, currentPosition, fullPrices]);
+
+  // 既有呼叫點（初始捲動 / ScrollCenter 熱鍵 / 自動跟隨）一律維持「現價」
   const scrollToCurrentPrice = React.useCallback(() => {
-    if (currentPrice > 0) {
-      const pKey = Math.round(currentPrice * 100);
-      const row = document.querySelector(`[data-price="${pKey}"]`);
-      if (row) {
-        row.scrollIntoView({ block: 'center', behavior: 'smooth' });
-      }
-    }
-  }, [currentPrice]);
+    scrollToAnchor('price');
+  }, [scrollToAnchor]);
 
   useEffect(() => {
     if (currentPrice > 0 && fullPrices.length > 0 && !hasScrolled.current) {
@@ -244,8 +255,10 @@ export const DOMPanel: React.FC = () => {
         currentPosition={currentPosition} realtimePnL={realtimePnL}
         orderType={orderType} setOrderType={setOrderType} priceType={priceType} setPriceType={setPriceType}
         orderCond={orderCond} setOrderCond={setOrderCond} orderLot={orderLot} setOrderLot={setOrderLot}
-        orderValue={orderValue} setOrderValue={setOrderValue} scrollToCurrentPrice={scrollToCurrentPrice}
+        orderValue={orderValue} setOrderValue={setOrderValue}
         accountEquity={accountEquity}
+        scrollAnchor={scrollAnchor} setScrollAnchor={setScrollAnchor}
+        onScrollToAnchor={() => scrollToAnchor()}
       />
       
       <div ref={tableRef} className="flex-1 overflow-auto bg-black/10 custom-scrollbar">

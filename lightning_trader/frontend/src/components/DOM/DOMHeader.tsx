@@ -30,8 +30,10 @@ interface DOMHeaderProps {
   setOrderLot: (v: string) => void;
   orderValue: number;
   setOrderValue: (v: number) => void;
-  scrollToCurrentPrice: () => void;
   accountEquity: number;
+  scrollAnchor: 'price' | 'cost';
+  setScrollAnchor: (a: 'price' | 'cost') => void;
+  onScrollToAnchor: () => void;
 }
 
 function formatNT(n: number): string {
@@ -52,8 +54,8 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
   accounts, activeAccount, selectAccount, currentPosition, realtimePnL,
   orderType, setOrderType, priceType, setPriceType,
   orderCond, setOrderCond, orderLot, setOrderLot,
-  orderValue, setOrderValue, scrollToCurrentPrice,
-  accountEquity,
+  orderValue, setOrderValue,
+  accountEquity, scrollAnchor, setScrollAnchor, onScrollToAnchor,
 }) => {
   const netQty = currentPosition ? (currentPosition.direction === 'Buy' ? currentPosition.qty : -currentPosition.qty) : 0;
   const { settings, updateSetting } = useSettings();
@@ -171,10 +173,36 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
               <div className="text-[9px] text-slate-500 font-mono">
                 {formatPrice(fullPrices[0], targetSymbol)}~{formatPrice(fullPrices[fullPrices.length - 1], targetSymbol)}
               </div>
+              {/* BACKLOG B9：置中錨點 — 現價 / 持倉成本 */}
+              <div className="flex items-center bg-[#101623] rounded border border-slate-700 overflow-hidden">
+                {([
+                  { id: 'price' as const, label: '現價' },
+                  { id: 'cost' as const, label: '成本' },
+                ]).map((opt) => {
+                  const costDisabled = opt.id === 'cost' && !(currentPosition && currentPosition.price > 0);
+                  return (
+                    <button
+                      key={opt.id}
+                      disabled={costDisabled}
+                      onClick={() => setScrollAnchor(opt.id)}
+                      title={costDisabled ? '無持倉，無成本價' : `置中錨點：${opt.label}`}
+                      className={`px-1.5 py-0.5 text-[10px] font-bold transition-colors ${
+                        scrollAnchor === opt.id
+                          ? 'bg-[#D4AF37] text-[#101623]'
+                          : costDisabled
+                            ? 'text-slate-700 cursor-not-allowed'
+                            : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                    >
+                      {opt.label}
+                    </button>
+                  );
+                })}
+              </div>
               <button
-                onClick={scrollToCurrentPrice}
+                onClick={onScrollToAnchor}
                 className="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 text-slate-300 text-[10px] rounded border border-slate-600 transition-colors shadow-sm focus:outline-none"
-                title="捲動至當前價格"
+                title={scrollAnchor === 'cost' ? '捲動至持倉成本價' : '捲動至當前價格'}
               >
                 置中
               </button>
