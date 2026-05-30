@@ -19,6 +19,9 @@ from .risk_manager import RiskManager, RiskConfig, CheckResult, CheckLevel
 from .hotkey_manager import HotkeyManager
 from .watchlist_manager import WatchlistManager
 from .sound_manager import SoundManager
+from .vwap_calculator import VWAPCalculator
+from .tape_recorder import TapeRecorder
+from .position_sizer import calc_qty as position_calc_qty, SizingResult
 
 __all__ = [
     # 核心
@@ -31,6 +34,8 @@ __all__ = [
     "RiskManager", "RiskConfig", "CheckResult", "CheckLevel",
     # 工具
     "HotkeyManager", "WatchlistManager", "SoundManager",
+    # 新增：盤感工具
+    "VWAPCalculator", "TapeRecorder", "position_calc_qty", "SizingResult",
     # 工廠
     "create_trading_engine",
 ]
@@ -71,8 +76,14 @@ class TradingEngine:
         # 8. 自選股管理
         self.watchlist_manager = WatchlistManager(self.event_bus)
 
-        # 9. 音效管理
+        # 9. 音效管理（event router；emit_fn 由 main.py 啟動後注入）
         self.sound_manager = SoundManager(self.event_bus)
+
+        # 10. VWAP 計算器（per-symbol，每日重置）
+        self.vwap_calculator = VWAPCalculator(self.event_bus)
+
+        # 11. 成交明細跑馬燈（T&S）
+        self.tape_recorder = TapeRecorder(self.event_bus)
 
         # 連接 Shioaji order callback → OrderManager
         self.client.signal_order_update.connect(

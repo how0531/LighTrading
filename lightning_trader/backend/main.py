@@ -53,6 +53,13 @@ async def lifespan(app):
     """FastAPI lifespan: 啟動/關閉背景任務"""
     shared.fastapi_loop = asyncio.get_running_loop()
 
+    # 注入 SoundManager 的 emit 通道：把音效事件丟進 quote queue，由 quote_broadcaster 廣播
+    def _push_sound(msg: dict) -> None:
+        if shared.fastapi_loop:
+            shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg)
+    if hasattr(shared.engine, "sound_manager"):
+        shared.engine.sound_manager.set_emit_fn(_push_sound)
+
     broadcast_task = asyncio.create_task(quote_broadcaster())
     pnl_task = asyncio.create_task(pnl_broadcaster())
 
@@ -100,6 +107,13 @@ async def lifespan(app):
                     rm.reset_daily()
                     rm.config.trading_enabled = True
                     logger.info("⏰ 每日 04:00 RiskManager 日虧損已重置")
+                # 順便清掉 VWAP 與 Tape，準備新的交易日
+                vw = getattr(shared.engine, "vwap_calculator", None)
+                if vw is not None:
+                    vw.reset_session()
+                tr = getattr(shared.engine, "tape_recorder", None)
+                if tr is not None:
+                    tr.clear()
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -160,12 +174,17 @@ app.add_middleware(
 
 # 掛載路由模組
 from backend.routers import orders, accounts, smart, user_settings, risk, health
+from backend.routers import sizing, vwap, tape, sound
 app.include_router(orders.router)
 app.include_router(accounts.router)
 app.include_router(smart.router)
 app.include_router(user_settings.router)
 app.include_router(risk.router)
 app.include_router(health.router)
+app.include_router(sizing.router)
+app.include_router(vwap.router)
+app.include_router(tape.router)
+app.include_router(sound.router)
 
 
 # ─── WebSocket（唯一留在 main 的端點）─────────────────────

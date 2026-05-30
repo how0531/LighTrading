@@ -229,6 +229,96 @@ class SmartOrderEngine:
         self.event_bus.on_smart_order_added.emit(order.to_dict())
         return bracket_id
 
+    def add_scale_out(self, symbol: str, action: str,
+                      targets: list,
+                      stop_loss: float,
+                      runner_trailing: float = 0.0) -> list:
+        """
+        紀律交易者的核心工具：將既有部位分批出場。
+
+        Args:
+            symbol:           商品代碼（持倉所在）
+            action:           出場方向；多單平倉時 action="Sell"，空單平倉時 action="Buy"
+            targets:          [{"price": 17050, "qty": 1}, {"price": 17080, "qty": 1}, ...]
+                              所有 targets 的 qty 加上 runner 不可超過實際持倉
+            stop_loss:        共用停損價（觸及任一價就把剩餘部位一起出場）
+            runner_trailing:  >0 時最後一筆掛移動停損當 runner（不指定就只有 targets）
+
+        Returns:
+            建立的所有 smart_order id 清單（依序：每個 target 一個 MIT + 1 個共用停損 + 可選 runner）
+
+        典型用法：「+5 出 1/3、+10 出 1/3、剩 1/3 抱 trailing」
+            engine.add_scale_out("TXFR1", "Sell",
+                targets=[{"price": entry+5, "qty": 1}, {"price": entry+10, "qty": 1}],
+                stop_loss=entry-5, runner_trailing=20)
+        """
+        symbol = symbol.strip().upper()
+        ids: list = []
+        # target 的觸發方向：賣出（多單平倉）→ 價漲到目標 → PRICE_GTE
+        target_cond = TriggerCondition.PRICE_GTE if action == "Sell" else TriggerCondition.PRICE_LTE
+        # 停損方向：賣出（多單平倉）→ 價跌到停損 → PRICE_LTE
+        stop_cond = TriggerCondition.PRICE_LTE if action == "Sell" else TriggerCondition.PRICE_GTE
+
+        total_target_qty = sum(int(t.get("qty", 0)) for t in targets)
+
+        for t in targets:
+            tid = self._next_id()
+            tp_order = SmartOrder(
+                id=tid,
+                symbol=symbol,
+                order_type=SmartOrderType.MIT,
+                action=action,
+                qty=int(t.get("qty", 0)),
+                trigger_condition=target_cond,
+                trigger_price=float(t.get("price", 0)),
+            )
+            self._smart_orders.append(tp_order)
+            self.event_bus.on_smart_order_added.emit(tp_order.to_dict())
+            ids.append(tid)
+
+        # 共用停損：qty = targets 總和（+ runner 若有）
+        runner_qty = max(0, int(targets[-1].get("runner_qty", 0))) if targets else 0
+        # 但更常見的設計是 runner_qty 由參數直接傳入；上面那行只是保守 default
+        stop_qty = total_target_qty + (1 if runner_trailing > 0 else 0)
+        sid = self._next_id()
+        sl_order = SmartOrder(
+            id=sid,
+            symbol=symbol,
+            order_type=SmartOrderType.MIT,
+            action=action,
+            qty=stop_qty,
+            trigger_condition=stop_cond,
+            trigger_price=stop_loss,
+        )
+        self._smart_orders.append(sl_order)
+        self.event_bus.on_smart_order_added.emit(sl_order.to_dict())
+        ids.append(sid)
+
+        # 可選 runner：trailing stop
+        if runner_trailing > 0:
+            rid = self._next_id()
+            r_cond = TriggerCondition.PRICE_LTE if action == "Sell" else TriggerCondition.PRICE_GTE
+            runner = SmartOrder(
+                id=rid,
+                symbol=symbol,
+                order_type=SmartOrderType.TRAILING_STOP,
+                action=action,
+                qty=1,
+                trigger_condition=r_cond,
+                trailing_offset=runner_trailing,
+            )
+            self._smart_orders.append(runner)
+            self.event_bus.on_smart_order_added.emit(runner.to_dict())
+            ids.append(rid)
+
+        logger.info(
+            f"[SmartOrder] Scale-out 已建立 {symbol}: "
+            f"{len(targets)} 個 target + stop({stop_loss}) + "
+            f"{'runner(trail=' + str(runner_trailing) + ')' if runner_trailing > 0 else 'no runner'} "
+            f"ids={ids}"
+        )
+        return ids
+
     # ──── 取消智慧單 ────
 
     def cancel(self, order_id: str) -> bool:

@@ -314,7 +314,24 @@ backend/routers/*           ☆☆☆☆☆  缺端對端 testclient 測試
 
 ---
 
-## 七、整體結論
+## 七、本次新增（trader 真實痛點）
+
+依「對 day trader 真的有用」的優先順序加入 6 項：
+
+| 項目 | 檔案 | 路徑 |
+|---|---|---|
+| OCO / Bracket router | `routers/smart.py` | `POST /api/add_oco`, `POST /api/add_bracket`（既有 engine 補上端點）|
+| **Scale-out 分批出場** | `core/smart_order_engine.py:add_scale_out` + `POST /api/add_scale_out` | targets + 共用 stop + 可選 trailing runner |
+| **Time & Sales 跑馬燈** | `core/tape_recorder.py` + `routers/tape.py` | per-symbol deque(500)，標記內/外盤 |
+| **VWAP 線** | `core/vwap_calculator.py` + `routers/vwap.py` | 每筆 tick 累加 P×V/V，每日 04:00 自動 reset |
+| **Risk-based 倉位計算** | `core/position_sizer.py` + `routers/sizing.py` | `POST /api/calc_qty {risk_amount, entry, stop}` → qty |
+| **Sound 事件路由** | `core/sound_manager.py` 重寫 + `routers/sound.py` | 修掉原 QSoundEffect NameError；後端只發 WS `{type:Sound,event}`，前端播 |
+
+砍掉清單（webhook/cloud sync/chart indicators/journal tags/hotkey cheatsheet）對應的程式碼**在主分支不存在**，都在 sprint-17/18/22/23/32 獨立分支未合併 → 不要 merge 它們即可。
+
+新增測試 34 個，全部測試 **65/65 passed**。
+
+## 八、整體結論
 
 專案結構乾淨、抽象到位、Chinese docstring 標示清楚，遠優於同類個人專案的常見「上千行 main.py」狀態。最大兩個問題集中在 **(a) async/sync 邊界處理不真實**（`run_in_qt_thread` 是 noop、Shioaji 同步呼叫實際阻塞 event loop）與 **(b) RiskManager WARNING 流程斷裂**（前端無法 confirm-and-resend）。建議先針對 P0 三項做 patch，其餘可隨 sprint 慢慢吸收。
 
