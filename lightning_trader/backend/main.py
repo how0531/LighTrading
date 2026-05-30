@@ -80,10 +80,16 @@ async def lifespan(app):
     login_task = asyncio.create_task(_auto_login())
 
     async def _daily_risk_reset():
-        """每日 04:00 重置 RiskManager 日虧損計數器（盤後）。"""
+        """每日 04:00（台北時間）重置 RiskManager 日虧損計數器（盤後）。
+        固定用 Asia/Taipei 避免 Docker container 預設 UTC 時觸發點偏移 8 小時。"""
         from datetime import datetime, timedelta
+        try:
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo("Asia/Taipei")
+        except Exception:
+            tz = None
         while True:
-            now = datetime.now()
+            now = datetime.now(tz) if tz else datetime.now()
             target = now.replace(hour=4, minute=0, second=0, microsecond=0)
             if target <= now:
                 target += timedelta(days=1)

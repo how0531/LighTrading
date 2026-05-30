@@ -80,12 +80,18 @@ async def _refresh_positions_if_stale() -> list:
 
 
 def _compute_pnl_payload() -> dict:
-    """從 _latest_prices + 快取持倉 → PnL payload"""
+    """從 _latest_prices + 快取持倉 → PnL payload。
+
+    當某商品拿不到最新價（尚未訂閱、watchdog 偵測到靜默斷線等）時退回
+    broker 的靜態 pnl，並在 position 上加 `pnl_stale=True`，前端據此呈現灰底，
+    使用者就不會把鎖死的數字當成即時 PnL。
+    """
     client = shared.shioaji_client
     latest_prices = getattr(client, "_latest_prices", {})
     rt_positions = []
     total_pnl = 0
     total_realized = 0
+    any_stale = False
     for pos in _pos_cache:
         symbol = pos.get("symbol", "")
         qty = pos.get("qty", 0) or pos.get("raw_qty", 0)
@@ -98,9 +104,12 @@ def _compute_pnl_payload() -> dict:
             sign = 1 if direction == "Buy" else -1
             pnl_per_unit = (cur_price - cost) * sign
             rt_pnl = round(pnl_per_unit * qty * multiplier)
+            stale = False
         else:
             pnl_per_unit = 0
             rt_pnl = pnl_from_broker
+            stale = True
+            any_stale = True
         total_pnl += rt_pnl
         total_realized += pos.get("pnl_realized", 0)
         rt_positions.append({
@@ -108,11 +117,13 @@ def _compute_pnl_payload() -> dict:
             "realtimePnl": rt_pnl,
             "pnlPerUnit": pnl_per_unit,
             "currentPrice": cur_price,
+            "pnl_stale": stale,
         })
     return {
         "positions": rt_positions,
         "total_pnl": total_pnl,
         "total_realized": total_realized,
+        "any_stale": any_stale,
     }
 
 

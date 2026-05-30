@@ -5,7 +5,9 @@ shared.py — 後端共用狀態與工具
 避免循環引用和全域變數散落在 main.py 中。
 """
 import asyncio
+import itertools
 import logging
+import threading
 from datetime import datetime
 import time
 from fastapi import WebSocket
@@ -30,22 +32,19 @@ quotes_to_broadcast: asyncio.Queue = asyncio.Queue()
 
 # ─── 訂單序號（分流） ──────────────────────────────────────
 # 分成兩條獨立流：
-#   - callback_seq：Shioaji order_callback 推送的 OrderUpdate
-#   - snapshot_seq：REST API 主動回傳的快照（place_order / cancel_all / order_history）
+#   - callback_seq：Shioaji order_callback 推送的 OrderUpdate（broker thread）
+#   - snapshot_seq：REST API 主動回傳的快照（FastAPI thread）
 # 兩條序號流互不干擾，前端各自比較自己的 ref，避免交錯導致的丟更新。
+# 用 itertools.count + next() 取得 thread-safe（CPython 內建保證原子性）。
 _base = int(time.time() * 1000)
-_callback_seq = _base
-_snapshot_seq = _base
+_callback_counter = itertools.count(_base + 1)
+_snapshot_counter = itertools.count(_base + 1)
 
 def generate_callback_seq() -> int:
-    global _callback_seq
-    _callback_seq += 1
-    return _callback_seq
+    return next(_callback_counter)
 
 def generate_snapshot_seq() -> int:
-    global _snapshot_seq
-    _snapshot_seq += 1
-    return _snapshot_seq
+    return next(_snapshot_counter)
 
 # 向後相容：保留舊名，預設指到 snapshot_seq
 def generate_order_seq() -> int:
@@ -63,10 +62,14 @@ def format_datetime(dt) -> str:
 
 async def run_in_qt_thread(func, *args, **kwargs):
     """
-    將函數丟到 Qt 執行緒環境執行。
-    目前 uvicorn 預設單 worker 模式下可直接同步呼叫。
+    將同步的 Shioaji API 呼叫丟到 default executor 執行，
+    避免阻塞 FastAPI/uvicorn 的 asyncio event loop。
+
+    歷史名稱保留為 *_qt_thread* 以維持呼叫端相容性（早期版本走 QThread）。
+    現在實際上是 `asyncio.to_thread`：用 ThreadPoolExecutor 跑 Shioaji 的同步 API，
+    讓 quote_broadcaster / pnl_broadcaster 等其他 task 在同時段不會被卡住。
     """
-    return func(*args, **kwargs)
+    return await asyncio.to_thread(func, *args, **kwargs)
 
 
 async def broadcast_ws(msg_dict: dict):

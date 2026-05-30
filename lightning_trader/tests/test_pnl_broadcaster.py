@@ -77,3 +77,28 @@ def test_multi_symbol_aggregation():
     # TXFR1 多: +50 * 1 * 200 = +10000
     # MXFR1 空(跌變漲): -50 * 2 * 50 = -5000
     assert payload["total_pnl"] == 5000
+
+
+# ── stale 旗標 ──
+
+def test_pnl_stale_flag_set_when_price_missing():
+    """拿不到最新價時應標記 pnl_stale=True，避免前端把鎖死值當即時 PnL"""
+    _setup_client({})
+    pb._pos_cache = [{
+        "symbol": "TXFR1", "qty": 1, "direction": "Buy",
+        "price": 17000.0, "pnl": 3500,
+    }]
+    payload = pb._compute_pnl_payload()
+    assert payload["positions"][0]["pnl_stale"] is True
+    assert payload["any_stale"] is True
+
+
+def test_pnl_stale_flag_false_when_price_available():
+    _setup_client({"TXFR1": 17050.0})
+    pb._pos_cache = [{
+        "symbol": "TXFR1", "qty": 1, "direction": "Buy",
+        "price": 17000.0, "pnl": 0,
+    }]
+    payload = pb._compute_pnl_payload()
+    assert payload["positions"][0]["pnl_stale"] is False
+    assert payload["any_stale"] is False

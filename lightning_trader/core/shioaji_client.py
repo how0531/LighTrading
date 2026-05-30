@@ -51,6 +51,11 @@ class ShioajiClient:
         self.last_message_time = time.time()
         self._start_reconnect_timer()
 
+    @property
+    def is_connected(self) -> bool:
+        """對外暴露的連線狀態判斷，避免外部直接讀 `_is_connected` 私有屬性。"""
+        return bool(self._is_connected)
+
     def _start_reconnect_timer(self):
         # 巡檢間隔縮短到 5 秒（搭配 15s watchdog），最壞 20s 內偵測到靜默斷線
         self._reconnect_timer = threading.Timer(5.0, self._on_reconnect_timer_tick)

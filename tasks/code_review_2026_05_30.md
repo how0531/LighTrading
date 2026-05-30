@@ -282,20 +282,39 @@ backend/routers/*           ☆☆☆☆☆  缺端對端 testclient 測試
 
 ## 五、建議的修補優先順序
 
-| 優先 | 項目 | 預估工時 |
+| 優先 | 項目 | 狀態 |
 |---|---|---|
-| P0 | C2 `confirm_warning` flag — 否則 WARNING 流程根本不能用 | 1h |
-| P0 | C1 `run_in_qt_thread` 改 `asyncio.to_thread` — 直接受益於延遲 SLA | 1h |
-| P0 | C4 商品類型判斷改用 contract 元資料 | 1h |
-| P1 | C3 RiskManager 加 Lock | 2h |
-| P1 | M4 simulation 切換重 wire callbacks | 1h |
-| P1 | M6 移除重複 list_positions | 30m |
-| P2 | C5 / C7 / C6 / M1 / M3 / S1 | 半天 |
-| P3 | S6 multiplier、M7 ws subscription、S7 補測試 | 1-2 天 |
+| P0 | C2 `confirm_warning` flag — 否則 WARNING 流程根本不能用 | ✅ 已修補 |
+| P0 | C1 `run_in_qt_thread` 改 `asyncio.to_thread` — 直接受益於延遲 SLA | ✅ 已修補 |
+| P0 | C4 商品類型判斷改用 contract 元資料 | ✅ 已修補 |
+| P1 | C3 RiskManager 加 Lock | ✅ 已修補 |
+| P1 | M4 simulation 切換重 wire callbacks | ✅ 已修補（login 成功後重 wire） |
+| P1 | M6 移除重複 list_positions | ✅ 已修補（改讀 RiskManager 內部狀態） |
+| P2 | C5 序號改 itertools.count thread-safe | ✅ 已修補 |
+| P2 | C6 回傳型別宣告改 `-> dict` | ✅ 已修補 |
+| P2 | C7 移除棄用 fallback、`asyncio.get_event_loop` | ✅ 已修補 |
+| P2 | M1 PnL stale 旗標 | ✅ 已修補 |
+| P2 | M3 risk_breach 邊緣觸發 | ✅ 已修補（`_breach_emitted`） |
+| P2 | S1 `is_connected` property | ✅ 已修補 |
+| P2 | S4 PlaceOrderRequest symbol max_length 16 | ✅ 已修補 |
+| P2 | S9 daily reset 用 Asia/Taipei | ✅ 已修補 |
+| P3 | S6 multiplier 動態取自 contract、M7 ws subscription、S7 補測試 | 未做（建議下個 sprint） |
+
+## 六、新增測試
+
+- `test_risk_manager.py`：新增 4 個測試
+  - `test_allow_warnings_passes_market_order`
+  - `test_allow_warnings_does_not_bypass_block`
+  - `test_allow_warnings_passes_reverse`
+  - `test_breach_emitted_only_once`
+- `test_shared_seq.py`：新增 `test_seq_thread_safe_under_concurrent_writes`（8 threads × 500 次 = 4000 唯一序號）
+- `test_pnl_broadcaster.py`：新增 `test_pnl_stale_flag_set_when_price_missing`、`test_pnl_stale_flag_false_when_price_available`
+
+完整測試：**31/31 passed**（基線 24 + 新增 7）。
 
 ---
 
-## 六、整體結論
+## 七、整體結論
 
 專案結構乾淨、抽象到位、Chinese docstring 標示清楚，遠優於同類個人專案的常見「上千行 main.py」狀態。最大兩個問題集中在 **(a) async/sync 邊界處理不真實**（`run_in_qt_thread` 是 noop、Shioaji 同步呼叫實際阻塞 event loop）與 **(b) RiskManager WARNING 流程斷裂**（前端無法 confirm-and-resend）。建議先針對 P0 三項做 patch，其餘可隨 sprint 慢慢吸收。
 

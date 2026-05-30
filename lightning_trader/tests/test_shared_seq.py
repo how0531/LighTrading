@@ -37,3 +37,23 @@ def test_generate_order_seq_back_compat():
     before = shared.generate_snapshot_seq()
     after = shared.generate_order_seq()
     assert after > before
+
+
+def test_seq_thread_safe_under_concurrent_writes():
+    """N threads * M iter 各自抽 seq 應全部 unique（itertools.count 在 CPython 為原子）"""
+    import threading
+    seen = set()
+    lock = threading.Lock()
+
+    def worker():
+        local = [shared.generate_callback_seq() for _ in range(500)]
+        with lock:
+            seen.update(local)
+
+    threads = [threading.Thread(target=worker) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    # 8 threads * 500 = 4000 個值，全 unique 表示無 race
+    assert len(seen) == 4000

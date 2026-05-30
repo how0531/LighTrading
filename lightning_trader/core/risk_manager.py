@@ -9,6 +9,7 @@ RiskManager — 統一的風控與防呆引擎
 設計原則: Single source of truth — 所有下單前的驗證都通過這一個入口。
 """
 import logging
+import threading
 import time
 from enum import Enum
 from typing import Tuple, Optional, Dict
@@ -109,6 +110,13 @@ class RiskManager:
         self._current_positions: Dict[str, int] = {}  # symbol -> net_qty
         self._current_prices: Dict[str, float] = {}
 
+        # broker callback thread 與 FastAPI thread 都會讀寫上述四個 collection，
+        # 用一把 RLock 保護所有 mutation。granularity 粗但簡單可靠。
+        self._lock = threading.RLock()
+
+        # _periodic_check 觸發 BLOCK 後不再重複 emit；reset_daily 會清空
+        self._breach_emitted: bool = False
+
         # 監聽 EventBus
         self.event_bus.on_tick.connect(self._on_tick)
         self.event_bus.on_fill.connect(self._on_fill)
@@ -124,28 +132,39 @@ class RiskManager:
     def _on_tick(self, symbol: str, tick_data: dict):
         price = tick_data.get("Price", 0)
         if price > 0:
-            self._current_prices[symbol] = price
+            with self._lock:
+                self._current_prices[symbol] = price
 
     def _on_fill(self, fill_data: dict):
-        self._order_timestamps.append(time.time())
+        with self._lock:
+            self._order_timestamps.append(time.time())
 
     def _on_position_update(self, pos_data: dict):
-        self._daily_unrealized_pnl = pos_data.get("total_unrealized_pnl", 0)
-        for p in pos_data.get("positions", []):
-            self._current_positions[p["symbol"]] = p["net_qty"]
-            
-        # 順便觸發日虧損檢查
+        with self._lock:
+            self._daily_unrealized_pnl = pos_data.get("total_unrealized_pnl", 0)
+            for p in pos_data.get("positions", []):
+                self._current_positions[p["symbol"]] = p["net_qty"]
+
+        # 順便觸發日虧損檢查（內部會自行取 lock）
         self._periodic_check()
 
     def _periodic_check(self):
-        """定期風控巡檢 — 日虧損觸發時自動停止交易"""
+        """定期風控巡檢 — 日虧損觸發時自動停止交易。
+        用 `_breach_emitted` 邊緣觸發，避免帳務廣播高頻時連續 emit。"""
         if not self.config.max_daily_loss_enabled:
             return
-        total = self._daily_realized_pnl + self._daily_unrealized_pnl
-        if total <= self.config.max_daily_loss and self.config.trading_enabled:
-            self.config.trading_enabled = False
-            msg = (f"日虧損 {total:,.0f} 已觸及上限 "
-                   f"{self.config.max_daily_loss:,.0f}，交易已自動停止")
+        msg = None
+        with self._lock:
+            total = self._daily_realized_pnl + self._daily_unrealized_pnl
+            if (total <= self.config.max_daily_loss
+                    and self.config.trading_enabled
+                    and not self._breach_emitted):
+                self.config.trading_enabled = False
+                self._breach_emitted = True
+                msg = (f"日虧損 {total:,.0f} 已觸及上限 "
+                       f"{self.config.max_daily_loss:,.0f}，交易已自動停止")
+        # emit 在 lock 外避免 listener 反向取 lock 死鎖
+        if msg is not None:
             self.event_bus.on_risk_breach.emit("block", msg)
             logger.warning(f"[RiskManager] {msg}")
 
@@ -160,6 +179,7 @@ class RiskManager:
         is_market_order: bool = False,
         position_qty: int = 0,
         position_direction: str = "Flat",
+        allow_warnings: bool = False,
     ) -> CheckResult:
         """
         下單前完整檢查（唯一入口）
@@ -172,11 +192,19 @@ class RiskManager:
             is_market_order: 是否為市價單
             position_qty: 目前該商品持倉數量
             position_direction: 目前持倉方向 "Buy"|"Sell"|"Flat"
+            allow_warnings: 前端已彈確認框、使用者已 confirm；此次 WARNING 不再攔截，
+                            但 BLOCK 級檢查仍然會擋。
 
         Returns:
             CheckResult (level, reason)
         """
         symbol = symbol.strip().upper()
+
+        def _wrap(r: CheckResult) -> CheckResult:
+            """若使用者已 confirm，將 WARNING 通過為 OK；BLOCK 不受影響"""
+            if allow_warnings and r.level == CheckLevel.WARNING:
+                return CheckResult.ok()
+            return r
 
         # === 0. 基本參數驗證 ===
         if qty <= 0:
@@ -188,46 +216,49 @@ class RiskManager:
         if not self.config.trading_enabled:
             return CheckResult.block("交易已被風控停止，請確認日虧損狀況")
 
-        # === 2. 日虧損上限 ===
-        r = self._check_daily_loss()
-        if not r.passed:
-            return r
+        with self._lock:
+            # === 2. 日虧損上限 ===
+            r = self._check_daily_loss()
+            if not r.passed:
+                return r
 
-        # === 3. 部位上限 ===
-        r = self._check_max_position(symbol, action, qty, position_qty, position_direction)
-        if not r.passed:
-            return r
+            # === 3. 部位上限 ===
+            r = self._check_max_position(symbol, action, qty, position_qty, position_direction)
+            if not r.passed:
+                return r
 
-        # === 4. 下單頻率 ===
-        r = self._check_order_rate()
-        if not r.passed:
-            return r
+            # === 4. 下單頻率 ===
+            r = self._check_order_rate()
+            if not r.passed:
+                return r
 
-        # === 5. 重複下單 ===
-        r = self._check_duplicate(symbol, action, price, qty)
-        if not r.passed:
-            return r
+            # === 5. 重複下單 ===
+            r = self._check_duplicate(symbol, action, price, qty)
+            if not r.passed:
+                return r
 
-        # === 6. 價格偏離 (warning) ===
-        current_price = self._current_prices.get(symbol, 0)
-        r = self._check_price_deviation(price, current_price, is_market_order)
-        if not r.passed:
-            return r
+            # === 6. 價格偏離 (warning) ===
+            current_price = self._current_prices.get(symbol, 0)
+            r = _wrap(self._check_price_deviation(price, current_price, is_market_order))
+            if not r.passed:
+                return r
 
-        # === 7. 市價單確認 (warning) ===
-        if self.config.market_order_confirm and (is_market_order or price == 0):
-            return CheckResult.warn(
-                f"確認送出市價{'買進' if action == 'Buy' else '賣出'} "
-                f"{symbol} {qty}口？"
-            )
+            # === 7. 市價單確認 (warning) ===
+            if self.config.market_order_confirm and (is_market_order or price == 0):
+                r = _wrap(CheckResult.warn(
+                    f"確認送出市價{'買進' if action == 'Buy' else '賣出'} "
+                    f"{symbol} {qty}口？"
+                ))
+                if not r.passed:
+                    return r
 
-        # === 8. 反向加碼確認 (warning) ===
-        r = self._check_reverse(action, position_direction)
-        if not r.passed:
-            return r
+            # === 8. 反向加碼確認 (warning) ===
+            r = _wrap(self._check_reverse(action, position_direction))
+            if not r.passed:
+                return r
 
-        # 全通過 → 記錄委託供重複偵測
-        self._record_order(symbol, action, price, qty)
+            # 全通過 → 記錄委託供重複偵測
+            self._record_order(symbol, action, price, qty)
         return CheckResult.ok()
 
     # ──── 各項檢查實作 ────
@@ -337,11 +368,13 @@ class RiskManager:
                 logger.info(f"[RiskManager] 設定更新: {key} = {value}")
 
     def reset_daily(self):
-        self._daily_realized_pnl = 0.0
-        self._daily_unrealized_pnl = 0.0
-        self._order_timestamps.clear()
-        self._recent_orders.clear()
-        self.config.trading_enabled = True
+        with self._lock:
+            self._daily_realized_pnl = 0.0
+            self._daily_unrealized_pnl = 0.0
+            self._order_timestamps.clear()
+            self._recent_orders.clear()
+            self.config.trading_enabled = True
+            self._breach_emitted = False
         logger.info("[RiskManager] 日內狀態已重設")
 
     def get_status(self) -> dict:

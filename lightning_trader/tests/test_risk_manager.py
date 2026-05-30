@@ -117,3 +117,59 @@ def test_reset_daily_clears_counters():
     rm.reset_daily()
     assert rm._daily_realized_pnl == 0
     assert rm._daily_unrealized_pnl == 0
+
+
+# ── allow_warnings：使用者已 confirm 時 WARNING 應通過 ──
+
+def test_allow_warnings_passes_market_order():
+    rm = _rm(market_order_confirm=True)
+    # 預設行為：BLOCK 或 WARNING
+    r1 = rm.pre_order_check("TXFR1", "Buy", qty=1, price=0, is_market_order=True)
+    assert r1.level == CheckLevel.WARNING
+    # 帶 allow_warnings=True 應通過
+    r2 = rm.pre_order_check("TXFR1", "Buy", qty=1, price=0,
+                             is_market_order=True, allow_warnings=True)
+    assert r2.level == CheckLevel.OK
+
+
+def test_allow_warnings_does_not_bypass_block():
+    """確認 allow_warnings 不會把 BLOCK 也放行（部位上限超過必須擋）"""
+    rm = _rm(max_position_per_symbol=5, max_position_enabled=True)
+    r = rm.pre_order_check("TXFR1", "Buy", qty=10, price=17000,
+                           position_qty=0, position_direction="Flat",
+                           allow_warnings=True)
+    assert r.level == CheckLevel.BLOCK
+
+
+def test_allow_warnings_passes_reverse():
+    rm = _rm(reverse_confirm=True, market_order_confirm=False)
+    r1 = rm.pre_order_check("TXFR1", "Sell", qty=1, price=17000,
+                             position_qty=2, position_direction="Buy")
+    assert r1.level == CheckLevel.WARNING
+    r2 = rm.pre_order_check("TXFR1", "Sell", qty=1, price=17000,
+                             position_qty=2, position_direction="Buy",
+                             allow_warnings=True)
+    assert r2.level == CheckLevel.OK
+
+
+# ── 邊緣觸發：日虧損 BLOCK 不該瘋狂 emit ──
+
+def test_breach_emitted_only_once():
+    bus = _bus()
+    rm = RiskManager(bus, RiskConfig(max_daily_loss=-1000, max_daily_loss_enabled=True))
+    breach_calls = []
+    bus.on_risk_breach.connect(lambda lvl, msg: breach_calls.append((lvl, msg)))
+
+    # 模擬連續多筆 position_update 觸及日虧損
+    for _ in range(5):
+        rm._on_position_update({"total_unrealized_pnl": -10000, "positions": []})
+
+    # 邊緣觸發：只 emit 一次
+    assert len(breach_calls) == 1
+    assert breach_calls[0][0] == "block"
+    assert rm.config.trading_enabled is False
+
+    # reset 後可再觸發
+    rm.reset_daily()
+    rm._on_position_update({"total_unrealized_pnl": -10000, "positions": []})
+    assert len(breach_calls) == 2

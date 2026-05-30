@@ -86,6 +86,10 @@ async def login(req: LoginRequest, request: Request):
         })
 
     if success:
+        # ★ 切換 simulation 模式時 ShioajiClient 會重建 self.api 與 Signal，
+        #   舊的 bridge 連接會失效，必須重 wire。
+        from backend.bridge import wire_callbacks
+        wire_callbacks()
         from backend.services.pnl_broadcaster import subscribe_position_contracts
         asyncio.create_task(subscribe_position_contracts())
         return {"status": "success", "message": "登入成功"}

@@ -14,6 +14,7 @@ bridge.py — Shioaji 回呼橋接層
 import asyncio
 import logging
 from backend import shared
+from backend.services import pnl_broadcaster as pb
 
 logger = logging.getLogger(__name__)
 
@@ -83,16 +84,12 @@ def on_shioaji_quote(quote_data: dict):
                 except Exception as e:
                     logger.error(f"EventBus emit on_tick error: {e}")
 
+        # lifespan 啟動後 shared.fastapi_loop 保證已設定；若為 None 表示
+        # broker callback 比 server 還早觸發，這時直接丟掉即可（前端尚未連線）。
+        if shared.fastapi_loop is None:
+            return
         for quote_item in items_to_send:
-            if shared.fastapi_loop:
-                shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, quote_item)
-            else:
-                try:
-                    loop = asyncio.get_event_loop()
-                    if loop.is_running():
-                        loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, quote_item)
-                except:
-                    pass
+            shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, quote_item)
 
     except Exception as e:
         logger.error(f"處理 Shioaji 報價並放入佇列時發生錯誤: {e}")
@@ -131,30 +128,25 @@ def on_shioaji_trade_update(trade_data: dict):
             shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg_item)
 
         # ★ 通知 pnl_broadcaster：成交 → 持倉變動 → 作廢快取
-        try:
-            from backend.services import pnl_broadcaster as pb
-            pb.on_fill_event(trade_data)
-        except Exception:
-            pass
+        pb.on_fill_event(trade_data)
 
         # ★ 新成交可能產生新部位 → 自動補訂閱該商品報價
-        try:
-            from backend.services.pnl_broadcaster import subscribe_position_contracts
-            if shared.fastapi_loop:
-                asyncio.run_coroutine_threadsafe(subscribe_position_contracts(), shared.fastapi_loop)
-        except Exception:
-            pass
+        if shared.fastapi_loop:
+            fut = asyncio.run_coroutine_threadsafe(pb.subscribe_position_contracts(), shared.fastapi_loop)
+            # fire-and-forget，但保留 log handler 以免 silent failure
+            def _report(f):
+                try:
+                    f.result()
+                except Exception as e:
+                    logger.warning(f"自動補訂閱新成交商品失敗: {e}")
+            fut.add_done_callback(_report)
     except Exception as e:
         logger.error(f"廣播交易回報時發生錯誤: {e}")
 
 
 def on_shioaji_tick_for_pnl(symbol: str, tick_data: dict):
     """EventBus.on_tick → 通知 pnl_broadcaster 喚醒重算"""
-    try:
-        from backend.services import pnl_broadcaster as pb
-        pb.on_tick_event(symbol, tick_data)
-    except Exception:
-        pass
+    pb.on_tick_event(symbol, tick_data)
 
 
 def on_smart_order_update(order_data: dict):

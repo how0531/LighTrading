@@ -26,7 +26,7 @@ from typing import Optional
 
 
 class PlaceOrderRequest(BaseModel):
-    symbol: str = Field(min_length=2, max_length=12)
+    symbol: str = Field(min_length=2, max_length=16)   # 選擇權代碼可達 13 碼
     price: float = Field(ge=0)            # 0 = 市價
     action: str                            # "Buy" 或 "Sell"
     qty: int = Field(gt=0, le=10000)
@@ -34,6 +34,9 @@ class PlaceOrderRequest(BaseModel):
     price_type: str = "LMT"
     order_cond: str = "Cash"
     order_lot: str = "Common"
+    # 使用者已於前端確認 WARNING 級風控訊息（如市價單、反向加碼、價格偏離），
+    # 帶此旗標時 RiskManager 仍會做 BLOCK 級檢查，但 WARNING 不再攔截。
+    confirm_warning: bool = False
 
 class CancelAllRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=12)
@@ -52,7 +55,18 @@ class SymbolRequest(BaseModel):
 
 # ─── 內部工具 ──────────────────────────────────────────────
 
-async def _get_working_orders_snapshot() -> list:
+def _is_stock_contract(contract) -> bool:
+    """
+    依 Shioaji contract 元資料判斷是否為股票（含 ETF / 權證）。
+    比 `len(symbol)==4 and isdigit()` 啟發式可靠：
+    - Stocks.get(symbol) 回傳 contract → 走 StockPriceType
+    - Futures/Options 物件 → 走 FuturesPriceType
+    """
+    cls = type(contract).__name__
+    return "Stock" in cls
+
+
+async def _get_working_orders_snapshot() -> dict:
     """
     從 Shioaji 取得已確認的活躍委託快照。
     呼叫 update_status() 強制同步最新狀態後再查詢。
@@ -87,7 +101,12 @@ async def _get_working_orders_snapshot() -> list:
 
 @router.post("/place_order")
 async def place_order(req: PlaceOrderRequest, request: Request):
-    """下單前先過 rate limit + RiskManager；通過後送出，並回傳已確認的活躍委託快照"""
+    """下單前先過 rate limit + RiskManager；通過後送出，並回傳已確認的活躍委託快照。
+
+    WARNING 流程：RiskManager 回 WARNING 時若 `confirm_warning=False` 會回 422，
+    前端跳確認框後帶 `confirm_warning=true` 重送，這次 WARNING 不再攔截，
+    但 BLOCK 級檢查（日虧損、部位上限、頻率、重複）仍會擋。
+    """
     check_rate_limit(request)
     action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
 
@@ -103,25 +122,31 @@ async def place_order(req: PlaceOrderRequest, request: Request):
     order_lot_map = {"Common": StockOrderLot.Common, "Odd": StockOrderLot.Odd, "IntradayOdd": StockOrderLot.IntradayOdd, "Fixing": StockOrderLot.Fixing}
     order_lot_val = order_lot_map.get(req.order_lot, StockOrderLot.Common)
 
-    # 判斷商品類型以決定 PriceType
-    is_stock = len(req.symbol) == 4 and req.symbol.isdigit()
-    if is_stock:
-        price_type_val = stock_price_type_map.get(req.price_type.upper(), StockPriceType.LMT)
-    else:
-        price_type_val = futures_price_type_map.get(req.price_type.upper(), FuturesPriceType.LMT)
+    # 用 contract 元資料判斷 stock/futures，避免長度啟發式對 ETF(5 碼) / 權證(6 碼) 誤判
+    contract = await shared.run_in_qt_thread(shared.shioaji_client.get_contract, req.symbol)
+    if contract is None:
+        raise HTTPException(status_code=404, detail={
+            "code": "SYMBOL_NOT_FOUND",
+            "user_msg": f"找不到商品 {req.symbol}，請確認代碼或先登入",
+        })
+    is_stock = _is_stock_contract(contract)
+    price_type_val = (stock_price_type_map if is_stock else futures_price_type_map).get(
+        req.price_type.upper(),
+        StockPriceType.LMT if is_stock else FuturesPriceType.LMT,
+    )
 
     # ★ Risk Manager 前置檢查
     risk_manager = getattr(shared.engine, "risk_manager", None)
     if risk_manager is not None:
         is_market = req.price_type.upper() in {"MKT", "MKP"}
-        # 取得目前持倉狀態（給部位上限檢查）
-        try:
-            positions = await shared.run_in_qt_thread(shared.shioaji_client.list_positions)
-            pos = next((p for p in positions if p.get("symbol", "").upper() == req.symbol.upper()), None)
-        except Exception:
-            pos = None
-        pos_qty = (pos.get("qty", 0) if pos else 0)
-        pos_dir = (pos.get("direction", "Flat") if pos else "Flat")
+        # RiskManager._current_positions 由 on_position_update 維護，直接讀無需再打 list_positions
+        net = risk_manager._current_positions.get(req.symbol.strip().upper(), 0)
+        if net > 0:
+            pos_qty, pos_dir = net, "Buy"
+        elif net < 0:
+            pos_qty, pos_dir = -net, "Sell"
+        else:
+            pos_qty, pos_dir = 0, "Flat"
         result = risk_manager.pre_order_check(
             symbol=req.symbol,
             action=req.action,
@@ -130,9 +155,9 @@ async def place_order(req: PlaceOrderRequest, request: Request):
             is_market_order=is_market,
             position_qty=pos_qty,
             position_direction=pos_dir,
+            allow_warnings=req.confirm_warning,
         )
         if not result.passed:
-            # BLOCK 直接 422；WARNING 也回 422 + warning flag，前端應彈確認框後重送 (帶 confirm=true)
             raise HTTPException(status_code=422, detail={
                 "code": "RISK_BLOCK" if result.level.value == "block" else "RISK_WARNING",
                 "user_msg": result.reason,
