@@ -77,3 +77,85 @@ export const getAccounts = async () => {
   const response = await apiClient.get('/accounts');
   return response.data;
 };
+
+// ─── Trader 進階工具 ──────────────────────────────────────
+
+export interface CalcQtyRequest {
+  symbol: string;
+  risk_amount: number;
+  entry_price: number;
+  stop_price: number;
+  max_qty?: number;
+}
+
+export interface CalcQtyResult {
+  qty: number;
+  actual_risk: number;
+  risk_per_qty: number;
+  distance: number;
+  multiplier: number;
+  warnings: string[];
+}
+
+export const calcQty = async (req: CalcQtyRequest): Promise<CalcQtyResult> => {
+  const r = await apiClient.post('/calc_qty', req);
+  return r.data;
+};
+
+export interface VWAPSnapshot {
+  symbol: string;
+  vwap: number | null;
+  total_volume: number;
+  tick_count: number;
+}
+
+export const getVWAP = async (symbol: string): Promise<VWAPSnapshot> => {
+  const r = await apiClient.get(`/vwap/${encodeURIComponent(symbol)}`);
+  return r.data;
+};
+
+export interface TapeRow {
+  time: string;
+  price: number;
+  volume: number;
+  tick_type: number; // 1=外盤 2=內盤
+}
+
+export const getTape = async (symbol: string, limit = 100): Promise<{ rows: TapeRow[] }> => {
+  const r = await apiClient.get(`/tape/${encodeURIComponent(symbol)}`, { params: { limit } });
+  return r.data;
+};
+
+export const addOCO = async (p: {
+  symbol: string; action: 'Buy' | 'Sell'; qty: number;
+  take_profit: number; stop_loss: number;
+}) => (await apiClient.post('/add_oco', p)).data;
+
+export const addBracket = async (p: {
+  symbol: string; action: 'Buy' | 'Sell'; qty: number;
+  entry_price: number; take_profit: number; stop_loss: number;
+}) => (await apiClient.post('/add_bracket', p)).data;
+
+export const addScaleOut = async (p: {
+  symbol: string; action: 'Buy' | 'Sell';
+  targets: { price: number; qty: number }[];
+  stop_loss: number; runner_trailing?: number;
+}) => (await apiClient.post('/add_scale_out', p)).data;
+
+// ─── 音效設定 ───────────────────────────────────────────
+
+export interface SoundStatus {
+  muted: boolean;
+  volume: number;
+  available_sounds: string[];
+  unmutable_sounds: string[];
+}
+
+export const getSoundStatus = async (): Promise<SoundStatus> =>
+  (await apiClient.get('/sound/status')).data;
+
+export const setSoundConfig = async (p: { muted?: boolean; volume?: number }) =>
+  (await apiClient.put('/sound/config', p)).data;
+
+export const testSound = async (event: string) =>
+  (await apiClient.post('/sound/test', { event })).data;

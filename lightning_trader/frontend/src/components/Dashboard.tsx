@@ -5,6 +5,10 @@ import Panel_Positions from './Panel_Positions';
 import Panel_OrderHistory from './Panel_OrderHistory';
 import Panel_AccountBalance from './Panel_AccountBalance';
 import Panel_TradeHistory from './Panel_TradeHistory';
+import Panel_TimeAndSales from './Panel_TimeAndSales';
+import Panel_VWAP from './Panel_VWAP';
+import SizingCalculator from './SizingCalculator';
+import SmartOrderForm from './SmartOrderForm';
 import SettingsModal from './SettingsModal';
 import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
 import { Responsive, WidthProvider } from 'react-grid-layout';
@@ -13,31 +17,44 @@ import 'react-resizable/css/styles.css';
 
 const ResponsiveGridLayout = WidthProvider(Responsive);
 
+// Layout 版本提升至 v3：新增 tns / vwap / size / smart 四個 panel
 const defaultLayouts = {
   lg: [
-    { i: 'dom', x: 0, y: 0, w: 7, h: 22 },
-    { i: 'bal', x: 7, y: 0, w: 5, h: 8 },
-    { i: 'pos', x: 7, y: 8, w: 5, h: 8 },
-    { i: 'hist', x: 7, y: 16, w: 3, h: 8 },
-    { i: 'trade', x: 10, y: 16, w: 2, h: 8 },
+    { i: 'dom', x: 0, y: 0, w: 5, h: 22 },
+    { i: 'tns', x: 5, y: 0, w: 2, h: 14 },
+    { i: 'vwap', x: 5, y: 14, w: 2, h: 8 },
+    { i: 'bal', x: 7, y: 0, w: 5, h: 6 },
+    { i: 'pos', x: 7, y: 6, w: 5, h: 8 },
+    { i: 'size', x: 7, y: 14, w: 2, h: 8 },
+    { i: 'smart', x: 9, y: 14, w: 3, h: 8 },
+    { i: 'hist', x: 7, y: 22, w: 3, h: 6 },
+    { i: 'trade', x: 10, y: 22, w: 2, h: 6 },
   ],
   md: [
-    { i: 'dom', x: 0, y: 0, w: 6, h: 22 },
-    { i: 'bal', x: 6, y: 0, w: 4, h: 8 },
-    { i: 'pos', x: 6, y: 8, w: 4, h: 8 },
-    { i: 'hist', x: 6, y: 16, w: 2, h: 8 },
-    { i: 'trade', x: 8, y: 16, w: 2, h: 8 },
+    { i: 'dom', x: 0, y: 0, w: 4, h: 22 },
+    { i: 'tns', x: 4, y: 0, w: 2, h: 14 },
+    { i: 'vwap', x: 4, y: 14, w: 2, h: 8 },
+    { i: 'bal', x: 6, y: 0, w: 4, h: 6 },
+    { i: 'pos', x: 6, y: 6, w: 4, h: 8 },
+    { i: 'size', x: 6, y: 14, w: 2, h: 8 },
+    { i: 'smart', x: 8, y: 14, w: 2, h: 8 },
+    { i: 'hist', x: 6, y: 22, w: 2, h: 6 },
+    { i: 'trade', x: 8, y: 22, w: 2, h: 6 },
   ],
   sm: [
     { i: 'dom', x: 0, y: 0, w: 6, h: 20 },
-    { i: 'bal', x: 0, y: 20, w: 6, h: 7 },
-    { i: 'pos', x: 0, y: 27, w: 6, h: 8 },
-    { i: 'hist', x: 0, y: 35, w: 3, h: 8 },
-    { i: 'trade', x: 3, y: 35, w: 3, h: 8 },
+    { i: 'tns', x: 0, y: 20, w: 3, h: 10 },
+    { i: 'vwap', x: 3, y: 20, w: 3, h: 6 },
+    { i: 'bal', x: 0, y: 30, w: 6, h: 6 },
+    { i: 'pos', x: 0, y: 36, w: 6, h: 8 },
+    { i: 'size', x: 0, y: 44, w: 3, h: 10 },
+    { i: 'smart', x: 3, y: 44, w: 3, h: 10 },
+    { i: 'hist', x: 0, y: 54, w: 3, h: 8 },
+    { i: 'trade', x: 3, y: 54, w: 3, h: 8 },
   ]
 };
 
-const LAYOUT_KEY = 'lighTrade_layout_v2';
+const LAYOUT_KEY = 'lighTrade_layout_v3';
 
 
 
@@ -123,6 +140,26 @@ const DashboardContent: React.FC = () => {
             <div key="trade" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
               {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
               <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_TradeHistory /></div>
+            </div>
+
+            <div key="tns" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_TimeAndSales /></div>
+            </div>
+
+            <div key="vwap" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_VWAP /></div>
+            </div>
+
+            <div key="size" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><SizingCalculator /></div>
+            </div>
+
+            <div key="smart" className={`flex flex-col overflow-hidden rounded-lg ${!isLayoutLocked ? 'ring-1 ring-slate-500 bg-slate-800/20' : ''}`}>
+              {!isLayoutLocked && <div className="drag-handle bg-slate-700/80 hover:bg-slate-700 text-center py-1 text-xs text-slate-300 cursor-move tracking-widest uppercase font-bold transition-colors">DRAG</div>}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><SmartOrderForm /></div>
             </div>
           </ResponsiveGridLayout>
         </div>

@@ -2,6 +2,7 @@ import React, { createContext, useContext, useState, useEffect, useRef, useCallb
 import type { QuoteData, BidAskData } from '../types';
 import { apiClient } from '../api/client';
 import { computeLocalPnL } from '../utils/pnl';
+import { useSoundContext } from './SoundContext';
 
 interface AccountPosition {
   symbol: string; qty: number; direction: 'Buy' | 'Sell'; price: number; pnl: number; account?: string; raw_qty?: number;
@@ -50,6 +51,17 @@ interface TradingContextType {
   // 智慧單
   smartOrders: SmartOrderData[];
   refreshSmartOrders: (symbol?: string) => Promise<void>;
+  // VWAP 與成交明細（盤感工具）
+  vwap: number | null;
+  vwapVolume: number;
+  tape: TapeRow[];
+}
+
+export interface TapeRow {
+  time: string;
+  price: number;
+  volume: number;
+  tick_type: number; // 1=外盤 2=內盤
 }
 
 const TradingContext = createContext<TradingContextType | null>(null);
@@ -86,6 +98,20 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [totalRealizedPnl, setTotalRealizedPnl] = useState(0);
   // 智慧單狀態
   const [smartOrders, setSmartOrders] = useState<SmartOrderData[]>([]);
+
+  // ── VWAP（per-symbol running 平均；每筆 tick 累加在 ref，100ms 節流寫進 state）──
+  const [vwap, setVwap] = useState<number | null>(null);
+  const [vwapVolume, setVwapVolume] = useState<number>(0);
+  const vwapAccRef = useRef<{ sumPv: number; sumV: number; symbol: string }>({ sumPv: 0, sumV: 0, symbol: '' });
+
+  // ── 成交明細跑馬燈（per-symbol；切換商品時清空，從 WS Tick 累積）──
+  const [tape, setTape] = useState<TapeRow[]>([]);
+  const tapeRef = useRef<TapeRow[]>([]);
+  const tapeDirtyRef = useRef(false);
+  const TAPE_MAXLEN = 200;
+
+  // ── Sound：接 WS Sound 事件 → 委由 SoundContext 播放 ──
+  const sound = useSoundContext();
 
   const refreshSmartOrders = useCallback(async (symbol?: string) => {
     try {
@@ -184,6 +210,11 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (!isSwitchingAccountRef.current && summary.active_stock) {
           setActiveAccount(summary.active_stock);
         }
+      }
+      // 把累積的 tape 一次刷進 state
+      if (tapeDirtyRef.current) {
+        tapeDirtyRef.current = false;
+        setTape([...tapeRef.current]);
       }
     }, 100);
     return () => clearInterval(timer);
@@ -287,6 +318,36 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (data.type === 'Tick' && data.data && isMatch(data.data)) {
           lastTickTimeRef.current = Date.now();
           mergeQuote(data.data as Partial<QuoteData>);
+
+          // 同步維護 VWAP 與 tape（盤感工具）
+          const t = data.data;
+          const price = Number(t.Price) || 0;
+          const volume = Number(t.Volume) || 0;
+          if (price > 0 && volume > 0) {
+            // VWAP 累加
+            const acc = vwapAccRef.current;
+            const targetSym = targetSymbolRef.current;
+            if (acc.symbol !== targetSym) {
+              acc.symbol = targetSym; acc.sumPv = 0; acc.sumV = 0;
+            }
+            acc.sumPv += price * volume;
+            acc.sumV += volume;
+            setVwap(acc.sumPv / acc.sumV);
+            setVwapVolume(acc.sumV);
+
+            // Tape append（環形緩衝，保留 TAPE_MAXLEN）
+            const row: TapeRow = {
+              time: String(t.TickTime ?? ''),
+              price,
+              volume,
+              tick_type: Number(t.TickType) || 0,
+            };
+            tapeRef.current.push(row);
+            if (tapeRef.current.length > TAPE_MAXLEN) {
+              tapeRef.current = tapeRef.current.slice(-TAPE_MAXLEN);
+            }
+            tapeDirtyRef.current = true;
+          }
         } else if (data.type === 'BidAsk' && data.data) {
           if (isMatch(data.data)) {
             latestBidAskRef.current = data.data as BidAskData;
@@ -322,6 +383,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         } else if (data.type === 'TradeUpdate' && data.data) {
           // 成交回報也觸發一次 REST 同步，確保填協數量正確
           setTimeout(refreshOrders, 800);
+        } else if (data.type === 'Sound' && data.event) {
+          // 後端 SoundManager 透過 quote queue 推來的音效事件
+          sound.handleIncoming({ event: data.event, volume: data.volume });
         } else if (data.action === 'subscribe' && data.status === 'success') {
           if (data.symbol) setTargetSymbol(data.symbol);
         }
@@ -403,6 +467,13 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     setBidAsk(null);
     pendingHistoryRef.current = [];
 
+    // 切商品 → VWAP 與 tape 重置（後端 _latest_prices 仍有舊資料但 user-facing 從 0 開始）
+    vwapAccRef.current = { sumPv: 0, sumV: 0, symbol: trimmed };
+    setVwap(null);
+    setVwapVolume(0);
+    tapeRef.current = [];
+    setTape([]);
+
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ action: 'subscribe', symbol: trimmed }));
@@ -449,6 +520,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       cancelOrder, flattenPosition,
       realtimePositions, totalRealtimePnl, totalRealizedPnl,
       smartOrders, refreshSmartOrders,
+      vwap, vwapVolume, tape,
     }}>
       {children}
     </TradingContext.Provider>
