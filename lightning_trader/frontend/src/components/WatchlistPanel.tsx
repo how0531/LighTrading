@@ -19,6 +19,7 @@ import { useTradingContext } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { SymbolPicker } from './SymbolPicker';
 import { formatPrice } from '../utils/instrument';
+import { apiClient } from '../api/client';
 
 const LEGACY_STORAGE_KEY = 'lightrade_watchlist';   // Sprint 12 用過的 key，搬完後刪
 const MAX_ITEMS = 20;
@@ -42,6 +43,28 @@ const WatchlistPanel: React.FC = () => {
     const resolved = typeof next === 'function' ? (next as (p: string[]) => string[])(list) : next;
     updateSetting({ watchlist: resolved.slice(0, MAX_ITEMS) });
   };
+
+  const [namesCache, setNamesCache] = useState<Record<string, string>>({});
+  const fetchingRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    const missing = list.filter(sym => !namesCache[sym] && !fetchingRef.current.has(sym));
+    if (missing.length === 0) return;
+
+    missing.forEach(sym => fetchingRef.current.add(sym));
+
+    missing.forEach(sym => {
+      apiClient.get('/symbols/search', { params: { q: sym, limit: 5 } })
+        .then(res => {
+          const hits = res.data;
+          const hit = hits.find((h: any) => h.symbol === sym) || hits[0];
+          if (hit && hit.name) {
+            setNamesCache(prev => ({ ...prev, [sym]: hit.name }));
+          }
+        })
+        .catch(() => {});
+    });
+  }, [list, namesCache]);
 
   // Sprint 23：第一次 mount 時把舊 localStorage 資料搬進 settings.watchlist
   // 條件：legacy 有資料，且 settings.watchlist 還是 DEFAULT（避免覆蓋使用者已調整的清單）
@@ -179,10 +202,17 @@ const WatchlistPanel: React.FC = () => {
                   onClick={() => subscribe(sym)}
                   title={`點擊切換到 ${sym} · 拖曳排序`}
                 >
-                  <td className="px-2 py-1 font-mono font-bold text-slate-200 flex items-center gap-1">
+                  <td className="px-2 py-1 flex items-center gap-1">
                     <GripVertical className="w-3 h-3 text-slate-600 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0" />
-                    {isCurrent && <Eye className="w-3 h-3 text-[#D4AF37]" />}
-                    {sym}
+                    {isCurrent && <Eye className="w-3 h-3 text-[#D4AF37] flex-shrink-0" />}
+                    <div className="flex flex-col min-w-0">
+                      <span className="font-mono font-bold text-slate-200">{sym}</span>
+                      {namesCache[sym] && (
+                        <span className="text-[9px] text-slate-400 font-sans font-normal max-w-[80px] truncate" title={namesCache[sym]}>
+                          {namesCache[sym]}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td className={`px-2 py-1 text-right font-mono ${isStaleData ? 'text-slate-600' : up ? 'text-red-400' : down ? 'text-emerald-400' : 'text-slate-300'}`}>
                     {price > 0 ? formatPrice(price, sym) : '—'}

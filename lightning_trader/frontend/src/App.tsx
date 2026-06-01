@@ -1,9 +1,10 @@
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { HashRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { SettingsProvider } from './contexts/SettingsContext';
 import { ToastProvider } from './contexts/ToastContext';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import LoginPanel from './components/LoginPanel';
 import Dashboard from './components/Dashboard';
+import PanelWindow from './components/PanelWindow';
 import './index.css';
 
 function App() {
@@ -18,6 +19,9 @@ function App() {
               } />
               <Route path="/dashboard" element={
                 <ErrorBoundary label="Dashboard"><Dashboard /></ErrorBoundary>
+              } />
+              <Route path="/panel/:id" element={
+                <ErrorBoundary label="PanelWindow"><PanelWindow /></ErrorBoundary>
               } />
               <Route path="*" element={<Navigate to="/login" replace />} />
             </Routes>

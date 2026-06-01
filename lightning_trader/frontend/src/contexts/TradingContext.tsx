@@ -285,7 +285,10 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // 與 /api 相同策略：用 same-origin，由 vite dev proxy 或 nginx 轉發到 backend。
     // https 站台自動升級成 wss。
     const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    const wsUrl = `${wsScheme}://${window.location.host}/ws/quotes`;
+    let wsUrl = `${wsScheme}://${window.location.host}/ws/quotes`;
+    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:') {
+      wsUrl = 'ws://127.0.0.1:8000/ws/quotes';
+    }
     const ws = new WebSocket(wsUrl);
 
     ws.onopen = () => {

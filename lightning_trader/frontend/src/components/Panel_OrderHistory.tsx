@@ -46,7 +46,7 @@ const formatStatusText = (status: string, failedMsg?: string): string => {
 };
 
 const Panel_OrderHistory: React.FC = () => {
-  const { accountSummary, cancelOrder } = useTradingContext();
+  const { accountSummary, cancelOrder, isConnected } = useTradingContext();
   const { toast } = useToast();
   const [trades, setTrades] = useState<Trade[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -56,11 +56,61 @@ const Panel_OrderHistory: React.FC = () => {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const tradeKey = (t: Trade) => `${t.time}-${t.symbol}-${t.action}-${t.price}-${t.qty}`;
 
+  // 取得商品中文名稱快取
+  const [namesCache, setNamesCache] = useState<Record<string, string>>({});
+  const fetchingRef = React.useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!isConnected) {
+      fetchingRef.current.clear();
+      return;
+    }
+    const symbols = trades.map(t => t.symbol);
+    const missing = symbols.filter(sym => sym && !namesCache[sym] && !fetchingRef.current.has(sym));
+    if (missing.length === 0) return;
+
+    missing.forEach(sym => fetchingRef.current.add(sym));
+
+    missing.forEach(sym => {
+      apiClient.get('/symbols/search', { params: { q: sym, limit: 5 } })
+        .then(res => {
+          const hits = res.data || [];
+          const hit = hits.find((h: any) => h.symbol === sym);
+          if (hit && hit.name) {
+            setNamesCache(prev => ({ ...prev, [sym]: hit.name }));
+          } else {
+            const cleanSym = sym.replace(/^(TSE|OTC)/i, '');
+            if (cleanSym !== sym) {
+              apiClient.get('/symbols/search', { params: { q: cleanSym, limit: 5 } })
+                .then(res2 => {
+                  const hits2 = res2.data || [];
+                  const hit2 = hits2.find((h: any) => h.symbol === cleanSym);
+                  if (hit2 && hit2.name) {
+                    setNamesCache(prev => ({ ...prev, [sym]: hit2.name }));
+                  } else {
+                    fetchingRef.current.delete(sym);
+                  }
+                })
+                .catch(() => {
+                  fetchingRef.current.delete(sym);
+                });
+            } else {
+              fetchingRef.current.delete(sym);
+            }
+          }
+        })
+        .catch(() => {
+          fetchingRef.current.delete(sym);
+        });
+    });
+  }, [trades, namesCache, isConnected]);
+
   const fetchHistory = async () => {
     setIsLoading(true);
     try {
-      const data = await getOrderHistory();
-      setTrades(data || []);
+      const data: any = await getOrderHistory();
+      const historyTrades = Array.isArray(data) ? data : (data?.orders || []);
+      setTrades(historyTrades);
       setLastSyncTime(new Date());
     } catch (err) {
       console.error("Failed to fetch order history:", err);
@@ -233,7 +283,18 @@ const Panel_OrderHistory: React.FC = () => {
                     )}
                   </td>
                   <td className="py-2 px-2 text-slate-400 font-mono tabular-nums">{t.time.split('T')[1]?.split('.')[0] || t.time}</td>
-                  <td className="py-2 px-2 font-mono font-medium">{t.symbol}</td>
+                  <td className="py-2 px-2 font-mono font-medium">
+                    <div className="flex flex-col min-w-0">
+                      <span className="text-xs font-sans font-bold text-slate-200 leading-tight">
+                        {namesCache[t.symbol] || t.symbol.replace(/^(TSE|OTC)/i, '')}
+                      </span>
+                      {namesCache[t.symbol] && (
+                        <span className="text-[9px] text-slate-500 font-mono font-normal max-w-[80px] truncate leading-tight" title={t.symbol}>
+                          {t.symbol.replace(/^(TSE|OTC)/i, '')}
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className={`py-2 px-2 font-bold ${t.action === 'Buy' ? 'text-red-400' : 'text-green-400'}`}>
                     {t.action === 'Buy' ? '買' : '賣'}
                   </td>

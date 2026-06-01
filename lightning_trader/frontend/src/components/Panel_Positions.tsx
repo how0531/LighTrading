@@ -39,6 +39,55 @@ const Panel_Positions: React.FC = () => {
   const [fillsCache, setFillsCache] = useState<Record<string, FillLite[]>>({});
   const [fillsLoading, setFillsLoading] = useState<string | null>(null);
 
+  // 取得商品中文名稱快取
+  const [namesCache, setNamesCache] = useState<Record<string, string>>({});
+  const fetchingRef = React.useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!isConnected) {
+      fetchingRef.current.clear();
+      return;
+    }
+    const symbols = positions.map(p => p.symbol);
+    const missing = symbols.filter(sym => sym && !namesCache[sym] && !fetchingRef.current.has(sym));
+    if (missing.length === 0) return;
+
+    missing.forEach(sym => fetchingRef.current.add(sym));
+
+    missing.forEach(sym => {
+      apiClient.get('/symbols/search', { params: { q: sym, limit: 5 } })
+        .then(res => {
+          const hits = res.data || [];
+          const hit = hits.find((h: any) => h.symbol === sym);
+          if (hit && hit.name) {
+            setNamesCache(prev => ({ ...prev, [sym]: hit.name }));
+          } else {
+            const cleanSym = sym.replace(/^(TSE|OTC)/i, '');
+            if (cleanSym !== sym) {
+              apiClient.get('/symbols/search', { params: { q: cleanSym, limit: 5 } })
+                .then(res2 => {
+                  const hits2 = res2.data || [];
+                  const hit2 = hits2.find((h: any) => h.symbol === cleanSym);
+                  if (hit2 && hit2.name) {
+                    setNamesCache(prev => ({ ...prev, [sym]: hit2.name }));
+                  } else {
+                    fetchingRef.current.delete(sym);
+                  }
+                })
+                .catch(() => {
+                  fetchingRef.current.delete(sym);
+                });
+            } else {
+              fetchingRef.current.delete(sym);
+            }
+          }
+        })
+        .catch(() => {
+          fetchingRef.current.delete(sym);
+        });
+    });
+  }, [positions, namesCache, isConnected]);
+
   const loadFills = useCallback(async (symbol: string) => {
     if (fillsCache[symbol]) return;
     setFillsLoading(symbol);
@@ -227,7 +276,18 @@ const Panel_Positions: React.FC = () => {
                       toast.info(`已切換至 ${pos.symbol}`);
                     }}
                     title={`點擊切換至 ${pos.symbol}`}
-                  >{pos.symbol}</td>
+                  >
+                    <div className="flex flex-col min-w-0">
+                      <span className="text-xs font-sans font-bold text-slate-200 leading-tight">
+                        {namesCache[pos.symbol] || pos.symbol.replace(/^(TSE|OTC)/i, '')}
+                      </span>
+                      {namesCache[pos.symbol] && (
+                        <span className="text-[9px] text-slate-500 font-mono font-normal max-w-[80px] truncate leading-tight" title={pos.symbol}>
+                          {pos.symbol.replace(/^(TSE|OTC)/i, '')}
+                        </span>
+                      )}
+                    </div>
+                  </td>
                   <td className={`px-2 py-2 font-extrabold ${pos.direction === 'Buy' ? 'text-red-500' : 'text-green-500'}`}>
                     <span className={`inline-block px-1 rounded ${pos.direction === 'Buy' ? 'bg-red-500/10' : 'bg-green-500/10'}`}>
                       {pos.direction === 'Buy' ? '多' : '空'}

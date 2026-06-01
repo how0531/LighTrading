@@ -234,8 +234,8 @@ export const DOMTable: React.FC<DOMTableProps> = ({
                   <span className="z-10 flex items-center justify-center tracking-wider min-w-[3rem] px-2 relative font-mono tabular-nums">
                     {formatPrice(p, targetSymbol)}
                     {isCostLine && (
-                      <span className="text-[10px] bg-amber-500/20 text-amber-500 px-1 rounded ml-1 font-bold whitespace-nowrap border border-amber-500/30">
-                        [COST]
+                      <span className="text-[9px] bg-amber-500/20 text-amber-400 px-1.5 py-0.5 rounded ml-1.5 font-bold whitespace-nowrap border border-amber-500/30 select-none shadow-sm shadow-amber-500/5">
+                        成本
                       </span>
                     )}
                   </span>

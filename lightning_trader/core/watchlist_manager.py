@@ -8,6 +8,7 @@ import json
 from typing import Dict, List, Optional
 from dataclasses import dataclass, field
 from pathlib import Path
+from PyQt5.QtCore import QSettings
 
 
 

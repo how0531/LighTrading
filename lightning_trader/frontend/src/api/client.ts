@@ -1,27 +1,5 @@
 import axios, { AxiosError } from 'axios';
 
-// 一律走相對路徑 /api。
-//   - dev：vite proxy 轉到 127.0.0.1:8000
-//   - prod / docker：nginx 同站台 proxy 轉到 backend
-// 這樣切換部署模式不用改前端程式碼。
-export const apiClient = axios.create({
-  baseURL: '/api',
-  timeout: 30000, // Shioaji 登入可能需要 10-15 秒
-  headers: {
-    'Content-Type': 'application/json',
-  },
-});
-
-/**
- * 標準錯誤 envelope（與後端 detail 對齊）
- *   {
- *     status: number,
- *     code:   string,        // 例如 RISK_BLOCK, MISSING_CREDENTIALS
- *     user_msg: string,      // 使用者可讀
- *     level?: 'block' | 'warning',
- *     raw:    AxiosError,
- *   }
- */
 export interface LighTradeApiError {
   status: number;
   code: string;
@@ -30,33 +8,41 @@ export interface LighTradeApiError {
   raw?: AxiosError;
 }
 
-export function normalizeApiError(err: unknown): LighTradeApiError {
-  const ax = err as AxiosError<{ detail?: unknown }>;
-  if (!ax?.response) {
+export const normalizeApiError = (err: unknown): LighTradeApiError => {
+  if (axios.isAxiosError(err)) {
+    const axiosError = err as AxiosError;
+    const errorData = axiosError.response?.data as any;
+    const detail = errorData?.detail || {};
+    
     return {
-      status: 0,
-      code: 'NETWORK',
-      user_msg: '無法連線到後端，請確認後端是否啟動',
-      raw: ax,
+      status: axiosError.response?.status || 500,
+      code: detail.code || axiosError.code || 'UNKNOWN_ERROR',
+      user_msg: detail.user_msg || detail.message || detail.detail || axiosError.message || 'API 請求發生錯誤',
+      level: (detail.level === 'block' || detail.level === 'warning') ? detail.level : undefined,
+      raw: axiosError,
     };
   }
-  const status = ax.response.status;
-  const detail = ax.response.data?.detail;
-  if (typeof detail === 'string') {
-    return { status, code: 'UNKNOWN', user_msg: detail, raw: ax };
+  if (err instanceof Error) {
+    return { status: 500, code: 'CLIENT_ERROR', user_msg: err.message };
   }
-  if (detail && typeof detail === 'object') {
-    const d = detail as { code?: string; user_msg?: string; level?: 'block' | 'warning' };
-    return {
-      status,
-      code: d.code || 'UNKNOWN',
-      user_msg: d.user_msg || '操作失敗',
-      level: d.level,
-      raw: ax,
-    };
-  }
-  return { status, code: 'UNKNOWN', user_msg: '操作失敗', raw: ax };
-}
+  return { status: 500, code: 'UNKNOWN_ERROR', user_msg: String(err) || '發生未知錯誤' };
+};
+
+// Electron packaged build 跑 file:// 協議時，window.location.hostname 會是空字串，
+// 導致 baseURL 組成 "http://:8000/api" 這種無效 URL。
+// 固定指向 127.0.0.1；Electron 與瀏覽器 dev 都走本機 backend。
+const BACKEND_HOST =
+  window.location.protocol === 'file:' || !window.location.hostname
+    ? '127.0.0.1'
+    : window.location.hostname;
+
+export const apiClient = axios.create({
+  baseURL: `http://${BACKEND_HOST}:8000/api`,
+  timeout: 30000, // Shioaji 登入可能需要 10-15 秒
+  headers: {
+    'Content-Type': 'application/json',
+  },
+});
 
 export const getPositions = async (accountId?: string) => {
   const response = await apiClient.get('/positions', { params: { account_id: accountId } });

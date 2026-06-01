@@ -605,6 +605,16 @@ class ShioajiClient:
             })
             return True
 
+        # 嘗試直接以代碼取得股票合約以獲得精確名稱
+        clean_q = q.replace("TSE", "").replace("OTC", "")
+        if clean_q.isdigit():
+            try:
+                c = self.api.Contracts.Stocks.get(clean_q)
+                if c and getattr(c, "symbol", ""):
+                    _emit(c, "Stock")
+            except Exception as e:
+                logger.debug(f"精確尋找股票 {clean_q} 失敗: {e}")
+
         try:
             # Stocks: iter 直接拿到 contracts
             for c in self.api.Contracts.Stocks:

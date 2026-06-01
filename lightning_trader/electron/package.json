@@ -1,0 +1,52 @@
+{
+  "name": "lightrade",
+  "version": "1.0.13",
+  "description": "LighTrade - 閃電下單工具",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "build": "electron-builder --win"
+  },
+  "devDependencies": {
+    "electron": "^28.3.3",
+    "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.lightrade.app",
+    "productName": "LighTrade",
+    "directories": {
+      "output": "../../dist-electron"
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "signAndEditExecutable": false,
+      "verifyUpdateCodeSignature": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "installerLanguages": ["zh_TW", "en_US"],
+      "language": "1028"
+    },
+    "files": [
+      "main.js",
+      "preload.js"
+    ],
+    "extraResources": [
+      {
+        "from": "../frontend/dist",
+        "to": "frontend/dist",
+        "filter": ["**/*"]
+      },
+      {
+        "from": "../../../dist-backend/lightrade-backend.exe",
+        "to": "backend/lightrade-backend.exe"
+      }
+    ]
+  }
+}

@@ -222,19 +222,93 @@ async def get_kbars(symbol: str, days: int = 1):
         return []
 
 
+# 離線常用股票中文名稱資料庫。
+# 由於 Shioaji 有連線限制或偶爾斷線，為避免前端商品名稱因未連線成功而顯示為空白，
+# 此處提供常見與預設持倉代碼的靜態對照，作為高可用性（HA）的 fallback 方案。
+_OFFLINE_SYMBOLS = {
+    "2890": {"name": "永豐金", "exchange": "TSE"},
+    "6757": {"name": "台灣虎航", "exchange": "TSE"},
+    "00910": {"name": "第一金太空衛星", "exchange": "TSE"},
+    "2355": {"name": "敬鵬", "exchange": "TSE"},
+    "5309": {"name": "系統電", "exchange": "OTC"},
+    "2330": {"name": "台積電", "exchange": "TSE"},
+    "2317": {"name": "鴻海", "exchange": "TSE"},
+    "2454": {"name": "聯發科", "exchange": "TSE"},
+    "2303": {"name": "聯電", "exchange": "TSE"},
+    "2881": {"name": "富邦金", "exchange": "TSE"},
+    "2882": {"name": "國泰金", "exchange": "TSE"},
+    "2883": {"name": "開發金", "exchange": "TSE"},
+    "2884": {"name": "玉山金", "exchange": "TSE"},
+    "2885": {"name": "元大金", "exchange": "TSE"},
+    "2886": {"name": "兆豐金", "exchange": "TSE"},
+    "2887": {"name": "台新金", "exchange": "TSE"},
+    "2888": {"name": "新光金", "exchange": "TSE"},
+    "2891": {"name": "中信金", "exchange": "TSE"},
+    "2892": {"name": "第一金", "exchange": "TSE"},
+    "5880": {"name": "合庫金", "exchange": "TSE"},
+}
+
+
 @router.get("/symbols/search")
 async def search_symbols(q: str, limit: int = 20):
     """模糊搜尋商品。query 至少 1 字。"""
     if not q or len(q.strip()) < 1:
         return []
-    if not getattr(shared.shioaji_client, "_is_connected", False):
-        return []
+    
     limit = max(1, min(50, int(limit)))
+    q_clean = q.strip().upper().replace("TSE", "").replace("OTC", "")
+    
+    # 比對離線靜態資料庫
+    offline_results = []
+    for code, info in _OFFLINE_SYMBOLS.items():
+        if q_clean in code or q_clean in info["name"]:
+            offline_results.append({
+                "symbol": f"{info['exchange']}{code}",
+                "code": code,
+                "name": info["name"],
+                "kind": "Stock"
+            })
+            
+    # 如果後端尚未與永豐金伺服器連線成功，則直接回傳離線配對結果，提供順暢的離線體驗
+    if not getattr(shared.shioaji_client, "_is_connected", False):
+        return offline_results[:limit]
+        
     try:
-        return await shared.run_in_qt_thread(shared.shioaji_client.search_contracts, q.strip(), limit)
+        online_results = await shared.run_in_qt_thread(shared.shioaji_client.search_contracts, q.strip(), limit)
+        if not isinstance(online_results, list):
+            online_results = []
+            
+        # 為了保持回傳規格統一（Dict[str, str]），若回傳為 Contract 物件，將其轉為 dict
+        # 並與離線資料庫做聯集 (Union)，確保常用的股票在線上搜尋回傳中也不會漏掉
+        existing_symbols = set()
+        formatted_online = []
+        for item in online_results:
+            if isinstance(item, dict) and "symbol" in item:
+                sym_upper = item["symbol"].upper()
+                existing_symbols.add(sym_upper)
+                formatted_online.append(item)
+            elif hasattr(item, "code") and hasattr(item, "name"):
+                code = getattr(item, "code", "")
+                exch = getattr(item, "exchange", "TSE")
+                full_sym = f"{exch}{code}".upper()
+                existing_symbols.add(full_sym)
+                formatted_online.append({
+                    "symbol": full_sym,
+                    "code": code,
+                    "name": getattr(item, "name", ""),
+                    "kind": "Stock"
+                })
+                
+        # 補充未在線上結果中出現的離線常用股票
+        for item in offline_results:
+            if item["symbol"].upper() not in existing_symbols:
+                formatted_online.append(item)
+                existing_symbols.add(item["symbol"].upper())
+                
+        return formatted_online[:limit]
     except Exception as e:
-        logger.error(f"search_symbols 失敗: {e}")
-        return []
+        logger.error(f"search_symbols 線上搜尋失敗，使用離線 Fallback: {e}")
+        return offline_results[:limit]
 
 
 @router.post("/sync_all")
