@@ -3,7 +3,8 @@ import { LAYOUT_PRESETS, PRESET_ORDER, presetLabel } from './layoutPresets';
 
 // 必須與 Dashboard 渲染的 grid items 完全一致，否則 react-grid-layout 會亂排
 // Sprint 34：新增 quotes（報價看板）/ mchart（多圖看盤）
-const PANEL_KEYS = ['watch', 'dom', 'chart', 'equity', 'stats', 'bal', 'pos', 'smart', 'journal', 'hist', 'trade', 'quotes', 'mchart'];
+// Sprint 35：新增 tape（逐筆成交 / 內外盤）
+const PANEL_KEYS = ['watch', 'dom', 'chart', 'equity', 'stats', 'bal', 'pos', 'smart', 'journal', 'hist', 'trade', 'quotes', 'mchart', 'tape'];
 
 describe('LAYOUT_PRESETS', () => {
   for (const [id, preset] of Object.entries(LAYOUT_PRESETS)) {

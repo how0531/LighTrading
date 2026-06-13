@@ -41,6 +41,18 @@
 
 ---
 
+## 看盤環境（Sprint 35）
+
+| 主題 | 內容 |
+|---|---|
+| 逐筆成交 / Time & Sales | 新增 `TimeSalesPanel`（tape）,顯示時間/成交/量/內外盤,資料源 `quoteHistory` |
+| 內外盤判定 | `tickFlow.ts: classifyAggressor` 依 Shioaji TickType(1=外盤買/2=內盤賣),0/未知時用價格推估 |
+| 大單偵測 | `tickFlow.ts: isBigTrade`,門檻可調並存 localStorage（與 DOM 大單門檻一致預設 50）|
+| 買賣力道彙總 | `tickFlow.ts: summarizeFlow` 計算外/內盤量、delta、buyPct,面板底部力道條 + Δ |
+| 版面整合 | Dashboard 由 13 面板擴為 14(新增 tape);三個既有 preset（當沖/波段/看盤）皆加入 tape |
+
+---
+
 ## 已完成（Sprint 19–33）
 
 | 項 | 主題 | 落地 |
