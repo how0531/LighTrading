@@ -11,6 +11,7 @@ import WatchlistPanel from './WatchlistPanel';
 import QuoteBoardPanel from './QuoteBoardPanel';
 import MultiChartPanel from './MultiChartPanel';
 import TimeSalesPanel from './TimeSalesPanel';
+import MoversPanel from './MoversPanel';
 
 /**
  * PanelWindow — 單一面板獨立視窗（透過 Electron popout 開啟）
@@ -26,6 +27,7 @@ import TimeSalesPanel from './TimeSalesPanel';
  *   - /panel/quoteboard → QuoteBoardPanel（Sprint 34）
  *   - /panel/mchart     → MultiChartPanel（Sprint 34）
  *   - /panel/tape       → TimeSalesPanel（Sprint 35）
+ *   - /panel/movers     → MoversPanel（Sprint 36）
  *
  * 每個子視窗是獨立的 React tree，自帶一份 TradingProvider，
  * 會對 backend 建立自己的 WebSocket 連線，訂閱自己的 symbol。
@@ -41,6 +43,7 @@ const panelRegistry: Record<string, { title: string; Comp: React.FC }> = {
   quoteboard: { title: '報價看板',         Comp: QuoteBoardPanel },
   mchart:     { title: '多圖看盤',         Comp: MultiChartPanel },
   tape:       { title: '逐筆成交',         Comp: TimeSalesPanel },
+  movers:     { title: '盤勢排行',         Comp: MoversPanel },
 };
 
 const PanelWindow: React.FC = () => {

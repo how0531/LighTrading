@@ -25,6 +25,8 @@ const QuoteBoardPanel       = lazy(() => import('./QuoteBoardPanel'));
 const MultiChartPanel       = lazy(() => import('./MultiChartPanel'));
 // Sprint 35：逐筆成交 / 內外盤 lazy
 const TimeSalesPanel        = lazy(() => import('./TimeSalesPanel'));
+// Sprint 36：盤勢排行 / 漲跌幅榜 lazy
+const MoversPanel           = lazy(() => import('./MoversPanel'));
 // Sprint 18：hotkey 速查表（非 lazy；很小、且 ? 觸發要永遠 mounted）
 import { HotkeyCheatSheet } from './HotkeyCheatSheet';
 import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
@@ -57,6 +59,7 @@ const defaultLayouts = {
     { i: 'quotes',  x: 0,  y: 40, w: 7, h: 10 },
     { i: 'mchart',  x: 7,  y: 40, w: 5, h: 10 },
     { i: 'tape',    x: 0,  y: 50, w: 5, h: 12 },
+    { i: 'movers',  x: 5,  y: 50, w: 5, h: 12 },
   ],
   md: [
     { i: 'watch',   x: 0, y: 0,  w: 2, h: 22 },
@@ -73,6 +76,7 @@ const defaultLayouts = {
     { i: 'quotes',  x: 0, y: 40, w: 6, h: 10 },
     { i: 'mchart',  x: 6, y: 40, w: 4, h: 10 },
     { i: 'tape',    x: 0, y: 50, w: 4, h: 12 },
+    { i: 'movers',  x: 4, y: 50, w: 4, h: 12 },
   ],
   sm: [
     { i: 'watch',   x: 0, y: 0,  w: 6, h: 8 },
@@ -89,11 +93,12 @@ const defaultLayouts = {
     { i: 'quotes',  x: 0, y: 87, w: 6, h: 12 },
     { i: 'mchart',  x: 0, y: 99, w: 6, h: 14 },
     { i: 'tape',    x: 0, y: 113, w: 6, h: 12 },
+    { i: 'movers',  x: 0, y: 125, w: 6, h: 12 },
   ]
 };
 
-// Sprint 35：新增 tape（逐筆成交）面板，bump key（既有 layout 會被替換為含新面板的預設）
-const LAYOUT_KEY = 'lighTrade_layout_v10';
+// Sprint 36：新增 movers（盤勢排行）面板，bump key（既有 layout 會被替換為含新面板的預設）
+const LAYOUT_KEY = 'lighTrade_layout_v11';
 
 // react-grid-layout 會把定位 props / ref 注入「直接子節點」,因此 grid item 必須是
 // 原生 div（不能用自訂 component 包,否則 style/ref 不會落到 DOM 上）。這個 helper
@@ -313,6 +318,10 @@ const DashboardContent: React.FC = () => {
             <div key="tape" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
               <div className="flex-1 h-full overflow-hidden flex flex-col"><TimeSalesPanel /></div>
+            </div>
+            <div key="movers" className={itemClass(isLayoutLocked)}>
+              {!isLayoutLocked && dragHandle}
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><MoversPanel /></div>
             </div>
           </ResponsiveGridLayout>
         </div>

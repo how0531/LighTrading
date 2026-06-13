@@ -53,6 +53,18 @@
 
 ---
 
+## 看盤環境（Sprint 36）
+
+| 主題 | 內容 |
+|---|---|
+| 盤勢排行 | 新增 `MoversPanel`（movers）,漲幅榜（紅）/ 跌幅榜（綠）左右並排,各取前 8 名 |
+| 漲跌幅排序 | `movers.ts: rankMovers` 依漲跌% 排序、濾掉無報價列,與 quoteBoard 共用 computeChange |
+| 市場寬度 | `movers.ts: computeBreadth` 統計上漲/下跌/平盤/無資料家數 + upPct,面板頂部紅綠寬度條 |
+| 互動 | 點榜單任一列 → subscribe 切換主商品,與報價看板共用同一份自選清單 |
+| 版面整合 | Dashboard 由 14 面板擴為 15(新增 movers);三個既有 preset 皆加入 movers |
+
+---
+
 ## 已完成（Sprint 19–33）
 
 | 項 | 主題 | 落地 |
