@@ -83,8 +83,8 @@ export interface Settings {
   fees: FeeConfig;
   /** Sprint 29：PnL 是否以「淨額（扣費後）」顯示；false = 顯示毛額 */
   showNetPnL: boolean;
-  /** Sprint 31：版面 preset。custom = 沿用使用者拖曳儲存的版面（向後相容預設）。 */
-  layoutPreset: 'momentum' | 'daytrade' | 'swing' | 'custom';
+  /** Sprint 31 / 34：版面 preset。custom = 沿用使用者拖曳儲存的版面（向後相容預設）。 */
+  layoutPreset: 'momentum' | 'daytrade' | 'swing' | 'marketwatch' | 'custom';
 }
 
 /** 單一價格警報。symbol 是 canonical symbol。op above = 價格 >= price；below = <=。 */

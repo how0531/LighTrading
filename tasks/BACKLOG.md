@@ -27,6 +27,20 @@
 
 ---
 
+## 看盤環境（Sprint 34）
+
+| 主題 | 內容 |
+|---|---|
+| 多圖看盤 | `MultiChartPanel` 1/2/4 宮格,每格獨立商品 + 週期;`ChartPanel` 重構支援 `symbol`/`compact` props |
+| 報價看板 | `QuoteBoardPanel` 全寬報價矩陣（成交/漲跌/幅%/高低/總量/委買賣),可排序、點列切換主商品 |
+| 指標擴充 | `indicators.ts` 新增 EMA / 布林通道(BB);ChartPanel 加 EMA20 / BB toggle |
+| 版面整合 | Dashboard 由 3 面板回復為 13 面板(含 quotes/mchart);新增「看盤」preset |
+| 訂閱模型 | TradingContext 加 `setAuxWatch`,多圖與自選清單取聯集互不覆蓋;MiniQuote 加 volume/bid/ask |
+
+> 動機:使用者反饋欠缺看盤環境,並提及 Sinotrade/shioaji-pro-app。該專案為 **AGPL-3.0,僅作功能參考、未引用任何原始碼**,全部以既有技術棧原生重實作。
+
+---
+
 ## 已完成（Sprint 19–33）
 
 | 項 | 主題 | 落地 |
