@@ -259,9 +259,6 @@ def import_fills(rows: list[dict]) -> dict:
                         " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
                         (str(fill_id), ts, symbol, action, price, qty, order_id, "", int(_t.time() * 1000)),
                     )
-                    if conn.total_changes > 0:
-                        # SQLite total_changes 是 connection 級累計；不適合判單筆，用 INSERT OR IGNORE 不影響
-                        pass
                     accepted += 1
                 except Exception as e:
                     errors.append(f"row {i}: {e}")
