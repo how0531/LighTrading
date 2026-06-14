@@ -8,7 +8,7 @@
  * 點任一列 → subscribe 切換主商品（與 QuoteBoardPanel 一致）。
  * 與報價看板共用同一份自選清單,不另外管理 symbol。
  */
-import React, { useMemo } from 'react';
+import React, { useEffect, useMemo } from 'react';
 import { TrendingUp, TrendingDown } from 'lucide-react';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
@@ -58,9 +58,15 @@ const MoverList: React.FC<{
 };
 
 const MoversPanel: React.FC = () => {
-  const { targetSymbol, subscribe, watchlistQuotes } = useTradingContext();
+  const { targetSymbol, subscribe, watchlistQuotes, watchSymbols } = useTradingContext();
   const { settings } = useSettings();
   const list = settings.watchlist;
+
+  // 確保獨立彈出視窗（/panel/movers）也會訂閱自選清單；在主儀表板與
+  // WatchlistPanel 的呼叫是等冪聯集，不會互相覆蓋或重複送出。
+  useEffect(() => {
+    watchSymbols(list);
+  }, [list, watchSymbols]);
 
   const inputs: MoverInput[] = useMemo(
     () => list.map((sym) => {

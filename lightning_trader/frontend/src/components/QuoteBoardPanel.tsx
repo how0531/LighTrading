@@ -41,9 +41,15 @@ const COLUMNS: Column[] = [
 ];
 
 const QuoteBoardPanel: React.FC = () => {
-  const { targetSymbol, subscribe, watchlistQuotes } = useTradingContext();
+  const { targetSymbol, subscribe, watchlistQuotes, watchSymbols } = useTradingContext();
   const { settings, updateSetting } = useSettings();
   const list = settings.watchlist;
+
+  // 確保獨立彈出視窗（/panel/quoteboard）也會訂閱自選清單；在主儀表板與
+  // WatchlistPanel 的呼叫是等冪聯集，不會互相覆蓋或重複送出。
+  useEffect(() => {
+    watchSymbols(list);
+  }, [list, watchSymbols]);
 
   const [sortKey, setSortKey] = useState<QuoteSortKey>('symbol');
   const [sortDir, setSortDir] = useState<SortDir>('asc');
