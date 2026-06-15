@@ -15,14 +15,9 @@ import json
 import time as _time
 import logging
 from backend import shared
+from backend.services.contract_specs import multiplier_for
 
 logger = logging.getLogger(__name__)
-
-_PNL_MULTIPLIERS = {
-    'TXF': 200, 'MXF': 50,
-    'EXF': 4000,
-    'GTF': 200,
-}
 
 # 持倉快取相關
 _pos_cache: list = []
@@ -39,11 +34,8 @@ _HEARTBEAT_S = 1.5
 
 
 def _get_multiplier(symbol: str) -> int:
-    sym = (symbol or "").upper()
-    for prefix, mult in _PNL_MULTIPLIERS.items():
-        if sym.startswith(prefix):
-            return mult
-    return 1000
+    # 薄 wrapper，沿用既有呼叫端；單一真相源在 contract_specs
+    return multiplier_for(symbol)
 
 
 def on_tick_event(symbol: str, tick_data: dict) -> None:

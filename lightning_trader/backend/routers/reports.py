@@ -18,6 +18,7 @@ from typing import Optional
 from fastapi import APIRouter
 from shioaji.constant import Action
 from backend import shared
+from backend.services.contract_specs import multiplier_for
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["reports"])
@@ -137,11 +138,6 @@ async def daily_report(account_id: Optional[str] = None):
         }
 
 
-# 與 pnl_broadcaster 同步的乘數表（不 import 是為了避免 backend service 循環引用）
-_MULTIPLIERS = {'TXF': 200, 'MXF': 50, 'EXF': 4000, 'GTF': 200}
 def _multiplier_for(symbol: str) -> int:
-    sym = (symbol or "").upper()
-    for prefix, mult in _MULTIPLIERS.items():
-        if sym.startswith(prefix):
-            return mult
-    return 1000   # 股票
+    # 薄 wrapper，沿用既有呼叫端；單一真相源在 contract_specs
+    return multiplier_for(symbol)

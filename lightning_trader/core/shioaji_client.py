@@ -11,6 +11,9 @@ from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
 
+# 成交均價快取上限：單日 ordno 會持續累積，超過即 FIFO 淘汰最舊一筆，避免記憶體洩漏
+_MAX_DEAL_PRICES = 5000
+
 class ShioajiClient:
     """
     專業級 Shioaji 核心客戶端 - 完整報價與部位同步版 (無 PyQt5 依賴)
@@ -254,6 +257,9 @@ class ShioajiClient:
                 ordno = msg.get('ordno', '') or msg.get('seqno', '')
                 deal_price = msg.get('price', 0)
                 if ordno and deal_price:
+                    # 上限保護：新 ordno 且已達上限 → 淘汰最舊一筆（dict 保插入序）
+                    if ordno not in self._deal_prices and len(self._deal_prices) >= _MAX_DEAL_PRICES:
+                        self._deal_prices.pop(next(iter(self._deal_prices)), None)
                     self._deal_prices[ordno] = float(deal_price)
                     logger.debug(f"★ 成交均價快取: ordno={ordno} price={deal_price}")
             self.signal_order_update.emit(msg)
@@ -564,13 +570,14 @@ class ShioajiClient:
             "account": account
         }
         
-        # 股票專屬參數
-        if contract.security_type == 'STK':
-            order_kwargs["order_lot"] = order_lot or StockOrderLot.Common
-            order_kwargs["order_cond"] = order_cond or StockOrderCond.Cash
-
-        order = self.api.Order(**order_kwargs)
         try:
+            # 股票專屬參數（注意：StockOrderLot/StockOrderCond 目前 import 缺漏，
+            # 股票單組單會在此拋例外並降級為下單失敗；真修需在有 SDK 環境確認符號名）
+            if contract.security_type == 'STK':
+                order_kwargs["order_lot"] = order_lot or StockOrderLot.Common
+                order_kwargs["order_cond"] = order_cond or StockOrderCond.Cash
+
+            order = self.api.Order(**order_kwargs)
             return self.api.place_order(contract, order)
         except Exception as e:
             logger.error(f"place_order 失敗: {symbol} {action} {qty}@{price} — {e}")
