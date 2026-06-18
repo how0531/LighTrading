@@ -6,7 +6,6 @@ shared.py — 後端共用狀態與工具
 """
 import asyncio
 import logging
-from datetime import datetime
 import time
 from fastapi import WebSocket
 

@@ -27,6 +27,44 @@
 
 ---
 
+## 看盤環境（Sprint 34）
+
+| 主題 | 內容 |
+|---|---|
+| 多圖看盤 | `MultiChartPanel` 1/2/4 宮格,每格獨立商品 + 週期;`ChartPanel` 重構支援 `symbol`/`compact` props |
+| 報價看板 | `QuoteBoardPanel` 全寬報價矩陣（成交/漲跌/幅%/高低/總量/委買賣),可排序、點列切換主商品 |
+| 指標擴充 | `indicators.ts` 新增 EMA / 布林通道(BB);ChartPanel 加 EMA20 / BB toggle |
+| 版面整合 | Dashboard 由 3 面板回復為 13 面板(含 quotes/mchart);新增「看盤」preset |
+| 訂閱模型 | TradingContext 加 `setAuxWatch`,多圖與自選清單取聯集互不覆蓋;MiniQuote 加 volume/bid/ask |
+
+> 動機:使用者反饋欠缺看盤環境,並提及 Sinotrade/shioaji-pro-app。該專案為 **AGPL-3.0,僅作功能參考、未引用任何原始碼**,全部以既有技術棧原生重實作。
+
+---
+
+## 看盤環境（Sprint 35）
+
+| 主題 | 內容 |
+|---|---|
+| 逐筆成交 / Time & Sales | 新增 `TimeSalesPanel`（tape）,顯示時間/成交/量/內外盤,資料源 `quoteHistory` |
+| 內外盤判定 | `tickFlow.ts: classifyAggressor` 依 Shioaji TickType(1=外盤買/2=內盤賣),0/未知時用價格推估 |
+| 大單偵測 | `tickFlow.ts: isBigTrade`,門檻可調並存 localStorage（與 DOM 大單門檻一致預設 50）|
+| 買賣力道彙總 | `tickFlow.ts: summarizeFlow` 計算外/內盤量、delta、buyPct,面板底部力道條 + Δ |
+| 版面整合 | Dashboard 由 13 面板擴為 14(新增 tape);三個既有 preset（當沖/波段/看盤）皆加入 tape |
+
+---
+
+## 看盤環境（Sprint 36）
+
+| 主題 | 內容 |
+|---|---|
+| 盤勢排行 | 新增 `MoversPanel`（movers）,漲幅榜（紅）/ 跌幅榜（綠）左右並排,各取前 8 名 |
+| 漲跌幅排序 | `movers.ts: rankMovers` 依漲跌% 排序、濾掉無報價列,與 quoteBoard 共用 computeChange |
+| 市場寬度 | `movers.ts: computeBreadth` 統計上漲/下跌/平盤/無資料家數 + upPct,面板頂部紅綠寬度條 |
+| 互動 | 點榜單任一列 → subscribe 切換主商品,與報價看板共用同一份自選清單 |
+| 版面整合 | Dashboard 由 14 面板擴為 15(新增 movers);三個既有 preset 皆加入 movers |
+
+---
+
 ## 已完成（Sprint 19–33）
 
 | 項 | 主題 | 落地 |

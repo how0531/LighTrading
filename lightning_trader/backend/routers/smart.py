@@ -1,10 +1,10 @@
 """
 routers/smart.py — 智慧單相關 API 路由
 
-REST 收斂：
-  POST   /api/smart_orders             新增（取代舊的 /add_smart_order，向後相容保留）
+REST：
+  POST   /api/smart_orders             新增
   GET    /api/smart_orders             列出活躍智慧單
-  DELETE /api/smart_orders/{order_id}  取消（取代舊的 POST /cancel_smart_order）
+  DELETE /api/smart_orders/{order_id}  取消
   POST   /api/smart_orders/cancel_all  取消全部（依 symbol 可選）
 
 支援的 order_type：
@@ -41,10 +41,6 @@ class SmartOrderRequest(BaseModel):
     # 預留欄位（暫不使用，但接受不報錯）
     take_profit_price: float = 0
     stop_loss_price: float = 0
-
-
-class CancelSmartOrderRequest(BaseModel):
-    order_id: str
 
 
 # ─── 路由端點 ──────────────────────────────────────────────
@@ -101,12 +97,6 @@ async def create_smart_order(req: SmartOrderRequest):
     return await shared.run_in_qt_thread(_create_smart_order, req)
 
 
-@router.post("/add_smart_order")
-async def create_smart_order_legacy(req: SmartOrderRequest):
-    """向後相容舊路徑（Sprint 13 前）"""
-    return await shared.run_in_qt_thread(_create_smart_order, req)
-
-
 @router.get("/smart_orders")
 async def list_smart_orders(symbol: Optional[str] = None):
     """列出活躍智慧單"""
@@ -119,17 +109,6 @@ async def cancel_smart_order(order_id: str):
     success = shared.engine.smart_order_engine.cancel(order_id)
     if success:
         return {"status": "success", "message": "智慧單已取消", "id": order_id}
-    raise HTTPException(status_code=404, detail={
-        "code": "SMART_ORDER_NOT_FOUND", "user_msg": "找不到該智慧單"
-    })
-
-
-@router.post("/cancel_smart_order")
-async def cancel_smart_order_legacy(req: CancelSmartOrderRequest):
-    """向後相容舊路徑"""
-    success = shared.engine.smart_order_engine.cancel(req.order_id)
-    if success:
-        return {"status": "success", "message": "智慧單已取消"}
     raise HTTPException(status_code=404, detail={
         "code": "SMART_ORDER_NOT_FOUND", "user_msg": "找不到該智慧單"
     })

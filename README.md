@@ -244,9 +244,6 @@ python3 -m pytest tests/ -q
 # 前端 TypeScript 編譯
 cd frontend
 npx tsc -b
-
-# Latency 量測（需 backend 已啟動 + 登入）
-python3 tests/latency_check.py --symbol TXFR1 --secs 30
 ```
 
 ### 重要目錄
@@ -263,7 +260,7 @@ lightning_trader/
 │       ├── contexts/  # TradingContext / SettingsContext / ToastContext
 │       ├── components/DOM/  # DOMHeader / DOMTable / DOMFooter
 │       └── utils/     # instrument / pnl / splitOrder
-├── tests/          # pytest 單元測試 + latency_check 手動腳本
+├── tests/          # pytest 單元測試
 └── legacy/         # PyQt5 桌面版（已停止主動開發）
 ```
 

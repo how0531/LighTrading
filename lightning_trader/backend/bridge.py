@@ -91,7 +91,7 @@ def on_shioaji_quote(quote_data: dict):
                     loop = asyncio.get_event_loop()
                     if loop.is_running():
                         loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, quote_item)
-                except:
+                except Exception:
                     pass
 
     except Exception as e:

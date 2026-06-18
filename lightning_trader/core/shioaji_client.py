@@ -16,12 +16,10 @@ class ShioajiClient:
     專業級 Shioaji 核心客戶端 - 完整報價與部位同步版 (無 PyQt5 依賴)
     """
     def __init__(self, event_bus=None):
-        self.signal_quote_tick = Signal()       
-        self.signal_quote_bidask = Signal()     
-        self.signal_login_status = Signal()  
-        self.signal_order_update = Signal()     
-        self.signal_trade_update = Signal()     
-        self.signal_account_update = Signal()     
+        self.signal_login_status = Signal()
+        self.signal_order_update = Signal()
+        self.signal_trade_update = Signal()
+        self.signal_account_update = Signal()
 
         self.event_bus = event_bus
         self.is_simulation = Config.SIMULATION
@@ -724,7 +722,6 @@ class ShioajiClient:
             return out
         except Exception as e:
             logger.error(f"get_kbars {symbol} 失敗: {e}", exc_info=True)
-            return []
             return []
 
     # ----- 以下為補齊的缺失方法 -----

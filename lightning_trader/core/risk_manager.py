@@ -114,9 +114,6 @@ class RiskManager:
         self.event_bus.on_fill.connect(self._on_fill)
         self.event_bus.on_position_update.connect(self._on_position_update)
 
-        # 移除 QTimer，改為由外部 (如事件迴圈) 或被動觸發
-        self._last_check_time = time.time()
-
         logger.info("RiskManager 已初始化")
 
     # ──── 事件處理 ────

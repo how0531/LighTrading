@@ -51,8 +51,6 @@ class EventBus:
     def __init__(self):
         # ──── 行情事件 ────
         self.on_tick = Signal()           # (symbol, tick_data)
-        self.on_bidask = Signal()         # (symbol, bidask_data)
-        self.on_snapshot = Signal()       # (symbol, snapshot_data)
 
         # ──── 交易事件 ────
         self.on_order_update = Signal()        # OrderEntry dict
@@ -63,8 +61,6 @@ class EventBus:
         # ──── 委託管理事件 ────
         self.on_order_placed = Signal()        # 下單成功
         self.on_order_cancelled = Signal()     # 刪單成功
-        self.on_order_modified = Signal()      # 改單成功
-        self.on_order_rejected = Signal()      # 委託被拒 (reason)
 
         # ──── 智慧單事件 ────
         self.on_smart_order_triggered = Signal()  # 觸價/移停觸發
@@ -73,13 +69,11 @@ class EventBus:
         # ──── 系統事件 ────
         self.on_connection_state = Signal()     # "connected" | "disconnected" | "reconnecting"
         self.on_error = Signal()           # (level: "warning"|"error"|"critical", message)
-        self.on_notification = Signal()    # (type: "info"|"success"|"warning", message)
 
         # ──── 風控事件 ────
         self.on_risk_breach = Signal()     # (level: "warning"|"block", message)
 
         # ──── 使用者操作事件 ────
         self.on_symbol_changed = Signal()       # 使用者切換商品
-        self.on_qty_changed = Signal()          # 使用者調整預設口數
-        
+
         logger.info("EventBus (純 Python 版) 已初始化")

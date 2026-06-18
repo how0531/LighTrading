@@ -6,6 +6,12 @@ import Panel_Positions from './Panel_Positions';
 import Panel_OrderHistory from './Panel_OrderHistory';
 import Panel_AccountBalance from './Panel_AccountBalance';
 import QuoteHistory from './QuoteHistory';
+import ChartPanel from './ChartPanel';
+import WatchlistPanel from './WatchlistPanel';
+import QuoteBoardPanel from './QuoteBoardPanel';
+import MultiChartPanel from './MultiChartPanel';
+import TimeSalesPanel from './TimeSalesPanel';
+import MoversPanel from './MoversPanel';
 
 /**
  * PanelWindow — 單一面板獨立視窗（透過 Electron popout 開啟）
@@ -16,16 +22,28 @@ import QuoteHistory from './QuoteHistory';
  *   - /panel/history    → Panel_OrderHistory
  *   - /panel/account    → Panel_AccountBalance
  *   - /panel/quotes     → QuoteHistory
+ *   - /panel/chart      → ChartPanel（Sprint 34）
+ *   - /panel/watch      → WatchlistPanel（Sprint 34）
+ *   - /panel/quoteboard → QuoteBoardPanel（Sprint 34）
+ *   - /panel/mchart     → MultiChartPanel（Sprint 34）
+ *   - /panel/tape       → TimeSalesPanel（Sprint 35）
+ *   - /panel/movers     → MoversPanel（Sprint 36）
  *
  * 每個子視窗是獨立的 React tree，自帶一份 TradingProvider，
  * 會對 backend 建立自己的 WebSocket 連線，訂閱自己的 symbol。
  */
 const panelRegistry: Record<string, { title: string; Comp: React.FC }> = {
-  dom:       { title: 'DOM Panel',       Comp: DOMPanel },
-  positions: { title: 'Positions',       Comp: Panel_Positions },
-  history:   { title: 'Order History',   Comp: Panel_OrderHistory },
-  account:   { title: 'Account Summary', Comp: Panel_AccountBalance },
-  quotes:    { title: 'Quote History',   Comp: QuoteHistory },
+  dom:        { title: 'DOM Panel',       Comp: DOMPanel },
+  positions:  { title: 'Positions',       Comp: Panel_Positions },
+  history:    { title: 'Order History',   Comp: Panel_OrderHistory },
+  account:    { title: 'Account Summary', Comp: Panel_AccountBalance },
+  quotes:     { title: 'Quote History',   Comp: QuoteHistory },
+  chart:      { title: 'K 線圖',          Comp: ChartPanel },
+  watch:      { title: '自選報價',         Comp: WatchlistPanel },
+  quoteboard: { title: '報價看板',         Comp: QuoteBoardPanel },
+  mchart:     { title: '多圖看盤',         Comp: MultiChartPanel },
+  tape:       { title: '逐筆成交',         Comp: TimeSalesPanel },
+  movers:     { title: '盤勢排行',         Comp: MoversPanel },
 };
 
 const PanelWindow: React.FC = () => {
