@@ -19,6 +19,7 @@ import { useTradingContext } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { SymbolPicker } from './SymbolPicker';
 import PanelTitle from './ui/PanelTitle';
+import { UP_COLOR, DOWN_COLOR } from '../utils/priceColor';
 import { formatPrice } from '../utils/instrument';
 import { apiClient } from '../api/client';
 
@@ -212,13 +213,13 @@ const WatchlistPanel: React.FC = () => {
                       )}
                     </div>
                   </td>
-                  <td className={`px-2 py-1 text-right font-mono ${isStaleData ? 'text-slate-600' : up ? 'text-red-400' : down ? 'text-emerald-400' : 'text-slate-300'}`}>
+                  <td className={`px-2 py-1 text-right font-mono ${isStaleData ? 'text-slate-600' : up ? UP_COLOR : down ? DOWN_COLOR : 'text-slate-300'}`}>
                     {price > 0 ? formatPrice(price, sym) : '—'}
                   </td>
-                  <td className={`px-2 py-1 text-right font-mono ${up ? 'text-red-400' : down ? 'text-emerald-400' : 'text-slate-500'}`}>
+                  <td className={`px-2 py-1 text-right font-mono ${up ? UP_COLOR : down ? DOWN_COLOR : 'text-slate-500'}`}>
                     {price > 0 && ref > 0 ? `${change > 0 ? '+' : ''}${change.toFixed(2)}` : '—'}
                   </td>
-                  <td className={`px-2 py-1 text-right font-mono ${up ? 'text-red-400' : down ? 'text-emerald-400' : 'text-slate-500'}`}>
+                  <td className={`px-2 py-1 text-right font-mono ${up ? UP_COLOR : down ? DOWN_COLOR : 'text-slate-500'}`}>
                     {price > 0 && ref > 0 ? `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%` : '—'}
                   </td>
                   <td className="px-1 py-1 text-right">

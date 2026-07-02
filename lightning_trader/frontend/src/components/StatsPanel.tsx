@@ -15,6 +15,7 @@
 import React, { useEffect, useState } from 'react';
 import { Award, RefreshCw } from 'lucide-react';
 import { apiClient } from '../api/client';
+import { UP_COLOR, DOWN_COLOR } from '../utils/priceColor';
 
 type Stats = {
   count_total: number;
@@ -74,8 +75,8 @@ function fmtInterval(s: number | null): string {
 
 const Tile: React.FC<{ label: string; value: string; sub?: string; tone?: 'pos' | 'neg' | 'neu' }> = ({ label, value, sub, tone = 'neu' }) => {
   const color =
-    tone === 'pos' ? 'text-red-400'
-    : tone === 'neg' ? 'text-emerald-400'
+    tone === 'pos' ? UP_COLOR
+    : tone === 'neg' ? DOWN_COLOR
     : 'text-slate-200';
   return (
     <div className="bg-slate-900/50 border border-slate-700/50 rounded p-2 min-w-0">

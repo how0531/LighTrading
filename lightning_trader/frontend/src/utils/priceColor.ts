@@ -18,3 +18,11 @@ export function priceColor(delta: number): string {
   if (delta < 0) return DOWN_COLOR;
   return FLAT_COLOR;
 }
+
+/**
+ * 買賣別顏色：買=紅、賣=綠（與漲跌同色系）。
+ * 收斂原本各面板 green-400 / emerald-400 混用的情況。
+ */
+export function actionColor(action: string): string {
+  return (action || '').toLowerCase() === 'buy' ? UP_COLOR : DOWN_COLOR;
+}

@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { getOrderHistory } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
+import { actionColor } from '../utils/priceColor';
 
 interface FilledTrade {
   time: string;
@@ -77,7 +78,7 @@ const Panel_TradeHistory: React.FC = () => {
                     {t.time.split('T')[1]?.split('.')[0] || t.time}
                   </td>
                   <td className="px-2 py-1.5 font-mono font-medium text-slate-200">{t.symbol}</td>
-                  <td className={`px-2 py-1.5 font-bold ${t.action === 'Buy' ? 'text-red-400' : 'text-green-400'}`}>
+                  <td className={`px-2 py-1.5 font-bold ${actionColor(t.action)}`}>
                     {t.action === 'Buy' ? '買' : '賣'}
                   </td>
                   <td className="px-2 py-1.5 text-right font-mono tabular-nums text-slate-300">

@@ -114,7 +114,7 @@ const TimeSalesPanel: React.FC = () => {
           外 <span className="text-red-400 font-bold">{buyPct}%</span>
         </span>
         <span className="font-mono text-slate-400 flex-shrink-0" title="外盤量 - 內盤量">
-          Δ <span className={`font-bold ${summary.delta > 0 ? 'text-red-400' : summary.delta < 0 ? 'text-emerald-400' : 'text-slate-300'}`}>
+          Δ <span className={`font-bold ${summary.delta > 0 ? UP_COLOR : summary.delta < 0 ? DOWN_COLOR : 'text-slate-300'}`}>
             {summary.delta > 0 ? '+' : ''}{summary.delta}
           </span>
         </span>

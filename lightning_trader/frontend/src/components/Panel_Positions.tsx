@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import PanelTitle from './ui/PanelTitle';
+import { actionColor, UP_COLOR, DOWN_COLOR } from '../utils/priceColor';
 import { getPositions, getAccounts, apiClient } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
@@ -351,7 +352,7 @@ const Panel_Positions: React.FC = () => {
                               {fills.slice(0, 20).map((f, fi) => (
                                 <tr key={fi} className="text-slate-400">
                                   <td className="py-0.5 text-slate-500">{new Date(f.ts).toLocaleString()}</td>
-                                  <td className={`py-0.5 ${f.action === 'Buy' ? 'text-red-400' : 'text-green-400'}`}>
+                                  <td className={`py-0.5 ${actionColor(f.action)}`}>
                                     {f.action === 'Buy' ? '買' : '賣'}
                                   </td>
                                   <td className="py-0.5 text-right text-slate-300">{f.price.toLocaleString()}</td>
@@ -377,7 +378,7 @@ const Panel_Positions: React.FC = () => {
       {positions.length > 0 && (
         <div className={`px-3 py-2 mt-1 rounded border flex justify-between items-center text-[11px] font-mono tabular-nums ${totalRealtimePnl >= 0 ? 'border-red-800/40 bg-red-950/20' : 'border-emerald-800/40 bg-emerald-950/20'}`}>
           <span className="text-slate-400 font-bold">即時總損益</span>
-          <span className={`font-black text-sm ${totalRealtimePnl >= 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+          <span className={`font-black text-sm ${totalRealtimePnl >= 0 ? UP_COLOR : DOWN_COLOR}`}>
             {totalRealtimePnl > 0 ? '+' : ''}{totalRealtimePnl.toLocaleString()}
           </span>
         </div>
