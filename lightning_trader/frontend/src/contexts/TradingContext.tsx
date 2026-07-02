@@ -5,7 +5,7 @@ import { apiClient } from '../api/client';
 import { computeLocalPnL } from '../utils/pnl';
 import { useToast } from './ToastContext';
 
-interface AccountPosition {
+export interface AccountPosition {
   symbol: string; qty: number; direction: 'Buy' | 'Sell'; price: number; pnl: number; account?: string; raw_qty?: number;
 }
 
