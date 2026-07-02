@@ -1,5 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import type { QuoteData, BidAskData } from '../types';
+import type { WSMessage } from '../utils/wsMessages';
 import { apiClient } from '../api/client';
 import { computeLocalPnL } from '../utils/pnl';
 import { useToast } from './ToastContext';
@@ -19,7 +20,7 @@ export interface RealtimePosition extends AccountPosition {
 interface AccountSummary {
   "當日交易": number; "參考損益": number; positions: AccountPosition[]; is_simulation?: boolean; active_stock?: string; active_future?: string; person_id?: string; msg_count?: number;
 }
-interface AccountInfo {
+export interface AccountInfo {
   account_id: string; category: string; person_id: string; broker_id: string; account_name: string;
 }
 export interface WorkingOrder {
@@ -140,7 +141,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       if (newSeq >= snapshotSeqRef.current) {
         snapshotSeqRef.current = newSeq;
-        const active: WorkingOrder[] = historyList.filter((o: any) =>
+        const active: WorkingOrder[] = historyList.filter((o: { status?: string }) =>
           o.status === 'PendingSubmit' || o.status === 'PreSubmitted' ||
           o.status === 'Submitted' || o.status === 'PartFilled'
         );
@@ -335,8 +336,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         lastMessageTimeRef.current = Date.now();
         if (isStaleRef.current) { isStaleRef.current = false; setIsStale(false); }
 
-        const data = JSON.parse(event.data);
-        const isMatch = (payload: any): boolean => {
+        // 型別以 utils/wsMessages 的 WSMessage union 為準（對照後端 bridge.py 實際欄位）
+        const data: WSMessage = JSON.parse(event.data);
+        const isMatch = (payload: { Symbol?: unknown } | null | undefined): boolean => {
           if (!payload?.Symbol) return true;
           const sym = String(payload.Symbol).trim().toUpperCase();
           const target = targetSymbolRef.current.trim().toUpperCase();
@@ -399,7 +401,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
             }
           }
         } else if (data.type === 'AccountUpdate' && data.data) {
-          pendingAccountRef.current = data.data;
+          pendingAccountRef.current = data.data as AccountSummary;
         } else if (data.type === 'PnLUpdate' && data.data) {
           // ★ 後端即時 PnL 推播：直接更新 state（後端已計算好所有持倉）
           const { positions: rtPos, total_pnl, total_realized } = data.data;
@@ -416,7 +418,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         } else if (data.type === 'SmartOrderUpdate' && data.data) {
           // 智慧單狀態更新（新增/觸發/已取消）
           setSmartOrders(prev => {
-            const incoming: SmartOrderData = data.data;
+            const incoming = data.data as SmartOrderData;
             const idx = prev.findIndex(o => o.id === incoming.id);
             if (idx >= 0) {
               const next = [...prev];

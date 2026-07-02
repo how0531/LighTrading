@@ -5,10 +5,13 @@ import type { SizingMode } from '../../utils/sizing';
 import { lotsToAmount } from '../../utils/sizing';
 import { netPnL as computeNetPnL } from '../../utils/fees';
 import { getMultiplier } from '../../types';
+import type { QuoteData } from '../../types';
+import type { AccountInfo } from '../../contexts/TradingContext';
 import { UP_COLOR, DOWN_COLOR } from '../../utils/priceColor';
 
 interface DOMHeaderProps {
-  qData: any;
+  /** useDOMLogic 的 `quote || {}`，故為 Partial（未收到報價時是空物件） */
+  qData: Partial<QuoteData>;
   targetSymbol: string;
   currentPrice: number;
   refPrice: number;
@@ -16,7 +19,7 @@ interface DOMHeaderProps {
   limitDown: number;
   isSimulation: boolean;
   fullPrices: number[];
-  accounts: any[];
+  accounts: AccountInfo[];
   activeAccount: string | null;
   selectAccount: (acc: string) => void;
   currentPosition: any;
