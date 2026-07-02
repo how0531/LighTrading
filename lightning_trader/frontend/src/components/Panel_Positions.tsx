@@ -1,5 +1,6 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
+import PanelTitle from './ui/PanelTitle';
 import { getPositions, getAccounts, apiClient } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
@@ -172,10 +173,7 @@ const Panel_Positions: React.FC = () => {
     <div className="bg-slate-800/50 rounded-lg p-3 border border-slate-700 h-full flex flex-col glass-panel shadow-2xl relative">
       <div className="flex flex-col gap-2.5 mb-3">
         <div className="flex justify-between items-center">
-          <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
-            <span className="w-1 h-3.5 bg-amber-500 rounded-full"></span>
-            即時持倉 (Positions)
-          </h3>
+          <PanelTitle>即時持倉 (Positions)</PanelTitle>
           <button
             onClick={() => fetchPositions(selectedAccountId)}
             className="text-[10px] bg-slate-700/50 hover:bg-slate-600 px-2 py-0.5 rounded transition-all text-slate-400 border border-slate-600"

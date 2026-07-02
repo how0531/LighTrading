@@ -11,6 +11,8 @@
 import React, { useMemo, useState } from 'react';
 import { useTradingContext } from '../contexts/TradingContext';
 import { formatPrice } from '../utils/instrument';
+import PanelTitle from './ui/PanelTitle';
+import { UP_COLOR, DOWN_COLOR, FLAT_COLOR } from '../utils/priceColor';
 import { classifyAggressor, isBigTrade, summarizeFlow, type FlowTick } from '../utils/tickFlow';
 
 const THRESHOLD_KEY = 'lighTrade_tape_threshold';
@@ -55,10 +57,7 @@ const TimeSalesPanel: React.FC = () => {
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
       <div className="px-3 py-2 border-b border-slate-700/50 flex items-center justify-between gap-2">
-        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2 min-w-0">
-          <span className="w-1 h-3.5 bg-amber-500 rounded-full flex-shrink-0"></span>
-          <span className="truncate">逐筆成交 ({targetSymbol || '—'})</span>
-        </h3>
+        <PanelTitle>逐筆成交 ({targetSymbol || '—'})</PanelTitle>
         <label className="flex items-center gap-1 text-[10px] text-slate-500 flex-shrink-0" title="大單高亮門檻（張/口）">
           大單≥
           <input
@@ -88,7 +87,7 @@ const TimeSalesPanel: React.FC = () => {
               const prevPrice = quoteHistory[idx + 1]?.Price;
               const side = classifyAggressor(q.TickType, q.Price, prevPrice);
               const big = isBigTrade(q.Volume, threshold);
-              const color = side === 'buy' ? 'text-red-400' : side === 'sell' ? 'text-emerald-400' : 'text-slate-400';
+              const color = side === 'buy' ? UP_COLOR : side === 'sell' ? DOWN_COLOR : FLAT_COLOR;
               return (
                 <tr key={idx} className={`border-b border-slate-800/40 hover:bg-slate-800/60 ${big ? 'bg-amber-500/10' : ''}`}>
                   <td className="px-2 py-0.5 text-slate-500">{fmtTime(q.TickTime)}</td>

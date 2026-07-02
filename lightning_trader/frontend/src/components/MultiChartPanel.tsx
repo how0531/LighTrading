@@ -11,6 +11,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { LayoutGrid, Square, Grid2x2 } from 'lucide-react';
 import { useTradingContext } from '../contexts/TradingContext';
 import ChartPanel from './ChartPanel';
+import PanelTitle from './ui/PanelTitle';
 
 type GridMode = 1 | 2 | 4;
 const STORAGE_KEY = 'lighTrade_mchart';
@@ -83,10 +84,7 @@ const MultiChartPanel: React.FC = () => {
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
       <div className="px-3 py-2 border-b border-slate-700/50 flex items-center justify-between gap-2">
-        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
-          <span className="w-1 h-3.5 bg-amber-500 rounded-full"></span>
-          多圖看盤
-        </h3>
+        <PanelTitle>多圖看盤</PanelTitle>
         <div className="flex items-center gap-1">
           {([
             { m: 1 as GridMode, Icon: Square, title: '單圖' },
