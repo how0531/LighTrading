@@ -53,6 +53,18 @@
 
 ---
 
+## 架構整頓 + Phase 1 地基（PR #30）
+
+| 主題 | 內容 |
+|---|---|
+| 治理流程 | 各部位 agent 提案 → PM agent 裁決 → 僅實作核可項；高風險（需 Shioaji SDK）一律延後 |
+| 後端/核心 | 乘數表單一真相源 contract_specs、_deal_prices FIFO 上限、place_order 組單防禦、SmartOrderEngine RLock |
+| UI 一致性 | PanelTitle 共用元件（7 面板）、priceColor/actionColor 全站 rollout、修 Tick Stream 紅綠顛倒 |
+| 型別安全 | wsMessages.ts WS union（對照 bridge.py 實際欄位）、TradingContext/DOMHeader/DOMTable 脫離 any |
+| 設計藍圖 | tasks/PLATFORM_DESIGN.md：好懂/操作多樣/功能完整三支柱 + 四階段路線圖 |
+
+---
+
 ## 看盤環境（Sprint 36）
 
 | 主題 | 內容 |
