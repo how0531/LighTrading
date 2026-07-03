@@ -1,8 +1,8 @@
 import React from 'react';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useQuotes } from '../contexts/TradingContext';
 
 const QuoteHistory: React.FC = () => {
-  const { quoteHistory } = useTradingContext();
+  const { quoteHistory } = useQuotes();
 
   return (
     <div className="glass-panel flex flex-col h-full rounded-xl border border-slate-700/50 overflow-hidden">

@@ -11,14 +11,16 @@
  */
 import React, { useEffect, useState } from 'react';
 import { X, Zap, TrendingDown, Plus } from 'lucide-react';
-import { apiClient, normalizeApiError } from '../api/client';
-import { useTradingContext } from '../contexts/TradingContext';
+import { apiClient } from '../api/client';
+import { useTradingCore } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
+import { useApiErrorToast } from '../hooks/useApiErrorToast';
 import { formatPrice } from '../utils/instrument';
 
 const SmartOrdersPanel: React.FC = () => {
-  const { smartOrders, refreshSmartOrders, subscribe, targetSymbol } = useTradingContext();
+  const { smartOrders, refreshSmartOrders, subscribe, targetSymbol } = useTradingCore();
   const { toast } = useToast();
+  const handleApiError = useApiErrorToast();
   // R3：trailing-stop 新增表單
   const [showAdd, setShowAdd] = useState(false);
   const [addAction, setAddAction] = useState<'Buy' | 'Sell'>('Sell');
@@ -43,8 +45,7 @@ const SmartOrdersPanel: React.FC = () => {
       setShowAdd(false);
       setTimeout(() => refreshSmartOrders(), 200);
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '新增移動停損失敗');
+      handleApiError(e, '新增移動停損失敗');
     }
   };
 
@@ -54,8 +55,7 @@ const SmartOrdersPanel: React.FC = () => {
       toast.success(`智慧單 ${id} 已取消`);
       setTimeout(() => refreshSmartOrders(), 200);
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '取消失敗');
+      handleApiError(e, '取消失敗');
     }
   };
 
@@ -70,8 +70,7 @@ const SmartOrdersPanel: React.FC = () => {
           toast.success('已取消全部智慧單');
           setTimeout(() => refreshSmartOrders(), 200);
         } catch (e) {
-          const err = normalizeApiError(e);
-          toast.error(err.user_msg || '取消全部失敗');
+          handleApiError(e, '取消全部失敗');
         }
       },
     });

@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { getOrderHistory } from '../api/client';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useTradingCore } from '../contexts/TradingContext';
 
 interface FilledTrade {
   time: string;
@@ -10,20 +10,31 @@ interface FilledTrade {
   filled_qty: number;
 }
 
+// backend /order_history 回傳的原始委託（只列出這裡會用到的欄位）
+interface RawOrder {
+  time: string;
+  symbol?: string;
+  action: string;
+  status: string;
+  filled_avg_price?: number;
+  filled_qty?: number;
+}
+
 const Panel_TradeHistory: React.FC = () => {
-  const { accountSummary } = useTradingContext();
+  const { accountSummary } = useTradingCore();
   const [trades, setTrades] = useState<FilledTrade[]>([]);
   const [isLoading, setIsLoading] = useState(true);
 
   const fetchTrades = useCallback(async () => {
     try {
-      const data = await getOrderHistory();
+      const data: RawOrder[] | { orders?: RawOrder[] } = await getOrderHistory();
+      const list: RawOrder[] = Array.isArray(data) ? data : (data?.orders || []);
       // 只保留已成交的委託
-      const filled = (data || [])
-        .filter((t: any) => t.status === 'Filled' && t.filled_qty > 0 && t.symbol?.trim())
-        .map((t: any) => ({
+      const filled = list
+        .filter((t) => t.status === 'Filled' && (t.filled_qty || 0) > 0 && t.symbol?.trim())
+        .map((t) => ({
           time: t.time,
-          symbol: t.symbol,
+          symbol: t.symbol || '',
           action: t.action as 'Buy' | 'Sell',
           filled_avg_price: t.filled_avg_price || 0,
           filled_qty: t.filled_qty || 0,

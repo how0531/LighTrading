@@ -10,7 +10,7 @@
  */
 import React, { useEffect, useMemo } from 'react';
 import { TrendingUp, TrendingDown } from 'lucide-react';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { formatPrice } from '../utils/instrument';
 import { rankMovers, computeBreadth, type MoverInput, type MoverRow } from '../utils/movers';
@@ -58,7 +58,8 @@ const MoverList: React.FC<{
 };
 
 const MoversPanel: React.FC = () => {
-  const { targetSymbol, subscribe, watchlistQuotes, watchSymbols } = useTradingContext();
+  const { targetSymbol, subscribe, watchSymbols } = useTradingCore();
+  const { watchlistQuotes } = useQuotes(); // 排行榜跟著 tick 更新
   const { settings } = useSettings();
   const list = settings.watchlist;
 

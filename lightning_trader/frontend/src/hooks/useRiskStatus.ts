@@ -13,7 +13,7 @@
  */
 import { useEffect, useRef, useState } from 'react';
 import { apiClient } from '../api/client';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useTradingCore } from '../contexts/TradingContext';
 
 export interface RiskStatus {
   trading_enabled: boolean;
@@ -26,7 +26,7 @@ export interface RiskStatus {
 const POLL_MS = 30_000;
 
 export function useRiskStatus(): RiskStatus | null {
-  const { isConnected } = useTradingContext();
+  const { isConnected } = useTradingCore();
   const [status, setStatus] = useState<RiskStatus | null>(null);
   const prevEnabledRef = useRef<boolean | null>(null);
 

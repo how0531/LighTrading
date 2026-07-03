@@ -12,7 +12,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { SymbolPicker } from './SymbolPicker';
 import { formatPrice } from '../utils/instrument';
@@ -41,7 +41,8 @@ const COLUMNS: Column[] = [
 ];
 
 const QuoteBoardPanel: React.FC = () => {
-  const { targetSymbol, subscribe, watchlistQuotes, watchSymbols } = useTradingContext();
+  const { targetSymbol, subscribe, watchSymbols } = useTradingCore();
+  const { watchlistQuotes } = useQuotes(); // 報價看板跟著 tick 更新
   const { settings, updateSetting } = useSettings();
   const list = settings.watchlist;
 

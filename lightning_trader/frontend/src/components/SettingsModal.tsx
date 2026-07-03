@@ -1,16 +1,19 @@
 import React, { useEffect, useState } from 'react';
-import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors, ShieldAlert, RotateCcw, FileDown, Bell } from 'lucide-react';
+import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors, ShieldAlert, RotateCcw, FileDown, Bell, KeyRound } from 'lucide-react';
 import { useSettings } from '../contexts/SettingsContext';
 import type { Settings, HotkeyItem } from '../contexts/SettingsContext';
-import { apiClient, normalizeApiError } from '../api/client';
+import { apiClient } from '../api/client';
 import { useToast } from './../contexts/ToastContext';
+import { useApiErrorToast } from '../hooks/useApiErrorToast';
+import { useTradingCore } from '../contexts/TradingContext';
+import { getApiToken, setApiToken } from '../utils/backendUrl';
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-type TabType = 'transaction' | 'dom' | 'risk' | 'notifications' | 'hotkeys' | 'splitOrder' | 'appearance';
+type TabType = 'transaction' | 'dom' | 'risk' | 'connection' | 'notifications' | 'hotkeys' | 'splitOrder' | 'appearance';
 
 interface RiskConfigShape {
   max_position_per_symbol: number;
@@ -36,9 +39,21 @@ const ACTION_OPTIONS: { value: HotkeyItem['action']; label: string }[] = [
 const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
   const { settings, updateSetting, resetSettings } = useSettings();
   const { toast } = useToast();
+  const handleApiError = useApiErrorToast();
+  const { forceReconnect } = useTradingCore();
   const [activeTab, setActiveTab] = useState<TabType>('transaction');
   const [capturingIdx, setCapturingIdx] = useState<number | null>(null);
   const [riskCfg, setRiskCfg] = useState<RiskConfigShape | null>(null);
+  // 連線/安全：API Token（localStorage: lightrade_api_token）
+  const [apiTokenDraft, setApiTokenDraft] = useState<string>(() => getApiToken());
+
+  const saveApiToken = (value: string) => {
+    setApiToken(value);
+    setApiTokenDraft(getApiToken());
+    // REST 靠 interceptor 每次讀取即可；WebSocket URL 帶 token → 強制重連套用
+    forceReconnect();
+    toast.success(value.trim() ? 'API Token 已儲存，連線已重建' : 'API Token 已清除，連線已重建');
+  };
 
   // 開啟對話框時拉一次最新風控設定
   useEffect(() => {
@@ -55,8 +70,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     try {
       await apiClient.put('/risk_config', patch);
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '更新風控失敗');
+      handleApiError(e, '更新風控失敗');
     }
   };
 
@@ -103,8 +117,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
       const pnl = r.summary?.realized_pnl_estimate ?? 0;
       toast.success(`日報已下載：${r.by_symbol.length} 商品 / 估算 PnL ${pnl.toLocaleString()}`);
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '取得日報失敗');
+      handleApiError(e, '取得日報失敗');
     }
   };
 
@@ -130,8 +143,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
         toast.info(`系統診斷：\n${text}`, { durationMs: 30000 });
       }
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '取得診斷失敗');
+      handleApiError(e, '取得診斷失敗');
     }
   };
 
@@ -142,8 +154,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
       const res = await apiClient.get('/risk_config');
       setRiskCfg(res.data as RiskConfigShape);
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '重置失敗');
+      handleApiError(e, '重置失敗');
     }
   };
 
@@ -153,6 +164,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     { id: 'transaction' as TabType, label: '交易設定',  icon: MousePointer2 },
     { id: 'dom'         as TabType, label: '閃電下單',  icon: Monitor },
     { id: 'risk'        as TabType, label: '風險控管',  icon: ShieldAlert },
+    { id: 'connection'  as TabType, label: '連線/安全', icon: KeyRound },
     { id: 'notifications' as TabType, label: '通知',    icon: Bell },
     { id: 'hotkeys'     as TabType, label: '快捷鍵',    icon: Keyboard },
     { id: 'splitOrder'  as TabType, label: '拆單設定',  icon: Scissors },
@@ -160,7 +172,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
   ];
 
   const handleToggle = (category: keyof Settings, field: string) => {
-    const currentCategory = settings[category] as any;
+    const currentCategory = settings[category] as Record<string, unknown>;
     updateSetting({
       [category]: { ...currentCategory, [field]: !currentCategory[field] }
     });
@@ -530,6 +542,47 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                     </section>
                   </>
                 )}
+              </div>
+            )}
+
+            {/* ── 連線 / 安全 ── */}
+            {activeTab === 'connection' && (
+              <div className="space-y-6">
+                <section>
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-2">API Token</h3>
+                  <p className="text-[11px] text-slate-500 mb-3">
+                    只有在後端有設定環境變數 <code className="text-slate-300">LIGHTRADE_API_TOKEN</code> 時才需要填。
+                    填入後所有 API 請求會帶 <code className="text-slate-300">X-API-Token</code> header、
+                    WebSocket 連線會帶 <code className="text-slate-300">?token=</code>。後端沒設定就留空即可。
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder="貼上與後端 LIGHTRADE_API_TOKEN 相同的值"
+                      value={apiTokenDraft}
+                      onChange={(e) => setApiTokenDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') saveApiToken(apiTokenDraft); }}
+                      className="flex-1 bg-[#101623] border border-[#29344A] rounded text-slate-200 px-3 py-2 text-sm font-mono outline-none focus:border-[#D4AF37]/50"
+                    />
+                    <button
+                      onClick={() => saveApiToken(apiTokenDraft)}
+                      className="px-3 py-2 bg-[#D4AF37] hover:bg-[#E5A344] text-[#101623] rounded text-xs font-bold transition-colors"
+                    >
+                      儲存
+                    </button>
+                    <button
+                      onClick={() => { setApiTokenDraft(''); saveApiToken(''); }}
+                      disabled={!apiTokenDraft && !getApiToken()}
+                      className="px-3 py-2 bg-slate-700/60 hover:bg-slate-700 text-slate-200 rounded text-xs font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      清除
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-600 italic mt-2">
+                    Token 儲存於本機瀏覽器（localStorage），不會隨設定同步到後端。儲存後會自動重建 WebSocket 連線。
+                  </p>
+                </section>
               </div>
             )}
 
@@ -918,7 +971,9 @@ const QtyBySymbolEditor: React.FC<{ settings: Settings; updateSetting: (u: Parti
   );
 };
 
-const ToggleItem = ({ label, description, enabled, onToggle }: any) => (
+const ToggleItem = ({ label, description, enabled, onToggle }: {
+  label: string; description?: string; enabled: boolean; onToggle: () => void;
+}) => (
   <div className="flex items-center justify-between p-4 rounded-lg bg-white/5 border border-white/5 hover:border-white/10 transition-all">
     <div>
       <div className="text-sm font-medium text-white">{label}</div>
@@ -950,7 +1005,9 @@ const NumInput = ({ label, description, value, min, max, onChange }: {
   </div>
 );
 
-const ThemeCard = ({ theme, label, isActive, onClick }: any) => (
+const ThemeCard = ({ theme, label, isActive, onClick }: {
+  theme: 'dark' | 'light'; label: string; isActive: boolean; onClick: () => void;
+}) => (
   <button
     onClick={onClick}
     className={`flex-1 group relative p-4 rounded-xl border-2 transition-all duration-300 overflow-hidden ${

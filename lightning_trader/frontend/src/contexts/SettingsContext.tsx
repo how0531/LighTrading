@@ -1,3 +1,5 @@
+/* eslint-disable react-refresh/only-export-components --
+ * Context Provider 與 hook 需同檔共享；改動本檔會整頁 HMR reload，可接受 */
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { apiClient } from '../api/client';
 import type { SizingMode } from '../utils/sizing';

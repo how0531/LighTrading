@@ -1,6 +1,6 @@
 import React, { useEffect, useState, useCallback } from 'react';
 import { apiClient } from '../api/client';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { netPnL as computeNetPnL } from '../utils/fees';
 
@@ -12,7 +12,8 @@ interface BalanceData {
 }
 
 const Panel_AccountBalance: React.FC = () => {
-  const { isConnected, totalRealtimePnl, totalRealizedPnl, realtimePositions } = useTradingContext();
+  const { isConnected } = useTradingCore();
+  const { totalRealtimePnl, totalRealizedPnl, realtimePositions } = useQuotes(); // 即時 PnL 需要 tick 資料
   const { settings } = useSettings();
   const [balance, setBalance] = useState<BalanceData | null>(null);
   const [isLoading, setIsLoading] = useState(true);

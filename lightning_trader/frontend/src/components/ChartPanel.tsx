@@ -25,7 +25,7 @@ import {
   type LineData,
   type Time,
 } from 'lightweight-charts';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { apiClient } from '../api/client';
 import {
   computeSMA as _sma, computeVWAP as _vwap, computeRSI as _rsi,
@@ -111,7 +111,8 @@ const IndicatorBtn: React.FC<{ on: boolean; onClick: () => void; label: string; 
   );
 
 const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
-  const { targetSymbol, quote, watchlistQuotes } = useTradingContext();
+  const { targetSymbol } = useTradingCore();
+  const { quote, watchlistQuotes } = useQuotes(); // K 線需要 tick 資料
   // 有 symbol prop → 固定該商品；否則跟隨 targetSymbol
   const effSymbol = (symbol ?? targetSymbol) || '';
   const isPinned = !!symbol;

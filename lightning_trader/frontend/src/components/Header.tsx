@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw } from 'lucide-react';
 import { getAccountBalance } from '../api/client';
 import { SymbolPicker } from './SymbolPicker';
@@ -32,7 +32,8 @@ interface HeaderProps {
 }
 
 const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode, layoutPreset = 'custom', onSelectPreset }) => {
-  const { isConnected, isTickStale, targetSymbol, subscribe, totalRealtimePnl, forceReconnect } = useTradingContext();
+  const { isConnected, isTickStale, targetSymbol, subscribe, forceReconnect } = useTradingCore();
+  const { totalRealtimePnl } = useQuotes(); // 即時 PnL 跟著 tick 走 → 高頻 context
   const [symInput, setSymInput] = React.useState(targetSymbol);
   const [balance, setBalance] = useState<BalanceState | null>(null);
   const [latency, setLatency] = useState<LatencyState | null>(null);

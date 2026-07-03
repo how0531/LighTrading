@@ -29,7 +29,7 @@ const LoginPanel: React.FC = () => {
   useEffect(() => {
     apiClient.get('/accounts').then(res => {
       if (res.data && res.data.length > 0) {
-        console.log('[Login] 後端已登入，自動跳轉 Dashboard');
+        console.info('[Login] 後端已登入，自動跳轉 Dashboard');
         navigate('/dashboard');
       }
     }).catch(() => { /* 後端未啟動或未登入，留在登入頁 */ });

@@ -1,3 +1,5 @@
+/* eslint-disable react-refresh/only-export-components --
+ * Context Provider 與 hook 需同檔共享；改動本檔會整頁 HMR reload，可接受 */
 /**
  * ToastContext — 全域訊息中心
  *

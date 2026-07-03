@@ -15,7 +15,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { X, Eye, GripVertical, ListPlus } from 'lucide-react';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { SymbolPicker } from './SymbolPicker';
 import { formatPrice } from '../utils/instrument';
@@ -36,7 +36,8 @@ function readLegacyList(): string[] | null {
 }
 
 const WatchlistPanel: React.FC = () => {
-  const { targetSymbol, subscribe, watchlistQuotes, watchSymbols, accountSummary } = useTradingContext();
+  const { targetSymbol, subscribe, watchSymbols, accountSummary } = useTradingCore();
+  const { watchlistQuotes } = useQuotes(); // 自選報價需要 tick 資料
   const { settings, updateSetting } = useSettings();
   const list = settings.watchlist;
   const setList = (next: string[] | ((prev: string[]) => string[])) => {
@@ -57,7 +58,7 @@ const WatchlistPanel: React.FC = () => {
       apiClient.get('/symbols/search', { params: { q: sym, limit: 5 } })
         .then(res => {
           const hits = res.data;
-          const hit = hits.find((h: any) => h.symbol === sym) || hits[0];
+          const hit = hits.find((h: { symbol: string; name?: string }) => h.symbol === sym) || hits[0];
           if (hit && hit.name) {
             setNamesCache(prev => ({ ...prev, [sym]: hit.name }));
           }

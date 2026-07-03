@@ -1,5 +1,8 @@
 import React, { useMemo } from 'react';
 import { getTickSize, formatPrice } from '../../utils/instrument';
+import type { QuoteData, BidAskData } from '../../types';
+import type { AccountPosition, SmartOrderData } from '../../contexts/TradingContext';
+import type { OrderFeedback } from '../../hooks/useDOMLogic';
 
 // Native CSS virtualization：瀏覽器自動跳過渲染畫面外的 row。
 // Chromium / WebKit / Firefox 都已支援（Electron 32 內嵌 Chromium ≥ 130 沒問題）。
@@ -18,7 +21,7 @@ interface DOMTableProps {
   fullPrices: number[];
   isStale: boolean;
   compactMode?: boolean;        // ★ Sprint 10 R7a: h-6 vs h-8
-  qData: any;
+  qData: Partial<QuoteData>;
   currentPrice: number;
   refPrice: number;
   limitUp: number;
@@ -26,20 +29,20 @@ interface DOMTableProps {
   highPrice: number;
   lowPrice: number;
   targetSymbol: string;
-  currentPosition: any;
+  currentPosition: AccountPosition | null;
   flashDir: 'up' | 'down' | null;
-  smartOrders: any[];
+  smartOrders: SmartOrderData[];
   workingBuyMap: Map<number, number>;
   workingSellMap: Map<number, number>;
-  bData: any;
-  orderFeedback: any;
+  bData: Partial<BidAskData>;
+  orderFeedback: OrderFeedback | null;
   handleAddStopOrder: (p: number, action: 'Buy'|'Sell') => void;
   handleCancelOrder: (action: 'Buy'|'Sell', p?: number) => void;
   handlePlaceOrder: (p: number, action: 'Buy'|'Sell') => void;
-  handleDropOrder: (e: React.DragEvent<HTMLTableCellElement>, p: number, action: 'Buy'|'Sell') => void;
+  handleDropOrder: (e: React.DragEvent, p: number, action: 'Buy'|'Sell') => void;
 }
 
-export const DOMTable: React.FC<DOMTableProps> = ({
+const DOMTableInner: React.FC<DOMTableProps> = ({
   fullPrices, isStale, compactMode = false, qData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice,
   targetSymbol, currentPosition, flashDir, smartOrders, workingBuyMap, workingSellMap, bData,
   orderFeedback, handleAddStopOrder, handleCancelOrder, handlePlaceOrder, handleDropOrder
@@ -184,7 +187,7 @@ export const DOMTable: React.FC<DOMTableProps> = ({
               <td className="border-r border-slate-800 hover:bg-slate-700 cursor-pointer"
                 onClick={(e) => {
                   if (e.shiftKey) { handleAddStopOrder(p, 'Buy'); return; }
-                  myBuyQty > 0 && handleCancelOrder('Buy', p);
+                  if (myBuyQty > 0) handleCancelOrder('Buy', p);
                 }}>
                 {smartBuyLine && <span className="text-purple-400 text-[9px] font-bold select-none">⚡</span>}
                 {!smartBuyLine && myBuyQty > 0 && <span className="font-bold text-[10px] text-red-400 hover:text-white transition-colors">✕</span>}
@@ -194,7 +197,7 @@ export const DOMTable: React.FC<DOMTableProps> = ({
                 onClick={() => handlePlaceOrder(p, 'Buy')}
                 onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropTarget({ pKey, action: 'Buy' }); }}
                 onDragLeave={() => setDropTarget((cur) => (cur && cur.pKey === pKey && cur.action === 'Buy' ? null : cur))}
-                onDrop={(e) => { setDropTarget(null); handleDropOrder(e as any, p, 'Buy'); }}
+                onDrop={(e) => { setDropTarget(null); handleDropOrder(e, p, 'Buy'); }}
               >
                 {myBuyQty > 0 && (
                   <span draggable
@@ -257,7 +260,7 @@ export const DOMTable: React.FC<DOMTableProps> = ({
                 onClick={() => handlePlaceOrder(p, 'Sell')}
                 onDragOver={(e) => { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; setDropTarget({ pKey, action: 'Sell' }); }}
                 onDragLeave={() => setDropTarget((cur) => (cur && cur.pKey === pKey && cur.action === 'Sell' ? null : cur))}
-                onDrop={(e) => { setDropTarget(null); handleDropOrder(e as any, p, 'Sell'); }}
+                onDrop={(e) => { setDropTarget(null); handleDropOrder(e, p, 'Sell'); }}
               >
                 {mySellQty > 0 && (
                   <span draggable
@@ -276,7 +279,7 @@ export const DOMTable: React.FC<DOMTableProps> = ({
               <td className="hover:bg-slate-700 cursor-pointer"
                 onClick={(e) => {
                   if (e.shiftKey) { handleAddStopOrder(p, 'Sell'); return; }
-                  mySellQty > 0 && handleCancelOrder('Sell', p);
+                  if (mySellQty > 0) handleCancelOrder('Sell', p);
                 }}>
                 {smartSellLine && <span className="text-purple-400 text-[9px] font-bold select-none">⚡</span>}
                 {!smartSellLine && mySellQty > 0 && <span className="font-bold text-[10px] text-emerald-400 hover:text-white transition-colors">✕</span>}
@@ -288,3 +291,8 @@ export const DOMTable: React.FC<DOMTableProps> = ({
     </table>
   );
 };
+
+// ★ React.memo：DOM ladder 只在自己的 props 真的變動時重繪。
+// 搭配 TradingContext 的高/低頻拆分，非 tick 造成的 provider 重繪不再掃到 500 列表格。
+export const DOMTable = React.memo(DOMTableInner);
+DOMTable.displayName = 'DOMTable';

@@ -20,7 +20,7 @@ const ACTION_LABEL: Record<string, string> = {
   ScrollCenter: '置中',
 };
 
-export const DOMFooter: React.FC<DOMFooterProps> = ({
+const DOMFooterInner: React.FC<DOMFooterProps> = ({
   isSyncing, handleManualSync, handleCancelOrder, handleFlatten, handleReverse
 }) => {
   const { toast } = useToast();
@@ -81,3 +81,7 @@ export const DOMFooter: React.FC<DOMFooterProps> = ({
     </div>
   );
 };
+
+// handler props 皆為 useCallback，memo 可擋掉 tick 造成的重繪
+export const DOMFooter = React.memo(DOMFooterInner);
+DOMFooter.displayName = 'DOMFooter';

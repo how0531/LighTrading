@@ -1,7 +1,8 @@
 import React, { useEffect, useState } from 'react';
-import { getOrderHistory, apiClient, normalizeApiError } from '../api/client';
-import { useTradingContext } from '../contexts/TradingContext';
+import { getOrderHistory, apiClient } from '../api/client';
+import { useTradingCore } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
+import { useApiErrorToast } from '../hooks/useApiErrorToast';
 
 interface Trade {
   time: string;
@@ -46,8 +47,9 @@ const formatStatusText = (status: string, failedMsg?: string): string => {
 };
 
 const Panel_OrderHistory: React.FC = () => {
-  const { accountSummary, cancelOrder, isConnected } = useTradingContext();
+  const { accountSummary, cancelOrder, isConnected } = useTradingCore();
   const { toast } = useToast();
+  const handleApiError = useApiErrorToast();
   const [trades, setTrades] = useState<Trade[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
@@ -75,7 +77,7 @@ const Panel_OrderHistory: React.FC = () => {
       apiClient.get('/symbols/search', { params: { q: sym, limit: 5 } })
         .then(res => {
           const hits = res.data || [];
-          const hit = hits.find((h: any) => h.symbol === sym);
+          const hit = hits.find((h: { symbol: string; name?: string }) => h.symbol === sym);
           if (hit && hit.name) {
             setNamesCache(prev => ({ ...prev, [sym]: hit.name }));
           } else {
@@ -84,7 +86,7 @@ const Panel_OrderHistory: React.FC = () => {
               apiClient.get('/symbols/search', { params: { q: cleanSym, limit: 5 } })
                 .then(res2 => {
                   const hits2 = res2.data || [];
-                  const hit2 = hits2.find((h: any) => h.symbol === cleanSym);
+                  const hit2 = hits2.find((h: { symbol: string; name?: string }) => h.symbol === cleanSym);
                   if (hit2 && hit2.name) {
                     setNamesCache(prev => ({ ...prev, [sym]: hit2.name }));
                   } else {
@@ -108,7 +110,7 @@ const Panel_OrderHistory: React.FC = () => {
   const fetchHistory = async () => {
     setIsLoading(true);
     try {
-      const data: any = await getOrderHistory();
+      const data: Trade[] | { orders?: Trade[] } = await getOrderHistory();
       const historyTrades = Array.isArray(data) ? data : (data?.orders || []);
       setTrades(historyTrades);
       setLastSyncTime(new Date());
@@ -143,8 +145,7 @@ const Panel_OrderHistory: React.FC = () => {
       toast.success(`${t.symbol} 減量至 ${newQty}`);
       setTimeout(fetchHistory, 500);
     } catch (err) {
-      const e = normalizeApiError(err);
-      toast.error(e.user_msg || '減量失敗');
+      handleApiError(err, '減量失敗');
     }
   };
 

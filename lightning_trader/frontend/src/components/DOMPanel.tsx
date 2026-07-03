@@ -1,12 +1,14 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useDOMLogic } from '../hooks/useDOMLogic';
 import { DOMHeader } from './DOM/DOMHeader';
 import { DOMTable } from './DOM/DOMTable';
 import { DOMFooter } from './DOM/DOMFooter';
 import { getTickSize } from '../utils/instrument';
-import { apiClient, normalizeApiError } from '../api/client';
+import { apiClient } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
+import { useApiErrorToast } from '../hooks/useApiErrorToast';
 import { useSettings } from '../contexts/SettingsContext';
+import type { AccountPosition } from '../contexts/TradingContext';
 import { getMultiplier } from '../types';
 import type { SizingMode } from '../utils/sizing';
 import { nearestLadderPrice, resolveAnchorTarget, type DomAnchor } from '../utils/domAnchor';
@@ -15,13 +17,13 @@ import { nearestLadderPrice, resolveAnchorTarget, type DomAnchor } from '../util
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 export const DOMPanel: React.FC = () => {
-  const logic = useDOMLogic();
   const { toast } = useToast();
+  const handleApiError = useApiErrorToast();
   const { settings, updateSetting } = useSettings();
   const compactMode = settings.visuals.compactMode;
   const {
     qData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice, isSimulation,
-    isStale, tableRef, hasScrolled, flashDir,
+    isStale, flashDir,
     orderValue, setOrderValue, orderType, setOrderType, priceType, setPriceType,
     orderCond, setOrderCond, orderLot, setOrderLot,
     isSyncing, handleManualSync,
@@ -30,7 +32,11 @@ export const DOMPanel: React.FC = () => {
     orderFeedback, smartOrders, bData,
     targetSymbol, accounts, activeAccount, selectAccount,
     hotkeys, accountEquity,
-  } = logic;
+  } = useDOMLogic();
+
+  // ladder scroll 狀態（local ref — 不進 hook，避免跨模組改動 ref.current）
+  const tableRef = useRef<HTMLDivElement>(null);
+  const hasScrolledRef = useRef(false);
 
   // --- 損益重算 ---
   const netQty = currentPosition ? (currentPosition.direction === 'Buy' ? currentPosition.qty : -currentPosition.qty) : 0;
@@ -42,23 +48,22 @@ export const DOMPanel: React.FC = () => {
       const localPnl = Math.round((cp - currentPosition.price) * netQty * multiplier);
       if (localPnl !== 0) return localPnl;
     }
-    return (currentPosition as any)?.backendPnl || 0;
+    return (currentPosition as (AccountPosition & { backendPnl?: number }) | null)?.backendPnl || 0;
   }, [currentPrice, refPrice, currentPosition, netQty, targetSymbol]);
 
   // --- 核心：以參考價為中心展開 500 檔價格 ---
-  const [priceBase, setPriceBase] = useState(0);
-
-  useEffect(() => {
-    if (refPrice > 0) {
-      setPriceBase(prev => prev === 0 || prev !== refPrice ? refPrice : prev);
-    } else if (currentPrice > 0 && priceBase === 0) {
-      setPriceBase(currentPrice);
-    }
-  }, [refPrice, currentPrice, priceBase]);
-
-  useEffect(() => {
-    setPriceBase(0);
-  }, [targetSymbol]);
+  // 錨定價：有參考價用參考價；沒有就黏滯在「第一筆成交價」（避免每 tick 重建 ladder）。
+  // 切換商品歸零。用 render 期 guarded setState（derived-state 模式）取代 effect 內同步 setState。
+  const [baseState, setBaseState] = useState<{ symbol: string; price: number }>(
+    { symbol: targetSymbol, price: 0 },
+  );
+  const carriedBase = baseState.symbol === targetSymbol ? baseState.price : 0;
+  const priceBase = refPrice > 0
+    ? refPrice
+    : (carriedBase === 0 && currentPrice > 0 ? currentPrice : carriedBase);
+  if (baseState.symbol !== targetSymbol || baseState.price !== priceBase) {
+    setBaseState({ symbol: targetSymbol, price: priceBase });
+  }
 
   const fullPrices = React.useMemo(() => {
     if (priceBase <= 0) return [];
@@ -108,15 +113,15 @@ export const DOMPanel: React.FC = () => {
   }, [scrollToAnchor]);
 
   useEffect(() => {
-    if (currentPrice > 0 && fullPrices.length > 0 && !hasScrolled.current) {
-      hasScrolled.current = true;
+    if (currentPrice > 0 && fullPrices.length > 0 && !hasScrolledRef.current) {
+      hasScrolledRef.current = true;
       setTimeout(() => scrollToCurrentPrice(), 100);
     }
-  }, [currentPrice, fullPrices, scrollToCurrentPrice, hasScrolled]);
+  }, [currentPrice, fullPrices, scrollToCurrentPrice]);
 
   useEffect(() => {
-    hasScrolled.current = false;
-  }, [targetSymbol, hasScrolled]);
+    hasScrolledRef.current = false;
+  }, [targetSymbol]);
 
   // ★ 跟隨價格：每 10 秒檢查當前價是不是還在可視範圍。若飄出去就靜默捲回。
   //   不直接綁在 price tick 上，避免使用者手動滾動研究 ladder 時被搶回去。
@@ -162,6 +167,24 @@ export const DOMPanel: React.FC = () => {
   }, [tableRef, currentPrice]);
 
 
+  const handleFlatten = React.useCallback(async () => {
+    try {
+      await apiClient.post('/flatten', { symbol: targetSymbol });
+      toast.success(`${targetSymbol} 平倉指令已送出`);
+    } catch (e) {
+      handleApiError(e, '平倉失敗');
+    }
+  }, [targetSymbol, toast, handleApiError]);
+
+  const handleReverse = React.useCallback(async () => {
+    try {
+      await apiClient.post('/reverse', { symbol: targetSymbol });
+      toast.success(`${targetSymbol} 反手指令已送出`);
+    } catch (e) {
+      handleApiError(e, '反手失敗');
+    }
+  }, [targetSymbol, toast, handleApiError]);
+
   // ★ 全域快捷鍵監聽
   useEffect(() => {
     const onKeyDown = async (e: KeyboardEvent) => {
@@ -177,7 +200,7 @@ export const DOMPanel: React.FC = () => {
         const N = Number(e.key);
         const mode: SizingMode = settings.sizing.mode;
         if (mode === 'lots') {
-          logic.setOrderValue(N);
+          setOrderValue(N);
         } else if (mode === 'amount') {
           updateSetting({
             sizing: { ...settings.sizing, amount: N * settings.sizing.hotkeyAmountUnit },
@@ -193,7 +216,7 @@ export const DOMPanel: React.FC = () => {
         return;
       }
 
-      const matched = hotkeys.find((hk: any) => hk.key === e.key);
+      const matched = hotkeys.find((hk) => hk.key === e.key);
       if (!matched) return;
 
       e.preventDefault();
@@ -212,8 +235,8 @@ export const DOMPanel: React.FC = () => {
           break;
         case 'Flatten':
           // B1 fix: 平倉前必須兩側都撤單，否則殘留掛單會被吃進新部位
-          logic.handleCancelOrder('Buy');
-          logic.handleCancelOrder('Sell');
+          handleCancelOrder('Buy');
+          handleCancelOrder('Sell');
           await handleFlatten();
           break;
         case 'ScrollCenter':
@@ -223,27 +246,7 @@ export const DOMPanel: React.FC = () => {
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [hotkeys, handlePlaceOrder, handleCancelOrder, scrollToCurrentPrice, currentPrice, refPrice, targetSymbol, logic, settings.sizing, updateSetting]);
-
-  const handleFlatten = async () => {
-    try {
-      await apiClient.post('/flatten', { symbol: targetSymbol });
-      toast.success(`${targetSymbol} 平倉指令已送出`);
-    } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '平倉失敗');
-    }
-  };
-
-  const handleReverse = async () => {
-    try {
-      await apiClient.post('/reverse', { symbol: targetSymbol });
-      toast.success(`${targetSymbol} 反手指令已送出`);
-    } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '反手失敗');
-    }
-  };
+  }, [hotkeys, handlePlaceOrder, handleCancelOrder, handleFlatten, scrollToCurrentPrice, currentPrice, refPrice, setOrderValue, settings.sizing, updateSetting]);
 
 
   return (

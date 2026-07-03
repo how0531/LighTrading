@@ -51,7 +51,7 @@ export const SymbolPicker: React.FC<Props> = ({ onSelect }) => {
   const containerRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    if (!q.trim()) { setHits([]); return; }
+    if (!q.trim()) return; // 清空由 onChange handler 處理，effect 只負責搜尋
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
       setLoading(true);
@@ -103,7 +103,12 @@ export const SymbolPicker: React.FC<Props> = ({ onSelect }) => {
           type="text"
           value={q}
           onFocus={() => setOpen(true)}
-          onChange={(e) => { setQ(e.target.value); setOpen(true); }}
+          onChange={(e) => {
+            const v = e.target.value;
+            setQ(v);
+            if (!v.trim()) setHits([]); // 清空輸入 → 立即清結果（回到最近清單）
+            setOpen(true);
+          }}
           onKeyDown={handleKeyDown}
           placeholder="搜尋商品..."
           className="bg-transparent text-slate-200 outline-none font-mono w-full text-xs placeholder-slate-600"

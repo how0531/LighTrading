@@ -12,7 +12,7 @@
  * 失敗的 fallback：也呼叫一次 toast.success，所以即使通知權限被拒也能在 app 內看到。
  */
 import { useEffect, useRef } from 'react';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useTradingCore } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
 
 export type SimpleOrder = {
@@ -58,7 +58,7 @@ export function diffFills(
 }
 
 export function useFillNotification(): void {
-  const { workingOrders } = useTradingContext();
+  const { workingOrders } = useTradingCore();
   const { toast } = useToast();
   // 上一輪 snapshot 的 filled_qty，用 order_id（或 fallback compound key）索引
   const lastFilledRef = useRef<Map<string, number>>(new Map());

@@ -9,7 +9,7 @@
  * 資料源:TradingContext.quoteHistory（目標商品最近 50 筆,index 0 為最新）。
  */
 import React, { useMemo, useState } from 'react';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { formatPrice } from '../utils/instrument';
 import { classifyAggressor, isBigTrade, summarizeFlow, type FlowTick } from '../utils/tickFlow';
 
@@ -35,7 +35,8 @@ function fmtTime(iso: string): string {
 }
 
 const TimeSalesPanel: React.FC = () => {
-  const { targetSymbol, quoteHistory } = useTradingContext();
+  const { targetSymbol } = useTradingCore();
+  const { quoteHistory } = useQuotes(); // 逐筆成交需要 tick 資料
   const [threshold, setThreshold] = useState<number>(loadThreshold);
 
   const updateThreshold = (v: number) => {

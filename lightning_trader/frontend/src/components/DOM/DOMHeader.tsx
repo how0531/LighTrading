@@ -4,10 +4,12 @@ import { useSettings } from '../../contexts/SettingsContext';
 import type { SizingMode } from '../../utils/sizing';
 import { lotsToAmount } from '../../utils/sizing';
 import { netPnL as computeNetPnL } from '../../utils/fees';
+import type { QuoteData } from '../../types';
+import type { AccountInfo, AccountPosition } from '../../contexts/TradingContext';
 import { getMultiplier } from '../../types';
 
 interface DOMHeaderProps {
-  qData: any;
+  qData: Partial<QuoteData>;
   targetSymbol: string;
   currentPrice: number;
   refPrice: number;
@@ -15,10 +17,10 @@ interface DOMHeaderProps {
   limitDown: number;
   isSimulation: boolean;
   fullPrices: number[];
-  accounts: any[];
+  accounts: AccountInfo[];
   activeAccount: string | null;
   selectAccount: (acc: string) => void;
-  currentPosition: any;
+  currentPosition: AccountPosition | null;
   realtimePnL: number;
   orderType: string;
   setOrderType: (v: string) => void;
@@ -49,7 +51,7 @@ const MODE_LABEL: Record<SizingMode, string> = {
   equity_pct: '%權益',
 };
 
-export const DOMHeader: React.FC<DOMHeaderProps> = ({
+const DOMHeaderInner: React.FC<DOMHeaderProps> = ({
   qData, targetSymbol, currentPrice, refPrice, limitUp, limitDown, isSimulation, fullPrices,
   accounts, activeAccount, selectAccount, currentPosition, realtimePnL,
   orderType, setOrderType, priceType, setPriceType,
@@ -373,3 +375,7 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
     </div>
   );
 };
+
+// props 幾乎都是 scalar / 已 memo 的物件，React.memo 可擋掉非相關重繪
+export const DOMHeader = React.memo(DOMHeaderInner);
+DOMHeader.displayName = 'DOMHeader';

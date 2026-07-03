@@ -1,10 +1,13 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+/* eslint-disable react-refresh/only-export-components --
+ * Context 物件 / hooks 與 Provider 需同檔共享；改動本檔會整頁 HMR reload，可接受 */
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { QuoteData, BidAskData } from '../types';
 import { apiClient } from '../api/client';
+import { resolveWsUrl } from '../utils/backendUrl';
 import { computeLocalPnL } from '../utils/pnl';
 import { useToast } from './ToastContext';
 
-interface AccountPosition {
+export interface AccountPosition {
   symbol: string; qty: number; direction: 'Buy' | 'Sell'; price: number; pnl: number; account?: string; raw_qty?: number;
 }
 
@@ -16,10 +19,10 @@ export interface RealtimePosition extends AccountPosition {
 }
 
 
-interface AccountSummary {
+export interface AccountSummary {
   "當日交易": number; "參考損益": number; positions: AccountPosition[]; is_simulation?: boolean; active_stock?: string; active_future?: string; person_id?: string; msg_count?: number;
 }
-interface AccountInfo {
+export interface AccountInfo {
   account_id: string; category: string; person_id: string; broker_id: string; account_name: string;
 }
 export interface WorkingOrder {
@@ -45,42 +48,72 @@ export interface MiniQuote {
   askPrice?: number;      // 第一檔委賣價
 }
 
-interface TradingContextType {
+/**
+ * 高頻 context — 100ms throttle flush 更新的 tick 資料。
+ * 只有真的要跟著每筆報價重繪的元件（DOM ladder、K 線、逐筆、報價看板…）
+ * 才透過 useQuotes() 訂閱，其餘面板不會被 10 次/秒的 flush 掃到。
+ */
+export interface QuotesContextType {
+  quote: QuoteData | null;
+  bidAsk: BidAskData | null;
+  quoteHistory: QuoteData[];
+  // Sprint 12：所有 watchlist + position 商品的最新 mini-quote（key = canonical symbol）
+  watchlistQuotes: Record<string, MiniQuote>;
+  // 即時損益（前端隨 tick 計算 + 後端 PnLUpdate 推播）
+  realtimePositions: RealtimePosition[];
+  totalRealtimePnl: number;
+  totalRealizedPnl: number;
+}
+
+/**
+ * 低頻 context — 連線狀態、帳戶、委託與所有 action 方法。
+ * action 方法全部 useCallback 固定，value 只在低頻狀態真的變動時才換新。
+ */
+export interface TradingCoreContextType {
   isConnected: boolean;
   isStale: boolean;          // 任何訊息都沒收到（連線假死）
   isTickStale: boolean;      // 連線正常但沒 tick（盤後或商品冷門）
   targetSymbol: string; setTargetSymbol: (sym: string) => void;
-  quote: QuoteData | null; bidAsk: BidAskData | null; quoteHistory: QuoteData[];
-  // Sprint 12：所有 watchlist + position 商品的最新 mini-quote（key = canonical symbol）
-  watchlistQuotes: Record<string, MiniQuote>;
   watchSymbols: (syms: string[]) => void;
   // Sprint 34：輔助訂閱來源（多圖看盤）。與 watchSymbols 的自選清單取聯集，
   // 兩者互不覆蓋，避免多圖把自選的背景訂閱洗掉。
   setAuxWatch: (syms: string[]) => void;
   accountSummary: AccountSummary; accounts: AccountInfo[]; activeAccount: string | null;
-  workingOrders: WorkingOrder[]; setWorkingOrders: React.Dispatch<React.SetStateAction<WorkingOrder[]>>; refreshOrders: () => Promise<void>;
+  workingOrders: WorkingOrder[]; setWorkingOrders: React.Dispatch<React.SetStateAction<WorkingOrder[]>>;
+  refreshOrders: () => Promise<void>;
+  /** 委託單同步的統一入口：leading-edge debounce（500ms），取代散落的 setTimeout(refreshOrders, …) */
+  scheduleOrderRefresh: () => void;
   syncAll: () => Promise<void>;
   forceReconnect: () => void;
   subscribe: (symbol: string) => void; selectAccount: (accountId: string) => Promise<void>;
   cancelOrder: (action: 'Buy' | 'Sell', price?: number) => Promise<void>;
   flattenPosition: (symbol: string, cancelPending?: boolean) => Promise<void>;
-  // 即時損益（前端隨 tick 計算）
-  realtimePositions: RealtimePosition[];
-  totalRealtimePnl: number;
-  totalRealizedPnl: number;
   // 智慧單
   smartOrders: SmartOrderData[];
   refreshSmartOrders: (symbol?: string) => Promise<void>;
 }
 
-const TradingContext = createContext<TradingContextType | null>(null);
+/** 合併型別（useTradingContext 回傳；既有 consumer 相容） */
+export type TradingContextType = QuotesContextType & TradingCoreContextType;
+
+// 匯出 context 物件本身供測試 stub 使用（一般程式請走 hooks）
+export const QuotesContext = createContext<QuotesContextType | null>(null);
+export const TradingCoreContext = createContext<TradingCoreContextType | null>(null);
+
 const initialSummary: AccountSummary = { "當日交易": 0, "參考損益": 0, positions: [], is_simulation: true, msg_count: 0 };
+
+// 委託清單內容相同就沿用舊 reference，避免 5s 輪詢每次都換新陣列打掛 memo
+const sameOrders = (a: WorkingOrder[], b: WorkingOrder[]): boolean =>
+  a.length === b.length && JSON.stringify(a) === JSON.stringify(b);
+
+const ORDER_REFRESH_DEBOUNCE_MS = 500;
+const ORDER_POLL_INTERVAL_MS = 5000;
 
 export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [isStale, setIsStale] = useState(false);
   const [isTickStale, setIsTickStale] = useState(false);
-  const lastTickTimeRef = useRef<number>(Date.now());
+  const lastTickTimeRef = useRef<number>(0);      // mount 時補為 Date.now()（避免 render 期呼叫 impure）
   const isTickStaleRef = useRef<boolean>(false);
   const [targetSymbolState, setTargetSymbolState] = useState('2330');
   const targetSymbolRef = useRef('2330');
@@ -136,18 +169,39 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const res = await apiClient.get('/order_history');
       const payload = res.data || {};
       const newSeq = payload.seq_no || 0;
-      const historyList = payload.orders || [];
+      const historyList: WorkingOrder[] = payload.orders || [];
 
       if (newSeq >= snapshotSeqRef.current) {
         snapshotSeqRef.current = newSeq;
-        const active: WorkingOrder[] = historyList.filter((o: any) =>
+        const active = historyList.filter((o) =>
           o.status === 'PendingSubmit' || o.status === 'PreSubmitted' ||
           o.status === 'Submitted' || o.status === 'PartFilled'
         );
-        setWorkingOrders(active);
+        setWorkingOrders((prev) => (sameOrders(prev, active) ? prev : active));
       }
     } catch { /* 靜默，維持舊狀態 */ }
   }, []);
+
+  // ★ 委託單同步統一入口：leading-edge debounce。
+  // 之前 OrderUpdate / TradeUpdate / 下單 / 刪單 各自 setTimeout(refreshOrders, 200~800)，
+  // 活躍交易時會連環打 REST。改為：距上次同步 >500ms 立即執行，否則排一次 trailing。
+  const orderRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastOrderRefreshAtRef = useRef(0);
+  const scheduleOrderRefresh = useCallback(() => {
+    const now = Date.now();
+    const elapsed = now - lastOrderRefreshAtRef.current;
+    if (elapsed >= ORDER_REFRESH_DEBOUNCE_MS) {
+      lastOrderRefreshAtRef.current = now;
+      void refreshOrders();
+      return;
+    }
+    if (orderRefreshTimerRef.current) return; // 已有 trailing 排程
+    orderRefreshTimerRef.current = setTimeout(() => {
+      orderRefreshTimerRef.current = null;
+      lastOrderRefreshAtRef.current = Date.now();
+      void refreshOrders();
+    }, ORDER_REFRESH_DEBOUNCE_MS - elapsed);
+  }, [refreshOrders]);
 
   // 強制全量同步（給 reconnect / 使用者手動 sync）
   const syncAll = useCallback(async () => {
@@ -157,7 +211,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const newSeq = payload.seq_no || 0;
       if (newSeq >= snapshotSeqRef.current) {
         snapshotSeqRef.current = newSeq;
-        setWorkingOrders(payload.working_orders || []);
+        const next: WorkingOrder[] = payload.working_orders || [];
+        setWorkingOrders((prev) => (sameOrders(prev, next) ? prev : next));
       }
     } catch { /* 靜默；reconnect 時若失敗會自動重試 */ }
   }, []);
@@ -166,7 +221,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const reconnectDelayRef = useRef(1000);
   const isUnmounted = useRef(false);
   const isSwitchingAccountRef = useRef(false);
-  const lastMessageTimeRef = useRef<number>(Date.now());
+  const lastMessageTimeRef = useRef<number>(0);   // mount 時補為 Date.now()
   const isStaleRef = useRef(false); // 避免 onmessage closure 中讀到舊值
   const wsAttemptCountRef = useRef(0); // 0=首次, 1+=重連
   const { toast } = useToast();
@@ -289,22 +344,18 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     pendingHistoryRef.current.push(merged);
   }, []);
 
-  // WebSocket 連線管理 — 定義為 ref 函式避免 useEffect 依賴問題
+  // WebSocket 連線管理 — 定義為 ref 函式避免 useEffect 依賴問題。
+  // ref 寫入放在 effect（每次 render 後刷新 closure；render 期間不可寫 ref）。
   const connectWsRef = useRef<() => void>(() => { });
+  useEffect(() => {
   connectWsRef.current = () => {
     if (isUnmounted.current) return;
     // 如果已經有活躍連線，不要重複建立
     const existing = wsRef.current;
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
 
-    // 與 /api 相同策略：用 same-origin，由 vite dev proxy 或 nginx 轉發到 backend。
-    // https 站台自動升級成 wss。
-    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    let wsUrl = `${wsScheme}://${window.location.host}/ws/quotes`;
-    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:') {
-      wsUrl = 'ws://127.0.0.1:8000/ws/quotes';
-    }
-    const ws = new WebSocket(wsUrl);
+    // URL 解析共用 utils/backendUrl（與 api/client 同一套 host 邏輯；含選配 ?token=）
+    const ws = new WebSocket(resolveWsUrl());
 
     ws.onopen = () => {
       if (isUnmounted.current) { ws.close(); return; }
@@ -312,14 +363,14 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       reconnectDelayRef.current = 1000;
       const sym = targetSymbolRef.current;
       ws.send(JSON.stringify({ action: 'subscribe', symbol: sym }));
-      console.log(`[WS] 連線成功，訂閱 ${sym}`);
+      console.info(`[WS] 連線成功，訂閱 ${sym}`);
       lastMessageTimeRef.current = Date.now();
       // Sprint 12 R2：重發 watchlist。backend 不持久化 subscribe_background，
       // 斷線重連會丟掉所有 watch 訂閱；ws.onopen 主動補回。
       const watched = Array.from(watchSymbolsRef.current);
       if (watched.length > 0) {
         ws.send(JSON.stringify({ action: 'watch', symbols: watched }));
-        console.log(`[WS] 重發 watchlist (${watched.length})`);
+        console.info(`[WS] 重發 watchlist (${watched.length})`);
       }
       // ★ 重連後立即強制三合一同步：確保斷線期間外部下單的單也會出現
       syncAll();
@@ -336,7 +387,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (isStaleRef.current) { isStaleRef.current = false; setIsStale(false); }
 
         const data = JSON.parse(event.data);
-        const isMatch = (payload: any): boolean => {
+        const isMatch = (payload: { Symbol?: unknown } | null | undefined): boolean => {
           if (!payload?.Symbol) return true;
           const sym = String(payload.Symbol).trim().toUpperCase();
           const target = targetSymbolRef.current.trim().toUpperCase();
@@ -411,7 +462,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const incSeq = data.seq_no || 0;
           if (incSeq >= callbackSeqRef.current) {
              callbackSeqRef.current = incSeq;
-             setTimeout(refreshOrders, 500);
+             scheduleOrderRefresh();
           }
         } else if (data.type === 'SmartOrderUpdate' && data.data) {
           // 智慧單狀態更新（新增/觸發/已取消）
@@ -427,7 +478,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           });
         } else if (data.type === 'TradeUpdate' && data.data) {
           // 成交回報也觸發一次 REST 同步，確保填協數量正確
-          setTimeout(refreshOrders, 800);
+          scheduleOrderRefresh();
         } else if (data.action === 'subscribe' && data.status === 'success') {
           if (data.symbol) setTargetSymbol(data.symbol);
         } else if (data.action === 'watch' && data.status === 'error') {
@@ -468,43 +519,56 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (isUnmounted.current) return;
       const delay = reconnectDelayRef.current;
       reconnectDelayRef.current = Math.min(delay * 2, 30000);
-      setTimeout(() => connectWsRef.current(), delay);
+      // ±20% 隨機 jitter：多分頁 / 多視窗同時斷線時錯開重連風暴
+      const jitter = 0.8 + Math.random() * 0.4;
+      setTimeout(() => connectWsRef.current(), Math.round(delay * jitter));
     };
 
     wsRef.current = ws;
   };
+  });
 
   // 空依賴 useEffect — 只在 mount 時建立一次 WebSocket（StrictMode 安全）
   useEffect(() => {
     isUnmounted.current = false;
-    // 延遲 100ms 建立連線，讓 StrictMode 的第一次 cleanup 先執行完
+    // watchdog 基準時間補值（useRef 初始器不能呼叫 Date.now）
+    lastMessageTimeRef.current = Date.now();
+    lastTickTimeRef.current = Date.now();
+    // 延遲 50ms 建立連線，讓 StrictMode 的第一次 cleanup 先執行完
     const timerId = setTimeout(() => connectWsRef.current(), 50);
     return () => {
       clearTimeout(timerId);
       isUnmounted.current = true;
+      if (orderRefreshTimerRef.current) {
+        clearTimeout(orderRefreshTimerRef.current);
+        orderRefreshTimerRef.current = null;
+      }
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
-    if (isConnected) {
-      apiClient.get('/accounts').then(res => {
-        setAccounts(res.data);
-        if (res.data.length > 0 && !activeAccount) {
-          setActiveAccount(`${res.data[0].broker_id}-${res.data[0].account_id}`);
-        }
-      }).catch(e => console.error(e));
-      // 連線成功後立即擷取現有活躍委託單
-      refreshOrders();
+    if (!isConnected) return;
+    apiClient.get('/accounts').then(res => {
+      setAccounts(res.data);
+      if (res.data.length > 0) {
+        const first = `${res.data[0].broker_id}-${res.data[0].account_id}`;
+        setActiveAccount(prev => prev ?? first);
+      }
+    }).catch(e => console.error(e));
+    // 連線成功後立即擷取現有活躍委託單（下一個 tick 執行，effect 本體不直接觸發 setState）
+    const kickoffTimer = setTimeout(scheduleOrderRefresh, 0);
 
-      // ★ 關鍵：Shioaji 原廠 API 不會主動推送「在其他平台下單」的 WebSocket 廣播。
-      // 為了做到「外部下單，此畫面亦能絕對同步」，必須加上定時輪詢。
-      // 每 2 秒強制去接一次 REST API，後端 API 內已經加上了 update_status 去強迫券商主機更新。
-      const orderSyncTimer = setInterval(refreshOrders, 2000);
-      return () => clearInterval(orderSyncTimer);
-    }
-  }, [isConnected, refreshOrders]); // eslint-disable-line react-hooks/exhaustive-deps
+    // ★ 關鍵：Shioaji 原廠 API 不會主動推送「在其他平台下單」的 WebSocket 廣播。
+    // 為了做到「外部下單，此畫面亦能絕對同步」，必須加上背景輪詢（5s 慢速；
+    // 即時性靠 OrderUpdate / TradeUpdate → scheduleOrderRefresh 補足）。
+    const orderSyncTimer = setInterval(scheduleOrderRefresh, ORDER_POLL_INTERVAL_MS);
+    return () => {
+      clearTimeout(kickoffTimer);
+      clearInterval(orderSyncTimer);
+    };
+  }, [isConnected, scheduleOrderRefresh]);
 
   const selectAccount = useCallback(async (fullId: string) => {
     setActiveAccount(fullId);
@@ -576,7 +640,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ action: 'subscribe', symbol: trimmed }));
-      console.log(`[WS] 訂閱 ${trimmed}`);
+      console.info(`[WS] 訂閱 ${trimmed}`);
     } else {
       console.warn('[WS] 未連線，嘗試重連...');
       connectWsRef.current();
@@ -604,30 +668,66 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const flattenPosition = useCallback(async (symbol: string, cancelPending: boolean = true) => {
     try {
       await apiClient.post('/flatten', { symbol, cancel_pending: cancelPending });
-      setTimeout(refreshOrders, 500);
+      scheduleOrderRefresh();
     } catch (err) {
       console.error('Flatten position failed:', err);
     }
-  }, [refreshOrders]);
+  }, [scheduleOrderRefresh]);
+
+  // ── Context values ──────────────────────────────────────────────
+  // 高頻：100ms flush 更新的 tick 資料
+  const quotesValue = useMemo<QuotesContextType>(() => ({
+    quote, bidAsk, quoteHistory, watchlistQuotes,
+    realtimePositions, totalRealtimePnl, totalRealizedPnl,
+  }), [quote, bidAsk, quoteHistory, watchlistQuotes, realtimePositions, totalRealtimePnl, totalRealizedPnl]);
+
+  // 低頻：連線 / 帳戶 / 委託 + 全部 action（action 皆 useCallback，value 很少換新）
+  const coreValue = useMemo<TradingCoreContextType>(() => ({
+    isConnected, isStale, isTickStale,
+    targetSymbol: targetSymbolState, setTargetSymbol,
+    watchSymbols, setAuxWatch,
+    accountSummary, accounts, activeAccount,
+    workingOrders, setWorkingOrders, refreshOrders, scheduleOrderRefresh, syncAll, forceReconnect,
+    subscribe, selectAccount, cancelOrder, flattenPosition,
+    smartOrders, refreshSmartOrders,
+  }), [
+    isConnected, isStale, isTickStale, targetSymbolState, setTargetSymbol,
+    watchSymbols, setAuxWatch, accountSummary, accounts, activeAccount,
+    workingOrders, refreshOrders, scheduleOrderRefresh, syncAll, forceReconnect,
+    subscribe, selectAccount, cancelOrder, flattenPosition,
+    smartOrders, refreshSmartOrders,
+  ]);
 
   return (
-    <TradingContext.Provider value={{
-      isConnected, isStale, isTickStale, targetSymbol: targetSymbolState, setTargetSymbol,
-      quote, bidAsk, quoteHistory, accountSummary, accounts, activeAccount,
-      workingOrders, setWorkingOrders, refreshOrders, syncAll, forceReconnect,
-      subscribe, selectAccount,
-      cancelOrder, flattenPosition,
-      realtimePositions, totalRealtimePnl, totalRealizedPnl,
-      smartOrders, refreshSmartOrders,
-      watchlistQuotes, watchSymbols, setAuxWatch,
-    }}>
-      {children}
-    </TradingContext.Provider>
+    <TradingCoreContext.Provider value={coreValue}>
+      <QuotesContext.Provider value={quotesValue}>
+        {children}
+      </QuotesContext.Provider>
+    </TradingCoreContext.Provider>
   );
 };
 
-export const useTradingContext = () => {
-  const context = useContext(TradingContext);
-  if (!context) throw new Error('useTradingContext must be used within a TradingProvider');
+/** 高頻 hook：只給真的要吃 tick 的元件（DOM / Chart / 逐筆 / 報價看板…） */
+export const useQuotes = (): QuotesContextType => {
+  const context = useContext(QuotesContext);
+  if (!context) throw new Error('useQuotes must be used within a TradingProvider');
   return context;
+};
+
+/** 低頻 hook：連線狀態、帳戶、委託與 action 方法（不會被 100ms flush 掃到） */
+export const useTradingCore = (): TradingCoreContextType => {
+  const context = useContext(TradingCoreContext);
+  if (!context) throw new Error('useTradingCore must be used within a TradingProvider');
+  return context;
+};
+
+/**
+ * 向後相容 hook：合併高低頻兩個 context。
+ * 注意：訂閱本 hook 的元件會跟著每次 quote flush 重繪，
+ * 不需要 tick 資料的元件請改用 useTradingCore()（或 useQuotes()）。
+ */
+export const useTradingContext = (): TradingContextType => {
+  const core = useTradingCore();
+  const quotes = useQuotes();
+  return useMemo(() => ({ ...core, ...quotes }), [core, quotes]);
 };
