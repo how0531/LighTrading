@@ -3,10 +3,8 @@ fastapi>=0.115,<1.0
 uvicorn[standard]>=0.30,<1.0
 pydantic>=2.7,<3.0
 python-dotenv>=1.0,<2.0
-shioaji>=1.2.5
+python-multipart>=0.0.9,<1.0    # reports.py 的 CSV 匯入 (UploadFile) 需要
+shioaji>=1.2.5,<2.0
 
 # Test
 pytest>=8.0,<9.0
-
-# Optional: PyQt5 only needed for legacy/ desktop UI; comment out for headless installs
-pyqt5>=5.15

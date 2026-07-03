@@ -95,6 +95,12 @@ shared.shioaji_client = engine.client
 # 連接所有 Shioaji 回呼
 wire_callbacks()
 
+# ★ 智慧單觸發：注入「過風控的下單函數」+「丟到 broker thread 執行」
+#   （之前觸發時直接在行情執行緒上同步下單，且完全繞過 RiskManager）
+from backend.services.order_guard import smart_place_order
+engine.smart_order_engine._place_order = smart_place_order
+engine.smart_order_engine.set_dispatch(shared.submit_to_broker_thread)
+
 
 # ─── Lifespan ──────────────────────────────────────────────
 
@@ -115,9 +121,16 @@ async def lifespan(app):
             return
         if not (Config.API_KEY and Config.SECRET_KEY):
             return
+        # ★ LIVE 帳戶不做無人確認的自動登入：需明確設 LIGHTRADE_ALLOW_LIVE_AUTOLOGIN=true
+        if not Config.SIMULATION and os.environ.get(
+                "LIGHTRADE_ALLOW_LIVE_AUTOLOGIN", "").lower() not in ("1", "true", "yes"):
+            logger.warning(
+                "⚠️ 偵測到 LIVE (SIMULATION=false) 憑證，但未設 LIGHTRADE_ALLOW_LIVE_AUTOLOGIN=true，"
+                "跳過自動登入。請從前端登入頁手動登入，或設定該環境變數。")
+            return
         logger.info("🔑 偵測到 .env 憑證，嘗試自動登入 Shioaji...")
         try:
-            success = await shared.run_in_qt_thread(shared.shioaji_client.login)
+            success = await shared.run_in_broker_thread(shared.shioaji_client.login)
             if success:
                 logger.info("✅ Shioaji 自動登入成功")
                 await asyncio.sleep(1)
@@ -181,6 +194,40 @@ async def global_exception_handler(request: Request, exc: Exception):
             "user_msg": "伺服器發生未預期錯誤，請稍後再試或聯絡管理員",
         }
     })
+
+
+# ─── API Token 認證（可選） ─────────────────────────────────
+# 設定 LIGHTRADE_API_TOKEN 後：
+#   - 所有 /api/*（除 /api/health）需帶 header `X-API-Token: <token>`
+#   - /ws/quotes 需帶 query `?token=<token>`
+# 未設定時維持現狀（純本機單人使用）。CORS 只能約束瀏覽器，
+# 不是伺服器端存取控制 —— 綁非 127.0.0.1（Docker/LAN）時強烈建議設定。
+import secrets as _secrets
+
+_API_TOKEN = os.environ.get("LIGHTRADE_API_TOKEN", "").strip()
+
+
+def _token_ok(provided: str) -> bool:
+    return bool(provided) and _secrets.compare_digest(provided, _API_TOKEN)
+
+
+if _API_TOKEN:
+    @app.middleware("http")
+    async def _api_token_auth(request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/api/") and path != "/api/health":
+            if not _token_ok(request.headers.get("X-API-Token", "")):
+                return JSONResponse(status_code=401, content={
+                    "detail": {
+                        "code": "UNAUTHORIZED",
+                        "user_msg": "缺少或錯誤的 API Token（X-API-Token）",
+                    }
+                })
+        return await call_next(request)
+
+    logger.info("🔐 API Token 認證已啟用（LIGHTRADE_API_TOKEN）")
+else:
+    logger.info("ℹ️ 未設定 LIGHTRADE_API_TOKEN — API 無認證，僅適合純本機使用")
 
 
 # ★ CORS 緊縮：僅允許本機 Vite dev server 與本機部署
@@ -273,6 +320,10 @@ else:
 @app.websocket("/ws/quotes")
 async def websocket_quotes(websocket: WebSocket):
     """WebSocket 通道：推送即時報價給前端"""
+    # Token 認證（與 /api 一致）；4401 = 自訂「未授權」關閉碼
+    if _API_TOKEN and not _token_ok(websocket.query_params.get("token", "")):
+        await websocket.close(code=4401, reason="unauthorized")
+        return
     await websocket.accept()
     shared.active_connections.add(websocket)
     logger.info(f"新的 WebSocket 客戶端已連接, 當前連接數: {len(shared.active_connections)}")
@@ -295,7 +346,7 @@ async def websocket_quotes(websocket: WebSocket):
                         continue
 
                     try:
-                        res = await shared.run_in_qt_thread(shared.shioaji_client.subscribe, msg["symbol"])
+                        res = await shared.run_in_broker_thread(shared.shioaji_client.subscribe, msg["symbol"])
                         if res:
                             actual_symbol = res
                     except Exception as e:
@@ -322,7 +373,7 @@ async def websocket_quotes(websocket: WebSocket):
                     rejected = []
                     for s in syms[:30]:   # 上限 30 個避免訂太多
                         try:
-                            ok = await shared.run_in_qt_thread(shared.shioaji_client.subscribe_background, s)
+                            ok = await shared.run_in_broker_thread(shared.shioaji_client.subscribe_background, s)
                             (accepted if ok else rejected).append(s.upper())
                         except Exception as e:
                             logger.warning(f"watch 背景訂閱 {s} 失敗: {e}")

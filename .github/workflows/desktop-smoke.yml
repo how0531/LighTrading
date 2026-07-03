@@ -67,7 +67,8 @@ jobs:
 
       - name: Backend pytest (offline)
         run: |
-          pip install fastapi pydantic python-dotenv pytest
+          grep -viE '^(shioaji|pyqt5)' lightning_trader/backend/requirements_backend.txt > /tmp/smoke-req.txt
+          pip install -r /tmp/smoke-req.txt pytest httpx
           cd lightning_trader
           python -m pytest tests/ -q
 

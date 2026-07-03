@@ -1,0 +1,45 @@
+version: 2
+updates:
+  # Backend Python dependencies
+  - package-ecosystem: pip
+    directory: /lightning_trader/backend
+    schedule:
+      interval: weekly
+    groups:
+      pip-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Frontend (React/Vite) dependencies
+  - package-ecosystem: npm
+    directory: /lightning_trader/frontend
+    schedule:
+      interval: weekly
+    groups:
+      npm-frontend-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Electron desktop shell dependencies
+  - package-ecosystem: npm
+    directory: /electron
+    schedule:
+      interval: weekly
+    groups:
+      npm-electron-minor-patch:
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions workflow dependencies
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-patch:
+        update-types:
+          - minor
+          - patch

@@ -6,31 +6,23 @@ LighTrading Core Package
 Usage:
     from core import create_trading_engine
     engine = create_trading_engine()
-    # engine.event_bus, engine.client, engine.order_manager, ...
+    # engine.event_bus, engine.client, engine.risk_manager, ...
 """
 from .event_bus import EventBus
 from .config import Config
 from .symbol_resolver import SymbolResolver
 from .shioaji_client import ShioajiClient
-from .order_manager import OrderManager, OrderEntry, OrderStatus
-from .position_tracker import PositionTracker, PositionEntry
 from .smart_order_engine import SmartOrderEngine, SmartOrderType
+from .smart_order_store import SmartOrderStore, default_db_path
 from .risk_manager import RiskManager, RiskConfig, CheckResult, CheckLevel
-from .hotkey_manager import HotkeyManager
-from .watchlist_manager import WatchlistManager
-from .sound_manager import SoundManager
 
 __all__ = [
     # 核心
     "EventBus", "Config", "ShioajiClient", "SymbolResolver",
     # 交易引擎
-    "OrderManager", "OrderEntry", "OrderStatus",
-    "PositionTracker", "PositionEntry",
-    "SmartOrderEngine", "SmartOrderType",
+    "SmartOrderEngine", "SmartOrderType", "SmartOrderStore",
     # 風控
     "RiskManager", "RiskConfig", "CheckResult", "CheckLevel",
-    # 工具
-    "HotkeyManager", "WatchlistManager", "SoundManager",
     # 工廠
     "create_trading_engine",
 ]
@@ -50,38 +42,23 @@ class TradingEngine:
         # 2. Shioaji 客戶端 (券商通訊)
         self.client = ShioajiClient(event_bus=self.event_bus)
 
-        # 3. 訂單管理 (本地訂單簿)
-        self.order_manager = OrderManager(self.event_bus)
-
-        # 4. 部位追蹤 (即時 PnL)
-        self.position_tracker = PositionTracker(self.event_bus)
-
-        # 5. 風控引擎 (下單前檢查 + 日虧損監控)
+        # 3. 風控引擎 (下單前檢查 + 日虧損監控)
         self.risk_manager = RiskManager(self.event_bus)
 
-        # 6. 智慧委託 (觸價/移停/OCO/Bracket)
+        # 4. 智慧委託 (觸價/移停/OCO/Bracket)，含 SQLite 持久化 + 開機 re-arm
         self.smart_order_engine = SmartOrderEngine(
             self.event_bus,
             place_order_fn=self._place_order_via_client,
-        )
-
-        # 7. 快捷鍵管理
-        self.hotkey_manager = HotkeyManager(self.event_bus)
-
-        # 8. 自選股管理
-        self.watchlist_manager = WatchlistManager(self.event_bus)
-
-        # 9. 音效管理
-        self.sound_manager = SoundManager(self.event_bus)
-
-        # 連接 Shioaji order callback → OrderManager
-        self.client.signal_order_update.connect(
-            lambda msg: self.order_manager.on_order_status_callback(None, msg)
+            store=SmartOrderStore(default_db_path()),
         )
 
     def _place_order_via_client(self, symbol, price, action, qty):
-        """SmartOrderEngine 呼叫的下單函數"""
-        return self.client.place_order(symbol, price, action, qty)
+        """SmartOrderEngine 預設下單函數（backend 會改注入有風控的版本）"""
+        from shioaji.constant import Action
+        action_enum = action if isinstance(action, Action) else (
+            Action.Buy if str(action).lower() == "buy" else Action.Sell
+        )
+        return self.client.place_order(symbol, price, action_enum, qty)
 
 
 def create_trading_engine() -> TradingEngine:

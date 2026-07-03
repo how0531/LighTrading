@@ -94,7 +94,7 @@ def _create_smart_order(req: SmartOrderRequest):
 @router.post("/smart_orders")
 async def create_smart_order(req: SmartOrderRequest):
     """REST：新增智慧單"""
-    return await shared.run_in_qt_thread(_create_smart_order, req)
+    return await shared.run_in_broker_thread(_create_smart_order, req)
 
 
 @router.get("/smart_orders")

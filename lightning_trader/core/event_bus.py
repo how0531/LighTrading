@@ -1,7 +1,7 @@
 """
 EventBus — 集中式事件分發匯流排
 
-解耦 ShioajiClient、OrderManager、PositionTracker 與 UI/Backend 之間的通訊。
+解耦 ShioajiClient、SmartOrderEngine、RiskManager 與 UI/Backend 之間的通訊。
 所有模組只依賴 EventBus，不直接引用彼此。
 """
 import logging

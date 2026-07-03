@@ -16,16 +16,7 @@ FIFO 配對：每筆 fill 進來時：
 from __future__ import annotations
 from typing import Iterable
 
-# 與 pnl_broadcaster / reports.py 一致的乘數表
-_MULTIPLIERS = {"TXF": 200, "MXF": 50, "EXF": 4000, "GTF": 200}
-
-
-def _multiplier_for(symbol: str) -> int:
-    sym = (symbol or "").upper()
-    for prefix, mult in _MULTIPLIERS.items():
-        if sym.startswith(prefix):
-            return mult
-    return 1000  # default for stocks
+from backend.services.contract_specs import get_multiplier as _multiplier_for
 
 
 def compute_realized_curve(fills: Iterable[dict]) -> list[dict]:

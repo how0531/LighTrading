@@ -5,8 +5,10 @@ shared.py — 後端共用狀態與工具
 避免循環引用和全域變數散落在 main.py 中。
 """
 import asyncio
+import functools
 import logging
 import time
+from concurrent.futures import ThreadPoolExecutor
 from fastapi import WebSocket
 
 logger = logging.getLogger(__name__)
@@ -60,12 +62,28 @@ def format_datetime(dt) -> str:
     return str(dt)
 
 
-async def run_in_qt_thread(func, *args, **kwargs):
-    """
-    將函數丟到 Qt 執行緒環境執行。
-    目前 uvicorn 預設單 worker 模式下可直接同步呼叫。
-    """
-    return func(*args, **kwargs)
+# ─── 券商呼叫執行緒 ─────────────────────────────────────────
+# Shioaji 的呼叫（login / place_order / list_positions / search ...）都是
+# 阻塞式網路 I/O。舊版的 run_in_qt_thread 名字上是「丟到別的執行緒」，
+# 實際上卻是同步直呼 —— 所有券商呼叫都卡在 asyncio event loop 上，
+# 期間 WebSocket 報價推送全部停擺。
+#
+# 改成真正的單 worker executor：
+#   - 不阻塞 event loop（報價 / PnL 廣播不受券商 RTT 影響）
+#   - max_workers=1 序列化所有券商呼叫，保留原本的順序語意，
+#     也避免對 Shioaji SDK 做並發呼叫的執行緒安全疑慮
+broker_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="broker")
+
+
+async def run_in_broker_thread(func, *args, **kwargs):
+    """在 broker executor 上執行阻塞式券商呼叫，不卡 event loop。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(broker_executor, functools.partial(func, *args, **kwargs))
+
+
+def submit_to_broker_thread(fn):
+    """給非 async 情境（例如智慧單觸發）把工作丟進 broker executor。"""
+    return broker_executor.submit(fn)
 
 
 async def broadcast_ws(msg_dict: dict):

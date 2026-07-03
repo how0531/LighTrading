@@ -76,7 +76,9 @@ def on_shioaji_quote(quote_data: dict):
             if p_val > 0 or ref > 0 or v_val > 0:
                 items_to_send.append({"type": "Tick", "data": tick_data})
 
-            # 發送給 EventBus 供洗價引擎使用
+            # 發送給 EventBus 供洗價引擎 / RiskManager / PnL 使用。
+            # ★ 這裡是 on_tick 唯一的發射點（shioaji_client 的 v1 回呼不再重複 emit，
+            #   避免智慧單等消費者每個 tick 被觸發兩次）
             if p_val > 0:
                 try:
                     shared.engine.event_bus.on_tick.emit(symbol, tick_data)
@@ -143,6 +145,16 @@ def on_shioaji_trade_update(trade_data: dict):
         if shared.fastapi_loop:
             shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg_item)
 
+        # ★ 發射 on_fill 事件（SmartOrderEngine 的 Bracket 母單成交偵測靠這個；
+        #   之前只有死掉的 OrderManager 會發，導致 bracket 子單永遠不啟動）
+        try:
+            from backend.services.trade_journal import extract_fill
+            fill = extract_fill(trade_data)
+            if fill and shared.engine:
+                shared.engine.event_bus.on_fill.emit(fill)
+        except Exception:
+            pass
+
         # ★ 通知 pnl_broadcaster：成交 → 持倉變動 → 作廢快取
         try:
             from backend.services import pnl_broadcaster as pb
@@ -162,6 +174,14 @@ def on_shioaji_trade_update(trade_data: dict):
         try:
             from backend.services import trade_journal
             trade_journal.record_trade(trade_data)
+        except Exception:
+            pass
+
+        # ★ 成交後重算當日已實現損益 → 餵 RiskManager（日虧損熔斷的資料源）
+        #   丟進 broker thread 執行，不佔用 Shioaji 回呼執行緒
+        try:
+            from backend.services.order_guard import refresh_daily_realized
+            shared.submit_to_broker_thread(refresh_daily_realized)
         except Exception:
             pass
 

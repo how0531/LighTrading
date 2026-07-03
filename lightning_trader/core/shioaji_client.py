@@ -1,5 +1,8 @@
 import shioaji as sj
-from shioaji.constant import StockPriceType, FuturesPriceType, OrderType, Action, QuoteType
+from shioaji.constant import (
+    StockPriceType, FuturesPriceType, OrderType, Action, QuoteType,
+    StockOrderLot, StockOrderCond,
+)
 import threading
 from .config import Config
 from .event_bus import Signal
@@ -42,10 +45,10 @@ class ShioajiClient:
         self._deal_prices: Dict[str, float] = {}
         # ★ 切換訂閱用的 mutex，避免兩筆 subscribe 競態
         self._subscribe_lock = threading.Lock()
+        # ★ 背景訂閱的商品（持倉/自選）— 重連後要全部重訂，否則 PnL 無聲變舊
+        self._background_symbols: set = set()
 
         self._setup_callbacks()
-        self.smart_orders: List[Dict[str, Any]] = []
-        self.volume_profile: Dict[str, Any] = {}
         self.last_message_time = time.time()
         self._start_reconnect_timer()
 
@@ -84,6 +87,11 @@ class ShioajiClient:
         if not api_ok or is_stale:
             if self._is_connected:
                 self._is_connected = False
+                if self.event_bus:
+                    try:
+                        self.event_bus.on_connection_state.emit("disconnected")
+                    except Exception:
+                        pass
                 self._attempt_reconnect()
 
     def _attempt_reconnect(self):
@@ -95,7 +103,7 @@ class ShioajiClient:
             logger.info("重連成功")
             self._is_reconnecting = False
             self.last_message_time = time.time() # 重置時間
-            
+
             # 重新訂閱原合約
             if self.current_contract:
                 logger.info(f"重新啟動合約訂閱: {self.current_contract.symbol}")
@@ -106,6 +114,14 @@ class ShioajiClient:
         else:
             logger.warning("重連失敗，10 秒後重試")
             threading.Timer(10.0, self._do_login_reconnect).start()
+
+    def _resubscribe_background(self):
+        """重連 / 重新登入後把所有背景訂閱（持倉、自選）補回來。"""
+        for sym in list(self._background_symbols):
+            try:
+                self.subscribe_background(sym)
+            except Exception as e:
+                logger.warning(f"重連後補訂背景商品 {sym} 失敗: {e}")
 
     def _setup_callbacks(self):
         # === Shioaji v1 回呼（新版 SDK 預設格式） ===
@@ -129,11 +145,8 @@ class ShioajiClient:
                 }
                 if q["Price"] > 0 and symbol:
                     self._latest_prices[symbol] = q["Price"]
-                    if self.event_bus:
-                        try:
-                            self.event_bus.on_tick.emit(symbol, q)
-                        except Exception:
-                            pass
+                    # on_tick 事件統一由 bridge.on_shioaji_quote 發射（單一來源，
+                    # 之前這裡也 emit 導致所有消費者每個 tick 處理兩次）
                     if self._direct_quote_callback:
                         self._direct_quote_callback(q)
             except Exception as e:
@@ -181,11 +194,7 @@ class ShioajiClient:
                 }
                 if q["Price"] > 0 and symbol:
                     self._latest_prices[symbol] = q["Price"]
-                    if self.event_bus:
-                        try:
-                            self.event_bus.on_tick.emit(symbol, q)
-                        except Exception:
-                            pass
+                    # on_tick 事件統一由 bridge.on_shioaji_quote 發射（見 _on_tick_stk 註解）
                     if self._direct_quote_callback:
                         self._direct_quote_callback(q)
             except Exception as e:
@@ -285,8 +294,15 @@ class ShioajiClient:
             self._setup_callbacks()
             logger.info("✅ Shioaji 登入成功，回呼已重新註冊")
             self.signal_login_status.emit(True, "登入成功")
+            if self.event_bus:
+                try:
+                    self.event_bus.on_connection_state.emit("connected")
+                except Exception:
+                    pass
             threading.Timer(1.0, self.trigger_account_update).start()
             if self.current_contract: self.subscribe(self.current_contract.symbol)
+            # 補回所有背景訂閱（持倉 / 自選）— 之前重連只還原 current_contract
+            self._resubscribe_background()
             return True
         except Exception as e:
             self._is_connected = False
@@ -488,6 +504,7 @@ class ShioajiClient:
             canonical = self.symbol_resolver.canonical(contract.symbol)
 
             self.api.quote.subscribe(contract, QuoteType.Tick)
+            self._background_symbols.add(canonical)
             logger.info(f"  ✅ 背景訂閱 {symbol} Tick 成功 (canonical={canonical})")
 
             # 推送 Snapshot 補齊 Reference / LimitUp / LimitDown / 初始一檔 BidAsk
@@ -855,17 +872,3 @@ class ShioajiClient:
             logger.error(f"reverse_position 失敗: {e}")
             return False
 
-    def add_smart_order(self, symbol: str, action: Action, qty: int, stop_price: float = 0, trailing_offset: float = 0):
-        """新增本地端智慧單（停損/移動停損監控）"""
-        smart_order = {
-            "symbol": symbol,
-            "action": action,
-            "qty": qty,
-            "stop_price": stop_price,
-            "trailing_offset": trailing_offset,
-            "highest_price": 0,
-            "lowest_price": float('inf'),
-            "is_triggered": False
-        }
-        self.smart_orders.append(smart_order)
-        logger.info(f"add_smart_order: {symbol} {'Buy' if action == Action.Buy else 'Sell'} {qty}口, 停損={stop_price}, 移停={trailing_offset}")

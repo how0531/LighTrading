@@ -82,7 +82,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE fills ADD COLUMN notes TEXT")
 
 
-def _extract_fill(trade_data: dict) -> Optional[dict]:
+def extract_fill(trade_data: dict) -> Optional[dict]:
     """
     從 Shioaji order/trade callback dict 抽出我們關心的欄位。
     Shioaji 的 callback msg 沒有單一 schema，這裡盡量寬鬆。
@@ -145,7 +145,7 @@ def _extract_fill(trade_data: dict) -> Optional[dict]:
 
 def record_trade(trade_data: dict) -> bool:
     """從 bridge 呼叫；non-blocking 用法請呼叫端自行 wrap thread。回傳是否成功落地。"""
-    fill = _extract_fill(trade_data)
+    fill = extract_fill(trade_data)
     if fill is None:
         return False
     try:

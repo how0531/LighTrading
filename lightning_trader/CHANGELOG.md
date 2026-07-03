@@ -4,6 +4,45 @@
 
 ---
 
+## [2.1.0] - 2026-07-03
+
+### 🛡️ 資金安全（P0）
+
+* **日虧損熔斷修復**：原本 `max_daily_loss` 依賴從未被餵入資料的 OrderManager 事件鏈，生產環境永遠不會觸發。現在由真實路徑餵入：未實現損益來自 `pnl_broadcaster`（不依賴 WS 連線）、已實現損益來自成交 journal 的當日 FIFO 重算（`order_guard.refresh_daily_realized`）。
+* **所有下單路徑過風控**：`/reverse`（雙倍市價單）與智慧單觸發原本完全繞過 RiskManager，現在統一前置檢查。政策：保護性出場（一鍵平倉、平既有部位的停損觸發）即使熔斷後仍放行，只封鎖開新倉。
+* **股票停損 NameError 修復**：`shioaji_client.place_order` 使用了未 import 的 `StockOrderLot/StockOrderCond`，導致股票的 flatten / reverse / 智慧單觸發會直接 crash（停損不會執行）。
+* **智慧單 SQLite 持久化**：停損 / 移停 / OCO / Bracket 落地 `~/.lightrade/smart_orders.db`，backend 重啟自動 re-arm（移停 watermark 重啟後從當下市價重新追蹤）。
+* **市價單 confirm 流程補齊**：WARNING 級檢查（市價單 / 價格偏離 / 反向）回 409 `CONFIRM_REQUIRED` + warnings 清單，前端確認後帶 `confirm: true` 重送；原本 WARNING 一律 422、市價單經正規路徑永遠送不出去。
+* **可選 API Token 認證**：`LIGHTRADE_API_TOKEN` 設定後，所有 `/api`（除 health）需帶 `X-API-Token`、WebSocket 需帶 `?token=`。Docker / LAN 部署建議必開。
+* **LIVE 自動登入改為 opt-in**：`SIMULATION` 預設改回 true（與文件一致）；`SIMULATION=false` 時需 `LIGHTRADE_ALLOW_LIVE_AUTOLOGIN=true` 才會開機自動登入真實帳戶。
+* **Bracket 子單修復**：`on_fill` 事件現在由 bridge 從真實成交回報發出（原本只有死掉的 OrderManager 會發，bracket 停利停損永遠不會啟動）。
+* **.env 變數名對齊**：`API_KEY/SECRET_KEY/SIMULATION`（文件版）與 `SHIOAJI_*`（舊程式版）皆支援——原本 config 只讀 `SHIOAJI_*`，照文件設定的 .env 實際上不生效。
+
+### ⚡ 延遲與架構（P1）
+
+* **event loop 不再被券商呼叫卡死**：`run_in_qt_thread` 名為執行緒橋接、實為同步直呼，登入/下單/搜尋全卡在 asyncio loop 上。改為真正的單 worker `broker_executor`（`run_in_broker_thread`），報價與 PnL 推送不再受券商 RTT 影響。
+* **智慧單觸發移出行情執行緒**：觸發判斷仍在 tick 回呼（快），實際下單 dispatch 到 broker thread；`_smart_orders` 加 RLock。
+* **tick 雙重發射修復**：`on_tick` 原本在 shioaji_client 與 bridge 各發一次，所有消費者每 tick 處理兩遍；統一由 bridge 單點發射。
+* **重連補訂閱**：斷線重連原本只還原主商品，持倉/自選的背景訂閱全部丟失（PnL 無聲變舊）；現在全部補回。
+* **期貨乘數表統一**：原本 4 份複製且數值不一致（不同路徑算出不同損益），收斂到 `backend/services/contract_specs.py`。
+* **移除 PyQt5 依賴與死碼**：刪除 legacy/ PyQt 桌面版與 OrderManager / PositionTracker / HotkeyManager / WatchlistManager / SoundManager（後端無任何路徑使用；watchlist_manager 的頂層 PyQt5 import 甚至讓 Docker 容器無法啟動）。`requirements_backend.txt` 移除 pyqt5、補 `python-multipart`、shioaji 加上界 `<2.0`。
+
+### 🧪 測試與 CI（P2）
+
+* **新增 FastAPI TestClient 整合測試**（`tests/test_api_integration.py`，fake shioaji SDK）：confirm 流程、風控封鎖、flatten NameError 回歸、reverse 部位上限、智慧單觸發風控（開倉封鎖/保護放行）、日虧損熔斷、journal 已實現餵入、API token 認證。
+* **新增 SmartOrderEngine 單元測試**（`tests/test_smart_order_engine.py`）：MIT/移停/OCO/Bracket 觸發邏輯 + 持久化 re-arm。
+* **CI 強化**：vitest 進主 CI、ESLint 轉硬性擋 PR、backend 改從 requirements 安裝、新增 dependabot、補上缺失的 `.secrets.baseline`。
+* **基礎設施**：docker-compose `depends_on` 改 `service_healthy`；刪除孤兒 `lightning_trader/electron/`；backend Dockerfile 不再需要 pyqt5 過濾。
+
+### 🖥️ 前端
+
+* **TradingContext 拆分高頻/低頻雙 context + memoized value**：低頻消費者（帳戶/持倉/委託面板）不再於行情活躍時每 100ms 全部重繪；DOM ladder `React.memo` 化。
+* **每個 dashboard 面板獨立 ErrorBoundary**：單一面板崩潰不再炸掉整個交易畫面。
+* **下單 confirm 重送流程 + API token 支援**（設定視窗可填 token）。
+* **WS 重連加 jitter、訂單刷新輪詢整併降頻**；共用 playSound / API error / URL 解析工具。
+
+---
+
 ## [2.0.0] - 2026-06-02
 
 ### 🌟 重大優化與視覺重構

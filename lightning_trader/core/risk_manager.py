@@ -1,18 +1,23 @@
 """
 RiskManager — 統一的風控與防呆引擎
 
-合併了原本分離的 OrderValidator 和 RiskManager 職責：
+職責：
  - 下單前防呆檢查 (block / warning 兩級別)
  - 即時風控監控 (日虧損、頻率)
- - 定期巡檢 (自動停止交易)
+ - 日虧損觸發時自動停止交易
 
-設計原則: Single source of truth — 所有下單前的驗證都通過這一個入口。
+資料餵入（由 backend 主動呼叫，不再依賴死掉的 OrderManager 事件鏈）：
+ - update_daily_pnl(realized=…, unrealized=…)：pnl_broadcaster / 成交回報路徑餵入
+ - update_positions([...])：pnl_broadcaster 的持倉快照餵入
+ - on_tick（EventBus）：更新現價供價格偏離檢查
+
+設計原則: Single source of truth — 所有下單前的驗證都通過 pre_order_check。
 """
 import logging
 import time
 from enum import Enum
-from typing import Tuple, Optional, Dict
-from dataclasses import dataclass
+from typing import Optional, Dict, List
+from dataclasses import dataclass, field
 
 
 
@@ -31,6 +36,7 @@ class CheckResult:
     """檢查結果"""
     level: CheckLevel
     reason: str = ""
+    warnings: List[str] = field(default_factory=list)
 
     @property
     def passed(self) -> bool:
@@ -45,8 +51,8 @@ class CheckResult:
         return CheckResult(CheckLevel.BLOCK, reason)
 
     @staticmethod
-    def warn(reason: str):
-        return CheckResult(CheckLevel.WARNING, reason)
+    def warn(reason: str, warnings: Optional[List[str]] = None):
+        return CheckResult(CheckLevel.WARNING, reason, warnings or [reason])
 
 
 @dataclass
@@ -91,8 +97,7 @@ class RiskManager:
         if result.level == CheckLevel.BLOCK:
             reject_order(result.reason)
         elif result.level == CheckLevel.WARNING:
-            if user_confirms(result.reason):
-                proceed_order()
+            前端確認後帶 confirm=true 重送 → pre_order_check(..., skip_warnings=True)
         else:
             proceed_order()
     """
@@ -106,36 +111,44 @@ class RiskManager:
         self._daily_unrealized_pnl: float = 0.0
         self._order_timestamps: list = []
         self._recent_orders: list = []       # (ts_ms, symbol, action, price, qty)
-        self._current_positions: Dict[str, int] = {}  # symbol -> net_qty
+        self._current_positions: Dict[str, int] = {}  # symbol -> net_qty（有號）
         self._current_prices: Dict[str, float] = {}
 
-        # 監聽 EventBus
+        # 監聽 EventBus（現價供價格偏離檢查）
         self.event_bus.on_tick.connect(self._on_tick)
-        self.event_bus.on_fill.connect(self._on_fill)
-        self.event_bus.on_position_update.connect(self._on_position_update)
 
         logger.info("RiskManager 已初始化")
 
-    # ──── 事件處理 ────
+    # ──── 事件 / 資料餵入 ────
 
     def _on_tick(self, symbol: str, tick_data: dict):
         price = tick_data.get("Price", 0)
         if price > 0:
             self._current_prices[symbol] = price
 
-    def _on_fill(self, fill_data: dict):
-        self._order_timestamps.append(time.time())
-
-    def _on_position_update(self, pos_data: dict):
-        self._daily_unrealized_pnl = pos_data.get("total_unrealized_pnl", 0)
-        for p in pos_data.get("positions", []):
-            self._current_positions[p["symbol"]] = p["net_qty"]
-            
-        # 順便觸發日虧損檢查
+    def update_daily_pnl(self, realized: Optional[float] = None,
+                         unrealized: Optional[float] = None):
+        """由 backend 餵入日損益（realized 來自 journal FIFO、unrealized 來自 pnl_broadcaster）。"""
+        if realized is not None:
+            self._daily_realized_pnl = float(realized)
+        if unrealized is not None:
+            self._daily_unrealized_pnl = float(unrealized)
         self._periodic_check()
 
+    def update_positions(self, positions: List[dict]):
+        """由 pnl_broadcaster 餵入持倉快照。positions: [{symbol, qty, direction}, ...]"""
+        net: Dict[str, int] = {}
+        for p in positions or []:
+            sym = (p.get("symbol") or "").upper()
+            if not sym:
+                continue
+            qty = int(p.get("qty", 0) or 0)
+            sign = -1 if p.get("direction") == "Sell" else 1
+            net[sym] = net.get(sym, 0) + sign * qty
+        self._current_positions = net
+
     def _periodic_check(self):
-        """定期風控巡檢 — 日虧損觸發時自動停止交易"""
+        """風控巡檢 — 日虧損觸發時自動停止交易"""
         if not self.config.max_daily_loss_enabled:
             return
         total = self._daily_realized_pnl + self._daily_unrealized_pnl
@@ -157,6 +170,7 @@ class RiskManager:
         is_market_order: bool = False,
         position_qty: int = 0,
         position_direction: str = "Flat",
+        skip_warnings: bool = False,
     ) -> CheckResult:
         """
         下單前完整檢查（唯一入口）
@@ -169,11 +183,13 @@ class RiskManager:
             is_market_order: 是否為市價單
             position_qty: 目前該商品持倉數量
             position_direction: 目前持倉方向 "Buy"|"Sell"|"Flat"
+            skip_warnings: True = WARNING 級別視為已確認（confirm 重送 / 智慧單觸發）
 
         Returns:
-            CheckResult (level, reason)
+            CheckResult (level, reason, warnings)
         """
         symbol = symbol.strip().upper()
+        warnings: List[str] = []
 
         # === 0. 基本參數驗證 ===
         if qty <= 0:
@@ -208,22 +224,25 @@ class RiskManager:
         # === 6. 價格偏離 (warning) ===
         current_price = self._current_prices.get(symbol, 0)
         r = self._check_price_deviation(price, current_price, is_market_order)
-        if not r.passed:
-            return r
+        if r.level == CheckLevel.WARNING:
+            warnings.append(r.reason)
 
         # === 7. 市價單確認 (warning) ===
         if self.config.market_order_confirm and (is_market_order or price == 0):
-            return CheckResult.warn(
+            warnings.append(
                 f"確認送出市價{'買進' if action == 'Buy' else '賣出'} "
                 f"{symbol} {qty}口？"
             )
 
         # === 8. 反向加碼確認 (warning) ===
         r = self._check_reverse(action, position_direction)
-        if not r.passed:
-            return r
+        if r.level == CheckLevel.WARNING:
+            warnings.append(r.reason)
 
-        # 全通過 → 記錄委託供重複偵測
+        if warnings and not skip_warnings:
+            return CheckResult(CheckLevel.WARNING, "; ".join(warnings), warnings)
+
+        # 通過（或警告已確認）→ 記錄委託供重複偵測 + 頻率統計
         self._record_order(symbol, action, price, qty)
         return CheckResult.ok()
 
@@ -243,7 +262,7 @@ class RiskManager:
                             qty: int, current_qty: int,
                             current_direction: str = "Flat") -> CheckResult:
         """
-        Bug fix: 反向加碼（持有空單時下買單）應該算「平倉」而非「加碼」。
+        反向加碼（持有空單時下買單）算「平倉」而非「加碼」：
         把 (current_qty, current_direction) 轉成有號淨部位，再加上有號委託量。
         """
         if not self.config.max_position_enabled:
@@ -321,8 +340,10 @@ class RiskManager:
         return CheckResult.ok()
 
     def _record_order(self, symbol: str, action: str, price: float, qty: int):
+        now = time.time()
+        self._order_timestamps.append(now)
         self._recent_orders.append(
-            (time.time() * 1000, symbol, action, price, qty)
+            (now * 1000, symbol, action, price, qty)
         )
 
     # ──── 管理 ────
