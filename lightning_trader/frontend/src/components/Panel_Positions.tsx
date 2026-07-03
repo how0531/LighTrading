@@ -1,5 +1,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
+import PanelTitle from './ui/PanelTitle';
+import { actionColor, UP_COLOR, DOWN_COLOR } from '../utils/priceColor';
 import { getPositions, getAccounts, apiClient } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
@@ -172,10 +174,7 @@ const Panel_Positions: React.FC = () => {
     <div className="bg-slate-800/50 rounded-lg p-3 border border-slate-700 h-full flex flex-col glass-panel shadow-2xl relative">
       <div className="flex flex-col gap-2.5 mb-3">
         <div className="flex justify-between items-center">
-          <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
-            <span className="w-1 h-3.5 bg-amber-500 rounded-full"></span>
-            即時持倉 (Positions)
-          </h3>
+          <PanelTitle>即時持倉 (Positions)</PanelTitle>
           <button
             onClick={() => fetchPositions(selectedAccountId)}
             className="text-[10px] bg-slate-700/50 hover:bg-slate-600 px-2 py-0.5 rounded transition-all text-slate-400 border border-slate-600"
@@ -353,7 +352,7 @@ const Panel_Positions: React.FC = () => {
                               {fills.slice(0, 20).map((f, fi) => (
                                 <tr key={fi} className="text-slate-400">
                                   <td className="py-0.5 text-slate-500">{new Date(f.ts).toLocaleString()}</td>
-                                  <td className={`py-0.5 ${f.action === 'Buy' ? 'text-red-400' : 'text-green-400'}`}>
+                                  <td className={`py-0.5 ${actionColor(f.action)}`}>
                                     {f.action === 'Buy' ? '買' : '賣'}
                                   </td>
                                   <td className="py-0.5 text-right text-slate-300">{f.price.toLocaleString()}</td>
@@ -379,7 +378,7 @@ const Panel_Positions: React.FC = () => {
       {positions.length > 0 && (
         <div className={`px-3 py-2 mt-1 rounded border flex justify-between items-center text-[11px] font-mono tabular-nums ${totalRealtimePnl >= 0 ? 'border-red-800/40 bg-red-950/20' : 'border-emerald-800/40 bg-emerald-950/20'}`}>
           <span className="text-slate-400 font-bold">即時總損益</span>
-          <span className={`font-black text-sm ${totalRealtimePnl >= 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+          <span className={`font-black text-sm ${totalRealtimePnl >= 0 ? UP_COLOR : DOWN_COLOR}`}>
             {totalRealtimePnl > 0 ? '+' : ''}{totalRealtimePnl.toLocaleString()}
           </span>
         </div>

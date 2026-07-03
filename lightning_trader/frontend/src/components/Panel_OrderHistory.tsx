@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { getOrderHistory, apiClient, normalizeApiError } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
+import { actionColor } from '../utils/priceColor';
 
 interface Trade {
   time: string;
@@ -295,7 +296,7 @@ const Panel_OrderHistory: React.FC = () => {
                       )}
                     </div>
                   </td>
-                  <td className={`py-2 px-2 font-bold ${t.action === 'Buy' ? 'text-red-400' : 'text-green-400'}`}>
+                  <td className={`py-2 px-2 font-bold ${actionColor(t.action)}`}>
                     {t.action === 'Buy' ? '買' : '賣'}
                   </td>
                   <td className="py-2 px-2 text-right font-mono tabular-nums">

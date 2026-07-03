@@ -18,6 +18,8 @@ import { X, Eye, GripVertical, ListPlus } from 'lucide-react';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { SymbolPicker } from './SymbolPicker';
+import PanelTitle from './ui/PanelTitle';
+import { UP_COLOR, DOWN_COLOR } from '../utils/priceColor';
 import { formatPrice } from '../utils/instrument';
 import { apiClient } from '../api/client';
 
@@ -150,10 +152,7 @@ const WatchlistPanel: React.FC = () => {
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
       <div className="px-3 py-2 border-b border-slate-700/50 flex items-center justify-between gap-2">
-        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
-          <span className="w-1 h-3.5 bg-amber-500 rounded-full"></span>
-          自選 ({list.length})
-        </h3>
+        <PanelTitle>自選 ({list.length})</PanelTitle>
         <div className="flex items-center gap-1">
           {missingPositions.length > 0 && (
             <button
@@ -214,13 +213,13 @@ const WatchlistPanel: React.FC = () => {
                       )}
                     </div>
                   </td>
-                  <td className={`px-2 py-1 text-right font-mono ${isStaleData ? 'text-slate-600' : up ? 'text-red-400' : down ? 'text-emerald-400' : 'text-slate-300'}`}>
+                  <td className={`px-2 py-1 text-right font-mono ${isStaleData ? 'text-slate-600' : up ? UP_COLOR : down ? DOWN_COLOR : 'text-slate-300'}`}>
                     {price > 0 ? formatPrice(price, sym) : '—'}
                   </td>
-                  <td className={`px-2 py-1 text-right font-mono ${up ? 'text-red-400' : down ? 'text-emerald-400' : 'text-slate-500'}`}>
+                  <td className={`px-2 py-1 text-right font-mono ${up ? UP_COLOR : down ? DOWN_COLOR : 'text-slate-500'}`}>
                     {price > 0 && ref > 0 ? `${change > 0 ? '+' : ''}${change.toFixed(2)}` : '—'}
                   </td>
-                  <td className={`px-2 py-1 text-right font-mono ${up ? 'text-red-400' : down ? 'text-emerald-400' : 'text-slate-500'}`}>
+                  <td className={`px-2 py-1 text-right font-mono ${up ? UP_COLOR : down ? DOWN_COLOR : 'text-slate-500'}`}>
                     {price > 0 && ref > 0 ? `${pct > 0 ? '+' : ''}${pct.toFixed(2)}%` : '—'}
                   </td>
                   <td className="px-1 py-1 text-right">

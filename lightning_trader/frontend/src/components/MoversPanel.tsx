@@ -13,6 +13,8 @@ import { TrendingUp, TrendingDown } from 'lucide-react';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { formatPrice } from '../utils/instrument';
+import PanelTitle from './ui/PanelTitle';
+import { UP_COLOR, DOWN_COLOR } from '../utils/priceColor';
 import { rankMovers, computeBreadth, type MoverInput, type MoverRow } from '../utils/movers';
 
 const TOP_N = 8;
@@ -24,7 +26,7 @@ const MoverList: React.FC<{
   current: string;
   onPick: (s: string) => void;
 }> = ({ title, rows, up, current, onPick }) => {
-  const color = up ? 'text-red-400' : 'text-emerald-400';
+  const color = up ? UP_COLOR : DOWN_COLOR;
   const Icon = up ? TrendingUp : TrendingDown;
   return (
     <div className="flex-1 min-w-0 flex flex-col">
@@ -84,10 +86,7 @@ const MoversPanel: React.FC = () => {
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
       <div className="px-3 py-2 border-b border-slate-700/50 flex items-center justify-between gap-2">
-        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
-          <span className="w-1 h-3.5 bg-amber-500 rounded-full"></span>
-          盤勢排行
-        </h3>
+        <PanelTitle>盤勢排行</PanelTitle>
         <span className="text-[10px] font-mono text-slate-500">自選 {list.length}</span>
       </div>
 

@@ -31,6 +31,7 @@ import {
   computeSMA as _sma, computeVWAP as _vwap, computeRSI as _rsi,
   computeEMA as _ema, computeBollinger as _boll,
 } from '../utils/indicators';
+import PanelTitle from './ui/PanelTitle';
 
 // 包成 LineData<Time>[]：indicator utils 用 number；lightweight-charts 要 Time 型別 cast
 function computeSMA(bars: KBarApi[], period: number): LineData<Time>[] {
@@ -419,10 +420,7 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
       <div className={`${compact ? 'px-2 py-1' : 'px-3 py-2'} border-b border-slate-700/50 flex items-center justify-between gap-1`}>
-        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2 min-w-0">
-          <span className="w-1 h-3.5 bg-amber-500 rounded-full flex-shrink-0"></span>
-          <span className="truncate">{compact ? (effSymbol || '—') : `K 線圖 (${effSymbol || '—'})`}</span>
-        </h3>
+        <PanelTitle>{compact ? (effSymbol || '—') : `K 線圖 (${effSymbol || '—'})`}</PanelTitle>
         <div className="flex items-center gap-1 flex-wrap justify-end">
           {compact ? (
             <div className="relative">

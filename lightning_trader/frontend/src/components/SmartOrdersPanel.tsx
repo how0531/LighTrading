@@ -15,6 +15,7 @@ import { apiClient, normalizeApiError } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
 import { formatPrice } from '../utils/instrument';
+import { actionColor } from '../utils/priceColor';
 
 const SmartOrdersPanel: React.FC = () => {
   const { smartOrders, refreshSmartOrders, subscribe, targetSymbol } = useTradingContext();
@@ -182,7 +183,7 @@ const SmartOrdersPanel: React.FC = () => {
                     >
                       {o.symbol}
                     </td>
-                    <td className={`px-2 py-1 font-bold ${o.action === 'Buy' ? 'text-red-400' : 'text-emerald-400'}`}>
+                    <td className={`px-2 py-1 font-bold ${actionColor(o.action)}`}>
                       {o.action === 'Buy' ? '買' : '賣'}
                     </td>
                     <td className="px-2 py-1 text-right text-slate-200">{o.qty}</td>

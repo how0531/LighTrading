@@ -5,9 +5,13 @@ import type { SizingMode } from '../../utils/sizing';
 import { lotsToAmount } from '../../utils/sizing';
 import { netPnL as computeNetPnL } from '../../utils/fees';
 import { getMultiplier } from '../../types';
+import type { QuoteData } from '../../types';
+import type { AccountInfo } from '../../contexts/TradingContext';
+import { UP_COLOR, DOWN_COLOR } from '../../utils/priceColor';
 
 interface DOMHeaderProps {
-  qData: any;
+  /** useDOMLogic 的 `quote || {}`，故為 Partial（未收到報價時是空物件） */
+  qData: Partial<QuoteData>;
   targetSymbol: string;
   currentPrice: number;
   refPrice: number;
@@ -15,7 +19,7 @@ interface DOMHeaderProps {
   limitDown: number;
   isSimulation: boolean;
   fullPrices: number[];
-  accounts: any[];
+  accounts: AccountInfo[];
   activeAccount: string | null;
   selectAccount: (acc: string) => void;
   currentPosition: any;
@@ -143,7 +147,7 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
           {(qData.AvgPrice ?? 0) > 0 && (
             <div className="flex flex-col items-center px-2 py-1 rounded border border-slate-700 bg-slate-800/60">
               <span className="text-[8px] font-bold text-slate-500 uppercase tracking-wider">VWAP</span>
-              <span className={`text-[12px] font-mono font-black tabular-nums leading-none ${currentPrice > (qData.AvgPrice ?? 0) ? 'text-red-400' : currentPrice < (qData.AvgPrice ?? 0) ? 'text-emerald-400' : 'text-[#D4AF37]'}`}>
+              <span className={`text-[12px] font-mono font-black tabular-nums leading-none ${currentPrice > (qData.AvgPrice ?? 0) ? UP_COLOR : currentPrice < (qData.AvgPrice ?? 0) ? DOWN_COLOR : 'text-[#D4AF37]'}`}>
                 {formatPrice(qData.AvgPrice ?? 0, targetSymbol)}
               </span>
             </div>

@@ -1,5 +1,6 @@
 import React from 'react';
 import { useTradingContext } from '../contexts/TradingContext';
+import { priceColor } from '../utils/priceColor';
 
 const QuoteHistory: React.FC = () => {
   const { quoteHistory } = useTradingContext();
@@ -22,12 +23,12 @@ const QuoteHistory: React.FC = () => {
           <tbody>
             {quoteHistory.map((q, idx) => {
               const prevPrice = idx < quoteHistory.length - 1 ? quoteHistory[idx + 1].Price : q.Price;
-              const isUp = q.Price >= prevPrice;
 
               return (
                 <tr key={idx} className="border-b border-slate-800/50 hover:bg-slate-800/80 transition-colors">
                   <td className="px-4 py-2 text-slate-500">{q.TickTime}</td>
-                  <td className={`px-4 py-2 text-right font-bold ${isUp ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {/* 修正：原本上漲=綠、下跌=紅（西方慣例），與全站台灣紅漲綠跌相反 */}
+                  <td className={`px-4 py-2 text-right font-bold ${priceColor(q.Price - prevPrice)}`}>
                     {q.Price.toFixed(2)}
                   </td>
                   <td className="px-4 py-2 text-right text-slate-300">{q.Volume}</td>

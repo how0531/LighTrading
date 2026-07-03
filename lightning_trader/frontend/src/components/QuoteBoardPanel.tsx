@@ -15,7 +15,9 @@ import { ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { SymbolPicker } from './SymbolPicker';
+import PanelTitle from './ui/PanelTitle';
 import { formatPrice } from '../utils/instrument';
+import { UP_COLOR, DOWN_COLOR, FLAT_COLOR } from '../utils/priceColor';
 import { computeChange, isStaleQuote, sortQuotes, type QuoteSortKey, type SortDir } from '../utils/quoteBoard';
 import { apiClient } from '../api/client';
 
@@ -118,10 +120,7 @@ const QuoteBoardPanel: React.FC = () => {
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
       <div className="px-3 py-2 border-b border-slate-700/50 flex items-center justify-between gap-2">
-        <h3 className="text-xs font-bold text-slate-300 uppercase tracking-wider flex items-center gap-2">
-          <span className="w-1 h-3.5 bg-amber-500 rounded-full"></span>
-          報價看板 ({list.length})
-        </h3>
+        <PanelTitle>報價看板 ({list.length})</PanelTitle>
         <SymbolPicker onSelect={addSymbol} />
       </div>
       <div className="flex-1 overflow-auto custom-scrollbar">
@@ -156,7 +155,7 @@ const QuoteBoardPanel: React.FC = () => {
               const stale = isStaleQuote(r.updatedAt, now, STALE_MS);
               const up = ch ? ch.change > 0 : false;
               const down = ch ? ch.change < 0 : false;
-              const dirColor = up ? 'text-red-400' : down ? 'text-emerald-400' : 'text-slate-400';
+              const dirColor = up ? UP_COLOR : down ? DOWN_COLOR : FLAT_COLOR;
               return (
                 <tr
                   key={r.symbol}

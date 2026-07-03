@@ -3,6 +3,7 @@ import { apiClient } from '../api/client';
 import { useTradingContext } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { netPnL as computeNetPnL } from '../utils/fees';
+import { UP_COLOR, DOWN_COLOR } from '../utils/priceColor';
 
 interface BalanceData {
   equity: number;
@@ -66,13 +67,13 @@ const Panel_AccountBalance: React.FC = () => {
       <div className="grid grid-cols-3 gap-2 mb-3">
         <div className={`rounded border px-2 py-1.5 text-center ${realizedPnl >= 0 ? 'border-red-800/40 bg-red-950/20' : 'border-emerald-800/40 bg-emerald-950/20'}`}>
           <div className="text-[8px] text-slate-500 font-bold uppercase">已實現</div>
-          <div className={`text-[12px] font-mono font-black tabular-nums ${realizedPnl >= 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+          <div className={`text-[12px] font-mono font-black tabular-nums ${realizedPnl >= 0 ? UP_COLOR : DOWN_COLOR}`}>
             {realizedPnl > 0 ? '+' : ''}{realizedPnl.toLocaleString()}
           </div>
         </div>
         <div className={`rounded border px-2 py-1.5 text-center ${unrealizedNet >= 0 ? 'border-red-800/40 bg-red-950/20' : 'border-emerald-800/40 bg-emerald-950/20'}`}>
           <div className="text-[8px] text-slate-500 font-bold uppercase">未實現{showNet ? '(淨)' : ''}</div>
-          <div className={`text-[12px] font-mono font-black tabular-nums ${unrealizedNet >= 0 ? 'text-red-400' : 'text-emerald-400'}`}>
+          <div className={`text-[12px] font-mono font-black tabular-nums ${unrealizedNet >= 0 ? UP_COLOR : DOWN_COLOR}`}>
             {unrealizedNet > 0 ? '+' : ''}{unrealizedNet.toLocaleString()}
           </div>
         </div>

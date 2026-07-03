@@ -11,6 +11,7 @@ SmartOrderEngine — 本地端智慧委託引擎
   - Bracket: 進場後自動掛停利 + 停損
 """
 import logging
+import threading
 from enum import Enum
 from typing import List, Optional, Callable
 from dataclasses import dataclass, field
@@ -100,6 +101,10 @@ class SmartOrderEngine:
         self._place_order = place_order_fn
         self._smart_orders: List[SmartOrder] = []
         self._id_counter = 0
+        # 券商 tick 執行緒（_on_tick/_on_fill）與 HTTP 執行緒（add_*/cancel*）會同時
+        # 讀寫 _smart_orders；用 RLock 保護，迭代前先在鎖內快照避免「list changed size」。
+        # 一律不在持鎖狀態下呼叫 self._place_order（阻塞），以免序列化 tick。
+        self._lock = threading.RLock()
 
         # 監聽 tick 事件
         self.event_bus.on_tick.connect(self._on_tick)
@@ -109,8 +114,9 @@ class SmartOrderEngine:
         logger.info("SmartOrderEngine 已初始化")
 
     def _next_id(self) -> str:
-        self._id_counter += 1
-        return f"SMART_{self._id_counter:04d}"
+        with self._lock:
+            self._id_counter += 1
+            return f"SMART_{self._id_counter:04d}"
 
     # ──── 新增智慧單 ────
 
@@ -127,7 +133,8 @@ class SmartOrderEngine:
             trigger_condition=cond,
             trigger_price=trigger_price,
         )
-        self._smart_orders.append(order)
+        with self._lock:
+            self._smart_orders.append(order)
         self.event_bus.on_smart_order_added.emit(order.to_dict())
         logger.info(f"[SmartOrder] 新增觸價單 {order.id}: "
                     f"{action} {symbol} {qty}口 @ 觸發={trigger_price} ({condition})")
@@ -148,7 +155,8 @@ class SmartOrderEngine:
             trigger_condition=cond,
             trailing_offset=trailing_offset,
         )
-        self._smart_orders.append(order)
+        with self._lock:
+            self._smart_orders.append(order)
         self.event_bus.on_smart_order_added.emit(order.to_dict())
         logger.info(f"[SmartOrder] 新增移動停損 {order.id}: "
                     f"{action} {symbol} {qty}口, 回檔={trailing_offset}點")
@@ -191,7 +199,8 @@ class SmartOrderEngine:
             linked_id=tp_id,
         )
 
-        self._smart_orders.extend([tp_order, sl_order])
+        with self._lock:
+            self._smart_orders.extend([tp_order, sl_order])
         self.event_bus.on_smart_order_added.emit(tp_order.to_dict())
         logger.info(f"[SmartOrder] 新增 OCO {tp_id}/{sl_id}: "
                     f"{action} {symbol} {qty}口, TP={take_profit} SL={stop_loss}")
@@ -214,9 +223,10 @@ class SmartOrderEngine:
             take_profit_price=take_profit,
             stop_loss_price=stop_loss,
         )
-        self._smart_orders.append(order)
+        with self._lock:
+            self._smart_orders.append(order)
 
-        # 立即送出進場限價單
+        # 立即送出進場限價單（不持鎖，避免阻塞 tick）
         trade = self._place_order(symbol, entry_price, action, qty)
         if trade:
             order.parent_order_id = getattr(getattr(trade, 'order', None), 'id', bracket_id)
@@ -233,33 +243,37 @@ class SmartOrderEngine:
 
     def cancel(self, order_id: str) -> bool:
         """取消指定智慧單"""
-        for order in self._smart_orders:
-            if order.id == order_id and order.is_active:
-                order.is_active = False
-                # 如果是 OCO，一併取消配對單
-                if order.linked_id:
-                    self._cancel_linked(order.linked_id)
-                logger.info(f"[SmartOrder] 已取消 {order_id}")
-                return True
-        return False
+        with self._lock:
+            for order in self._smart_orders:
+                if order.id == order_id and order.is_active:
+                    order.is_active = False
+                    # 如果是 OCO，一併取消配對單
+                    if order.linked_id:
+                        self._cancel_linked(order.linked_id)
+                    logger.info(f"[SmartOrder] 已取消 {order_id}")
+                    return True
+            return False
 
     def cancel_all(self, symbol: Optional[str] = None) -> int:
         """批次取消所有智慧單，回傳取消數量。"""
         count = 0
-        for order in self._smart_orders:
-            if order.is_active:
-                if symbol is None or order.symbol == symbol.strip().upper():
-                    order.is_active = False
-                    count += 1
+        with self._lock:
+            for order in self._smart_orders:
+                if order.is_active:
+                    if symbol is None or order.symbol == symbol.strip().upper():
+                        order.is_active = False
+                        count += 1
         if count > 0:
             logger.info(f"[SmartOrder] 批次取消 {count} 張智慧單" +
                         (f" ({symbol})" if symbol else ""))
         return count
 
     def _cancel_linked(self, linked_id: str):
-        for order in self._smart_orders:
-            if order.id == linked_id and order.is_active:
-                order.is_active = False
+        # 呼叫端已持有 self._lock（RLock 可重入），這裡再取一次仍安全
+        with self._lock:
+            for order in self._smart_orders:
+                if order.id == linked_id and order.is_active:
+                    order.is_active = False
 
     # ──── 洗價檢查 (每個 tick 觸發) ────
 
@@ -270,7 +284,10 @@ class SmartOrderEngine:
             return
 
         triggered = []
-        for order in self._smart_orders:
+        # 在鎖內快照，迭代快照避免與 add_*/cancel* 並發改動清單衝突
+        with self._lock:
+            orders_snapshot = list(self._smart_orders)
+        for order in orders_snapshot:
             if not order.is_active or order.symbol != symbol:
                 continue
 
@@ -337,7 +354,9 @@ class SmartOrderEngine:
 
     def _on_fill(self, fill_data: dict):
         """成交回報: 檢查 Bracket 母單是否成交"""
-        for order in self._smart_orders:
+        with self._lock:
+            orders_snapshot = list(self._smart_orders)
+        for order in orders_snapshot:
             if (order.order_type == SmartOrderType.BRACKET
                     and order.is_active
                     and not order.is_triggered
@@ -358,10 +377,12 @@ class SmartOrderEngine:
     # ──── 查詢 ────
 
     def get_active_orders(self, symbol: Optional[str] = None) -> List[dict]:
-        orders = [o for o in self._smart_orders if o.is_active]
+        with self._lock:
+            orders = [o for o in self._smart_orders if o.is_active]
         if symbol:
             orders = [o for o in orders if o.symbol == symbol.strip().upper()]
         return [o.to_dict() for o in orders]
 
     def get_all_orders(self) -> List[dict]:
-        return [o.to_dict() for o in self._smart_orders]
+        with self._lock:
+            return [o.to_dict() for o in self._smart_orders]

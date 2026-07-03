@@ -13,6 +13,7 @@ import { useRef } from 'react';
 import { apiClient, normalizeApiError } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
 import { formatPrice } from '../utils/instrument';
+import { actionColor } from '../utils/priceColor';
 
 type Fill = {
   id: string;
@@ -255,7 +256,7 @@ const JournalPanel: React.FC = () => {
                   </td>
                   <td className="px-2 py-1 text-slate-400 font-mono">{fmtTime(f.ts)}</td>
                   <td className="px-2 py-1 font-mono font-bold text-slate-200">{f.symbol}</td>
-                  <td className={`px-2 py-1 font-bold ${f.action === 'Buy' ? 'text-red-400' : 'text-emerald-400'}`}>
+                  <td className={`px-2 py-1 font-bold ${actionColor(f.action)}`}>
                     {f.action === 'Buy' ? '買' : '賣'}
                   </td>
                   <td className="px-2 py-1 text-right font-mono text-slate-200">{formatPrice(f.price, f.symbol)}</td>
