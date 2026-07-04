@@ -257,15 +257,23 @@ class ShioajiClient:
         logger.info("✅ 已註冊 Fallback 報價回呼 (set_quote_callback)")
 
         def on_order_status(state, msg: dict):
-            # ★ 政抓 Deal 事件，提取成交均價並快取存儲
+            # ★ 攔截 Deal 事件，提取成交均價並快取存儲
             state_name = str(state).lower()
-            if 'deal' in state_name:
+            is_deal = 'deal' in state_name
+            if is_deal:
                 ordno = msg.get('ordno', '') or msg.get('seqno', '')
                 deal_price = msg.get('price', 0)
                 if ordno and deal_price:
                     self._deal_prices[ordno] = float(deal_price)
                     logger.debug(f"★ 成交均價快取: ordno={ordno} price={deal_price}")
             self.signal_order_update.emit(msg)
+            # ★ Deal（成交）另外走 signal_trade_update →
+            #   journal 落地 / on_fill 事件 / 已實現損益餵風控 / webhook。
+            #   這個 signal 之前從來沒有人 emit，整條成交處理鏈在生產環境是死的。
+            if is_deal:
+                payload = dict(msg) if isinstance(msg, dict) else {"raw": str(msg)}
+                payload.setdefault("state", str(state))
+                self.signal_trade_update.emit(payload)
             threading.Timer(0.5, self.trigger_account_update).start()
 
         self.api.set_order_callback(on_order_status)

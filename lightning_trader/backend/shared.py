@@ -82,8 +82,18 @@ async def run_in_broker_thread(func, *args, **kwargs):
 
 
 def submit_to_broker_thread(fn):
-    """給非 async 情境（例如智慧單觸發）把工作丟進 broker executor。"""
+    """給非 async 情境把一般券商工作丟進 broker executor。"""
     return broker_executor.submit(fn)
+
+
+# 專用下單通道：智慧單觸發的保護性出場不能排在 kbars 下載 /
+# 全商品搜尋等慢查詢後面。獨立單 worker，只跑下單類的快操作。
+order_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="order")
+
+
+def submit_order_task(fn):
+    """智慧單觸發下單專用通道（低延遲，不與慢查詢共用佇列）。"""
+    return order_executor.submit(fn)
 
 
 async def broadcast_ws(msg_dict: dict):

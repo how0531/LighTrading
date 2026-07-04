@@ -113,6 +113,9 @@ class RiskManager:
         self._recent_orders: list = []       # (ts_ms, symbol, action, price, qty)
         self._current_positions: Dict[str, int] = {}  # symbol -> net_qty（有號）
         self._current_prices: Dict[str, float] = {}
+        # 最近一次 reset_daily 的時間（ms）— 已實現損益重算以此為基線，
+        # 避免手動 reset 後下一筆成交的全日重算又把舊虧損加回來
+        self.last_reset_ms: float = 0.0
 
         # 監聽 EventBus（現價供價格偏離檢查）
         self.event_bus.on_tick.connect(self._on_tick)
@@ -171,6 +174,7 @@ class RiskManager:
         position_qty: int = 0,
         position_direction: str = "Flat",
         skip_warnings: bool = False,
+        skip_duplicate: bool = False,
     ) -> CheckResult:
         """
         下單前完整檢查（唯一入口）
@@ -184,6 +188,8 @@ class RiskManager:
             position_qty: 目前該商品持倉數量
             position_direction: 目前持倉方向 "Buy"|"Sell"|"Flat"
             skip_warnings: True = WARNING 級別視為已確認（confirm 重送 / 智慧單觸發）
+            skip_duplicate: True = 跳過重複委託檢查（智慧單觸發 — 兩張同參數的
+                智慧單在同一 tick 觸發是合法情境，不是手震連點）
 
         Returns:
             CheckResult (level, reason, warnings)
@@ -217,9 +223,10 @@ class RiskManager:
             return r
 
         # === 5. 重複下單 ===
-        r = self._check_duplicate(symbol, action, price, qty)
-        if not r.passed:
-            return r
+        if not skip_duplicate:
+            r = self._check_duplicate(symbol, action, price, qty)
+            if not r.passed:
+                return r
 
         # === 6. 價格偏離 (warning) ===
         current_price = self._current_prices.get(symbol, 0)
@@ -360,6 +367,7 @@ class RiskManager:
         self._order_timestamps.clear()
         self._recent_orders.clear()
         self.config.trading_enabled = True
+        self.last_reset_ms = time.time() * 1000
         logger.info("[RiskManager] 日內狀態已重設")
 
     def get_status(self) -> dict:

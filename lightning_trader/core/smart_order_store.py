@@ -86,6 +86,25 @@ class SmartOrderStore:
         except Exception as e:
             logger.error(f"smart_order_store.save 失敗: {e}")
 
+    def max_id_seq(self) -> int:
+        """取所有歷史智慧單（含已觸發/取消）的最大流水號，供重啟後 id counter 續號。"""
+        if not self.enabled:
+            return 0
+        try:
+            with self._lock:
+                conn = self._connect()
+                rows = conn.execute("SELECT id FROM smart_orders").fetchall()
+            max_seq = 0
+            for (oid,) in rows:
+                try:
+                    max_seq = max(max_seq, int(str(oid).rsplit("_", 1)[-1]))
+                except (ValueError, TypeError):
+                    pass
+            return max_seq
+        except Exception as e:
+            logger.error(f"smart_order_store.max_id_seq 失敗: {e}")
+            return 0
+
     def load_active(self) -> list[dict]:
         """讀出所有仍 active 的智慧單（開機 re-arm 用）。"""
         if not self.enabled:

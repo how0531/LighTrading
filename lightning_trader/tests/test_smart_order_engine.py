@@ -155,6 +155,65 @@ def test_cancel_and_cancel_all():
     assert eng.get_active_orders() == []
 
 
+# ─── 觸發下單結果處理（re-arm / RISK_BLOCKED 契約） ─────────
+
+def test_trigger_place_failure_rearms_then_gives_up():
+    """下單失敗（回 None）→ re-arm 重試；連續失敗達上限後放棄。"""
+    bus, rec, eng = _make(result=False)
+    eng.add_mit("TXFA5", "Sell", 1, trigger_price=20000, condition="price_lte")
+
+    bus.on_tick.emit("TXFA5", {"Price": 19990})   # 第 1 次失敗 → re-arm
+    assert len(eng.get_active_orders()) == 1
+    bus.on_tick.emit("TXFA5", {"Price": 19990})   # 第 2 次失敗 → re-arm
+    assert len(eng.get_active_orders()) == 1
+    bus.on_tick.emit("TXFA5", {"Price": 19990})   # 第 3 次失敗 → 達上限放棄
+    assert eng.get_active_orders() == []
+    assert len(rec.calls) == 3
+
+
+def test_trigger_risk_blocked_is_consumed_not_rearmed():
+    """被風控攔下（回 RISK_BLOCKED 哨兵）→ 視為已消耗，不 re-arm 不重試。"""
+    bus = EventBus()
+    calls = []
+
+    def blocked_place(symbol, price, action, qty):
+        calls.append(1)
+        return engine_mod.RISK_BLOCKED
+
+    eng = SmartOrderEngine(bus, place_order_fn=blocked_place)
+    eng.add_mit("TXFA5", "Buy", 1, trigger_price=21000, condition="price_gte")
+    bus.on_tick.emit("TXFA5", {"Price": 21001})
+    assert eng.get_active_orders() == []
+    bus.on_tick.emit("TXFA5", {"Price": 21002})
+    assert len(calls) == 1
+
+
+def test_trigger_success_persists_consumed_state(tmp_path):
+    """成功觸發後，重啟不得 re-arm（最終狀態已落地）。"""
+    db = tmp_path / "smart.db"
+    bus1, rec1, eng1 = _make(store=SmartOrderStore(Path(db)))
+    eng1.add_mit("TXFA5", "Sell", 1, trigger_price=20000, condition="price_lte")
+    bus1.on_tick.emit("TXFA5", {"Price": 19999})
+    assert len(rec1.calls) == 1
+
+    bus2, rec2, eng2 = _make(store=SmartOrderStore(Path(db)))
+    assert eng2.get_active_orders() == []
+    bus2.on_tick.emit("TXFA5", {"Price": 19999})
+    assert rec2.calls == []
+
+
+def test_oco_trigger_persists_linked_cancellation(tmp_path):
+    """OCO 一腿觸發後重啟：另一腿不得復活。"""
+    db = tmp_path / "smart.db"
+    bus1, rec1, eng1 = _make(store=SmartOrderStore(Path(db)))
+    eng1.add_oco("TXFA5", "Sell", 1, take_profit=21100, stop_loss=20900)
+    bus1.on_tick.emit("TXFA5", {"Price": 21100})  # 停利腿觸發
+    assert len(rec1.calls) == 1
+
+    bus2, rec2, eng2 = _make(store=SmartOrderStore(Path(db)))
+    assert eng2.get_active_orders() == []
+
+
 # ─── 持久化 ─────────────────────────────────────────────────
 
 def test_persistence_rearm_after_restart(tmp_path):

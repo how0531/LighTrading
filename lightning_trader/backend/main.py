@@ -95,11 +95,12 @@ shared.shioaji_client = engine.client
 # 連接所有 Shioaji 回呼
 wire_callbacks()
 
-# ★ 智慧單觸發：注入「過風控的下單函數」+「丟到 broker thread 執行」
-#   （之前觸發時直接在行情執行緒上同步下單，且完全繞過 RiskManager）
+# ★ 智慧單觸發：注入「過風控的下單函數」+「丟到專用 order thread 執行」
+#   （之前觸發時直接在行情執行緒上同步下單，且完全繞過 RiskManager；
+#    專用通道避免停損出場排在 kbars/搜尋等慢查詢後面）
 from backend.services.order_guard import smart_place_order
 engine.smart_order_engine._place_order = smart_place_order
-engine.smart_order_engine.set_dispatch(shared.submit_to_broker_thread)
+engine.smart_order_engine.set_dispatch(shared.submit_order_task)
 
 
 # ─── Lifespan ──────────────────────────────────────────────

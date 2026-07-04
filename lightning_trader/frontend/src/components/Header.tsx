@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw } from 'lucide-react';
-import { getAccountBalance } from '../api/client';
+import { apiClient, getAccountBalance } from '../api/client';
 import { SymbolPicker } from './SymbolPicker';
 import { PRESET_ORDER, presetLabel, LAYOUT_PRESETS, type LayoutPresetId } from '../utils/layoutPresets';
 
@@ -54,11 +54,10 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
   useEffect(() => {
     if (!isConnected) return;
     const fetchLat = () => {
-      // 用 fetch 而非 apiClient 以免循環引用；/api/metrics 不需登入
-      fetch('/api/metrics')
-        .then((r) => r.ok ? r.json() : null)
-        .then((d: { latency?: LatencyState } | null) => {
-          if (d?.latency) setLatency(d.latency);
+      // 走 apiClient：token 認證啟用時才會帶 X-API-Token（raw fetch 會 401）
+      apiClient.get<{ latency?: LatencyState }>('/metrics')
+        .then((r) => {
+          if (r.data?.latency) setLatency(r.data.latency);
         })
         .catch(() => { /* 靜默 */ });
     };

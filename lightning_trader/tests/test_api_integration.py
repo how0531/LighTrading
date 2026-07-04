@@ -208,10 +208,28 @@ def test_unrealized_feed_trips_daily_loss_halt():
     assert _rm().config.trading_enabled is False
 
 
+def test_flat_positions_zero_out_unrealized():
+    """全部平倉後 payload 為空 → 未實現損益必須歸零，
+    否則會與已實現重複計算、誤觸熔斷（審查發現 #0 的回歸）。"""
+    from backend.services import pnl_broadcaster as pb
+    rm = _rm()
+    pb._feed_risk_manager({
+        "positions": [{"symbol": "2330", "qty": 1, "direction": "Buy"}],
+        "total_pnl": -2000,
+    })
+    assert rm._daily_unrealized_pnl == -2000
+    assert rm._current_positions.get("2330") == 1
+    pb._feed_risk_manager({"positions": [], "total_pnl": 0})
+    assert rm._daily_unrealized_pnl == 0
+    assert rm._current_positions == {}
+
+
 # ─── 7. journal → 日已實現損益 ──────────────────────────────
 
 def test_realized_feed_from_journal():
     from backend.services import trade_journal, order_guard
+    # fixture 的 reset_daily() 已把 rm.last_reset_ms 設為「剛剛」，
+    # refresh 的基線因此是 reset 時間點（決定性，不受 04:00/午夜邊界影響）
     trade_journal.record_trade({"code": "2330", "action": "Buy", "price": 100.0,
                                 "qty": 1, "ordno": "T1", "state": "deal"})
     trade_journal.record_trade({"code": "2330", "action": "Sell", "price": 90.0,
@@ -219,6 +237,45 @@ def test_realized_feed_from_journal():
     order_guard.refresh_daily_realized()
     # (90-100) × 1 張 × 1000 股 = -10000
     assert _rm()._daily_realized_pnl == -10000
+
+
+def test_realized_feed_matches_open_leg_before_boundary():
+    """跨風控日邊界的回合（昨晚開倉、今日平倉）：FIFO 必須配對到邊界前的
+    開倉腳，只把「邊界後的增量」算進本日（審查發現 #1 的回歸）。"""
+    import time as _t
+    from backend.services import trade_journal, order_guard
+    rm = _rm()
+    now_ms = int(_t.time() * 1000)
+    # 開倉腳在「上一個風控日」（reset 前 2 小時），平倉腳在本日
+    trade_journal.import_fills([
+        {"ts": now_ms - 2 * 3600 * 1000, "symbol": "2890", "action": "Buy",
+         "price": 100.0, "qty": 1, "order_id": "X1"},
+    ])
+    trade_journal.record_trade({"code": "2890", "action": "Sell", "price": 95.0,
+                                "qty": 1, "ordno": "X2", "state": "deal"})
+    order_guard.refresh_daily_realized()
+    # 平倉腳正確配對到邊界前的開倉腳 → 本日增量 = (95-100)×1000 = -5000
+    # （修復前：開倉腳被截掉 → 平倉被當成新開空單 → realized = 0）
+    assert rm._daily_realized_pnl == -5000
+
+
+# ─── 8. 成交回報 → fill 管線（signal_trade_update 死線回歸） ─
+
+def test_deal_callback_reaches_fill_pipeline():
+    """券商 order callback 的 Deal 事件必須流進 on_fill / journal ——
+    signal_trade_update 之前從來沒有人 emit，整條成交鏈是死的（審查發現 #6）。"""
+    fills = []
+    shared.engine.event_bus.on_fill.connect(fills.append)
+    try:
+        cb = _fake_api()._order_callback
+        assert cb is not None, "order callback 未註冊"
+        cb("OrderState.StockDeal", {"code": "2317", "action": "Buy",
+                                    "price": 100.0, "quantity": 1, "ordno": "D1"})
+        assert fills, "Deal 事件沒有流進 on_fill"
+        assert fills[0]["symbol"] == "2317"
+        assert fills[0]["qty"] == 1
+    finally:
+        shared.engine.event_bus.on_fill.disconnect(fills.append)
 
 
 # ─── 8. API Token 認證（最後執行：會 reload main） ──────────

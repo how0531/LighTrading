@@ -153,11 +153,13 @@ async def pnl_broadcaster():
                 continue
 
             await _refresh_positions_if_stale()
+            payload = _compute_pnl_payload()
+            # ★ 風控餵入不依賴 WS 連線、也不依賴「有持倉」——
+            #   全部平倉後 payload 為 {positions: [], total_pnl: 0}，
+            #   必須把未實現損益歸零，否則熔斷會拿「已實現 + 凍結的舊未實現」重複計算
+            _feed_risk_manager(payload)
             if not _pos_cache:
                 continue
-            payload = _compute_pnl_payload()
-            # ★ 風控餵入不依賴 WS 連線 —— 就算前端沒開，日虧損熔斷也要有資料
-            _feed_risk_manager(payload)
             await _broadcast_pnl(payload)
         except asyncio.CancelledError:
             break

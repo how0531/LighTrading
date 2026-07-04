@@ -249,22 +249,32 @@ async def reverse_position(req: SymbolRequest):
     """
     risk_manager = getattr(shared.engine, "risk_manager", None)
     if risk_manager is not None:
+        # 反向是「開新倉」，持倉查不到就不能放行（fail-closed）
         try:
             positions = await shared.run_in_broker_thread(shared.shioaji_client.list_positions)
-            pos = next((p for p in positions if p.get("symbol", "").upper() == req.symbol.upper()), None)
-        except Exception:
-            pos = None
-        if pos:
-            pos_qty = int(pos.get("qty", 0) or 0)
-            pos_dir = pos.get("direction", "Flat")
-            reverse_action = "Sell" if pos_dir == "Buy" else "Buy"
+        except Exception as e:
+            logger.error(f"reverse 前查持倉失敗: {e}")
+            raise HTTPException(status_code=503, detail={
+                "code": "POSITIONS_UNAVAILABLE",
+                "user_msg": "無法取得持倉狀態，反向已取消，請稍後再試",
+            })
+        # 聚合同商品所有列（多帳號/多列）成有號淨部位
+        net = 0
+        for p in positions:
+            if (p.get("symbol") or "").upper() != req.symbol.upper():
+                continue
+            q = int(p.get("qty", 0) or 0)
+            net += q if p.get("direction") == "Buy" else -q
+        if net != 0:
+            pos_dir = "Buy" if net > 0 else "Sell"
+            reverse_action = "Sell" if net > 0 else "Buy"
             result = risk_manager.pre_order_check(
                 symbol=req.symbol,
                 action=reverse_action,
-                qty=pos_qty * 2,
+                qty=abs(net) * 2,
                 price=0,
                 is_market_order=True,
-                position_qty=pos_qty,
+                position_qty=abs(net),
                 position_direction=pos_dir,
                 skip_warnings=True,  # 反向按鈕本身就是明確的使用者意圖
             )

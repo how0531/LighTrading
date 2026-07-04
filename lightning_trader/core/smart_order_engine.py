@@ -31,6 +31,13 @@ from datetime import datetime
 
 logger = logging.getLogger(__name__)
 
+#: place_order_fn 的哨兵回傳值契約：
+#:   trade 物件  = 成功
+#:   RISK_BLOCKED = 被風控攔下（觸發視為已消耗，不重試）
+#:   None / 例外  = 下單失敗（re-arm 重試，上限 _MAX_TRIGGER_RETRIES）
+RISK_BLOCKED = "RISK_BLOCKED"
+_MAX_TRIGGER_RETRIES = 3
+
 
 class SmartOrderType(Enum):
     MIT = "MIT"                    # Market If Touched (觸價單)
@@ -63,10 +70,11 @@ class SmartOrder:
     stop_loss_price: float = 0.0
     linked_id: Optional[str] = None  # OCO 配對的另一張單 ID
     # Bracket 專用
-    parent_order_id: Optional[str] = None  # 母單 ID
+    parent_order_id: Optional[str] = None  # 母單 ID（可為逗號分隔的多個候選 id）
     # 狀態
     is_active: bool = True
     is_triggered: bool = False
+    retry_count: int = 0                   # 觸發下單失敗的重試次數
     created_at: str = field(default_factory=lambda: datetime.now().isoformat())
     triggered_at: Optional[str] = None
 
@@ -87,6 +95,7 @@ class SmartOrder:
             "parent_order_id": self.parent_order_id,
             "is_active": self.is_active,
             "is_triggered": self.is_triggered,
+            "retry_count": self.retry_count,
             "created_at": self.created_at,
             "triggered_at": self.triggered_at,
         }
@@ -109,6 +118,7 @@ class SmartOrder:
             parent_order_id=d.get("parent_order_id"),
             is_active=bool(d.get("is_active", True)),
             is_triggered=bool(d.get("is_triggered", False)),
+            retry_count=int(d.get("retry_count", 0) or 0),
             created_at=d.get("created_at") or datetime.now().isoformat(),
             triggered_at=d.get("triggered_at"),
         )
@@ -161,7 +171,6 @@ class SmartOrderEngine:
         if not (self._store and getattr(self._store, "enabled", False)):
             return
         restored = 0
-        max_seq = 0
         for d in self._store.load_active():
             try:
                 order = SmartOrder.from_dict(d)
@@ -172,13 +181,9 @@ class SmartOrderEngine:
                 continue
             self._smart_orders.append(order)
             restored += 1
-            # 讓 id counter 跳過既有編號，避免重啟後撞號
-            try:
-                seq = int(str(order.id).rsplit("_", 1)[-1])
-                max_seq = max(max_seq, seq)
-            except ValueError:
-                pass
-        self._id_counter = max_seq
+        # id counter 必須跳過「所有」歷史編號（含已觸發/已取消），
+        # 否則重啟後新單會重用舊 id、upsert 蓋掉歷史列
+        self._id_counter = self._store.max_id_seq()
         if restored:
             logger.info(f"[SmartOrder] 已從持久化還原 {restored} 張智慧單")
 
@@ -206,8 +211,10 @@ class SmartOrderEngine:
             trigger_price=trigger_price,
         )
         with self._lock:
+            # persist 必須在 lock 內：若 append 後、persist 前就被 tick 觸發，
+            # 遲到的 active 快照會把觸發後的最終狀態蓋掉
             self._smart_orders.append(order)
-        self._persist(order)
+            self._persist(order)
         self.event_bus.on_smart_order_added.emit(order.to_dict())
         logger.info(f"[SmartOrder] 新增 MIT {order.id}: "
                     f"{action} {symbol} {qty}口 @ 觸發價{trigger_price} ({condition})")
@@ -226,7 +233,7 @@ class SmartOrderEngine:
         )
         with self._lock:
             self._smart_orders.append(order)
-        self._persist(order)
+            self._persist(order)
         self.event_bus.on_smart_order_added.emit(order.to_dict())
         logger.info(f"[SmartOrder] 新增移動停損 {order.id}: "
                     f"{action} {symbol} {qty}口, 回檔={trailing_offset}點")
@@ -263,8 +270,8 @@ class SmartOrderEngine:
         with self._lock:
             self._smart_orders.append(tp_order)
             self._smart_orders.append(sl_order)
-        self._persist(tp_order)
-        self._persist(sl_order)
+            self._persist(tp_order)
+            self._persist(sl_order)
         self.event_bus.on_smart_order_added.emit(sl_order.to_dict())
         self.event_bus.on_smart_order_added.emit(tp_order.to_dict())
         logger.info(f"[SmartOrder] 新增 OCO {tp_id}/{sl_id}: "
@@ -290,11 +297,20 @@ class SmartOrderEngine:
         )
         with self._lock:
             self._smart_orders.append(order)
+            self._persist(order)
 
         # 立即送出進場限價單
         trade = self._place_order(symbol, entry_price, action, qty)
-        if trade:
-            order.parent_order_id = getattr(getattr(trade, 'order', None), 'id', bracket_id)
+        if trade and trade != RISK_BLOCKED:
+            # 母單 id 收集所有候選（id / seqno / ordno）——
+            # 成交回報帶的是 ordno/seqno，不一定等於 order.id
+            broker_order = getattr(trade, 'order', None)
+            candidates = []
+            for attr in ("id", "seqno", "ordno"):
+                v = getattr(broker_order, attr, None)
+                if v:
+                    candidates.append(str(v))
+            order.parent_order_id = ",".join(dict.fromkeys(candidates)) or bracket_id
             logger.info(f"[SmartOrder] Bracket 進場單已送出 {bracket_id}: "
                         f"{action} {symbol} {qty}口 @ {entry_price}")
         else:
@@ -337,11 +353,33 @@ class SmartOrderEngine:
         return count
 
     def _cancel_linked(self, linked_id: str):
+        """REST cancel 路徑用：標記 + 立即持久化（非行情執行緒，inline 寫檔 OK）"""
         with self._lock:
             for order in self._smart_orders:
                 if order.id == linked_id and order.is_active:
                     order.is_active = False
                     self._persist(order)
+
+    def _deactivate_linked_nolock(self, linked_id: str) -> List["SmartOrder"]:
+        """觸發路徑用：僅標記（呼叫者已持鎖），持久化延後到 dispatch。"""
+        out = []
+        for order in self._smart_orders:
+            if order.id == linked_id and order.is_active:
+                order.is_active = False
+                out.append(order)
+        return out
+
+    def _dispatch_persist(self, orders: List["SmartOrder"]):
+        """把持久化寫檔丟出行情執行緒（無 dispatch 時 inline，測試/standalone 用）。"""
+        if not orders:
+            return
+        def _save():
+            for o in orders:
+                self._persist(o)
+        if self._dispatch is not None:
+            self._dispatch(_save)
+        else:
+            _save()
 
     # ──── 洗價檢查 (每個 tick 觸發) ────
 
@@ -352,6 +390,7 @@ class SmartOrderEngine:
             return
 
         triggered = []
+        linked_cancelled: List[SmartOrder] = []
         with self._lock:
             for order in self._smart_orders:
                 if not order.is_active or order.symbol != symbol:
@@ -369,17 +408,19 @@ class SmartOrderEngine:
                     if self._check_mit(order, price):  # OCO 本質是兩張觸價單
                         triggered.append(order)
 
-            # 在 lock 內先標記為非 active，確保同一張單不會被下一個 tick 重複觸發
+            # 在 lock 內先標記為非 active，確保同一張單不會被下一個 tick 重複觸發；
+            # SQLite 寫檔不在 lock 內、也不在行情執行緒上做
             for order in triggered:
                 order.is_active = False
                 order.is_triggered = True
                 order.triggered_at = datetime.now().isoformat()
                 if order.linked_id:
-                    self._cancel_linked(order.linked_id)
+                    linked_cancelled.extend(self._deactivate_linked_nolock(order.linked_id))
 
         # 實際下單在 lock 外執行（並透過 dispatch 離開行情執行緒）
         for order in triggered:
             self._execute_trigger(order, price)
+        self._dispatch_persist(linked_cancelled)
 
     def _check_mit(self, order: SmartOrder, price: float) -> bool:
         """檢查觸價條件"""
@@ -408,18 +449,52 @@ class SmartOrderEngine:
             return price >= trigger_price
 
     def _execute_trigger(self, order: SmartOrder, trigger_price: float):
-        """執行觸發: 送出市價單（下單 I/O 透過 dispatch 離開行情執行緒）"""
+        """
+        執行觸發: 送出市價單（下單 I/O 透過 dispatch 離開行情執行緒）。
+
+        持久化時序：在「下單有結果之後」才落地最終狀態 ——
+        若在送單前就把 DB 標成已消耗，process 在送單前當機會讓停損無聲消失；
+        反過來（送單成功但落地前當機）重啟會 re-arm 重送一次保護單，
+        方向上寧可重複保護、不可丟失保護。
+        """
         logger.info(f"[SmartOrder] 觸發! {order.id} ({order.order_type.value}): "
                     f"{order.action} {order.symbol} {order.qty}口 @ 觸發價={trigger_price:.2f}")
-
-        self._persist(order)
 
         def _send():
             try:
                 # 送出市價單 (price=0 表示市價)
-                self._place_order(order.symbol, 0, order.action, order.qty)
+                result = self._place_order(order.symbol, 0, order.action, order.qty)
             except Exception as e:
-                logger.error(f"[SmartOrder] 觸發下單失敗 {order.id}: {e}", exc_info=True)
+                logger.error(f"[SmartOrder] 觸發下單例外 {order.id}: {e}", exc_info=True)
+                result = None
+
+            if result == RISK_BLOCKED or result:
+                # 成功送出，或被風控攔下（攔下=已消耗，不重試）→ 落地最終狀態
+                self._persist(order)
+                return
+
+            # 下單失敗 → re-arm 重試（上限 _MAX_TRIGGER_RETRIES）
+            with self._lock:
+                order.retry_count += 1
+                if order.retry_count >= _MAX_TRIGGER_RETRIES:
+                    self._persist(order)
+                    logger.error(f"[SmartOrder] {order.id} 觸發下單連續失敗 "
+                                 f"{order.retry_count} 次，放棄重試")
+                    try:
+                        self.event_bus.on_error.emit(
+                            "critical",
+                            f"智慧單 {order.id} 觸發下單失敗且已達重試上限，保護單未成交！")
+                    except Exception:
+                        pass
+                    return
+                order.is_active = True
+                order.is_triggered = False
+                order.triggered_at = None
+                order.watermark = None
+                self._persist(order)
+            logger.warning(f"[SmartOrder] {order.id} 觸發下單失敗，已 re-arm "
+                           f"(重試 {order.retry_count}/{_MAX_TRIGGER_RETRIES})")
+            self.event_bus.on_smart_order_added.emit(order.to_dict())
 
         if self._dispatch is not None:
             self._dispatch(_send)
@@ -431,6 +506,9 @@ class SmartOrderEngine:
 
     def _on_fill(self, fill_data: dict):
         """成交回報: 檢查 Bracket 母單是否成交"""
+        fill_id = str(fill_data.get("order_id") or "")
+        if not fill_id:
+            return
         matched = []
         with self._lock:
             for order in self._smart_orders:
@@ -438,8 +516,9 @@ class SmartOrderEngine:
                         and order.is_active
                         and not order.is_triggered
                         and order.parent_order_id):
-                    # 母單成交 → 自動掛 OCO 停利停損
-                    if fill_data.get("order_id") == order.parent_order_id:
+                    # 母單成交 → 自動掛 OCO 停利停損。
+                    # parent_order_id 可能是多個候選（id/seqno/ordno）逗號分隔
+                    if fill_id in order.parent_order_id.split(","):
                         order.is_triggered = True
                         order.triggered_at = datetime.now().isoformat()
                         matched.append(order)

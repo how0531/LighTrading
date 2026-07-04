@@ -112,6 +112,13 @@ export const DOMPanel: React.FC = () => {
     scrollToAnchor('price');
   }, [scrollToAnchor]);
 
+  // DOMHeader 的 onClick 會把 MouseEvent 當第一個參數傳入 —— 不能直接把
+  // scrollToAnchor 傳下去（event 會被當成 anchorOverride）；穩定包一層
+  // 讓 DOMHeader 的 React.memo 真的能擋掉重繪
+  const handleScrollToAnchor = React.useCallback(() => {
+    scrollToAnchor();
+  }, [scrollToAnchor]);
+
   useEffect(() => {
     if (currentPrice > 0 && fullPrices.length > 0 && !hasScrolledRef.current) {
       hasScrolledRef.current = true;
@@ -261,7 +268,7 @@ export const DOMPanel: React.FC = () => {
         orderValue={orderValue} setOrderValue={setOrderValue}
         accountEquity={accountEquity}
         scrollAnchor={scrollAnchor} setScrollAnchor={setScrollAnchor}
-        onScrollToAnchor={() => scrollToAnchor()}
+        onScrollToAnchor={handleScrollToAnchor}
       />
       
       <div ref={tableRef} className="flex-1 overflow-auto bg-black/10 custom-scrollbar">
