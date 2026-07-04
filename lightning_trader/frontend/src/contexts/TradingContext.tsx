@@ -464,6 +464,15 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
              callbackSeqRef.current = incSeq;
              scheduleOrderRefresh();
           }
+        } else if (data.type === 'WorkingOrdersSnapshot' && data.data) {
+          // 後端委託對帳迴圈主動推播（外部管道下的單也會即時出現）——
+          // 直接套用快照，不必再打 REST；沿用 snapshot seq 防亂序
+          const incSeq = data.seq_no || 0;
+          if (incSeq >= snapshotSeqRef.current) {
+            snapshotSeqRef.current = incSeq;
+            const next: WorkingOrder[] = data.data.orders || [];
+            setWorkingOrders((prev) => (sameOrders(prev, next) ? prev : next));
+          }
         } else if (data.type === 'SmartOrderUpdate' && data.data) {
           // 智慧單狀態更新（新增/觸發/已取消）
           setSmartOrders(prev => {

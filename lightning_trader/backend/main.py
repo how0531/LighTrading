@@ -86,6 +86,7 @@ from backend import shared
 from backend.bridge import wire_callbacks
 from backend.services.quote_broadcaster import quote_broadcaster
 from backend.services.pnl_broadcaster import pnl_broadcaster, subscribe_position_contracts
+from backend.services.order_sync import order_sync_loop
 
 # 建立引擎 & 設定共用狀態
 engine = create_trading_engine()
@@ -112,6 +113,9 @@ async def lifespan(app):
 
     broadcast_task = asyncio.create_task(quote_broadcaster())
     pnl_task = asyncio.create_task(pnl_broadcaster())
+    # ★ 委託對帳迴圈：外部管道（券商 App / 其他 API session）下的單
+    #   不會有 order callback，靠這個迴圈定期向券商同步並主動推播
+    order_sync_task = asyncio.create_task(order_sync_loop())
 
     async def _auto_login():
         # 給 2 秒讓使用者有機會主動登入（避免 race）
@@ -168,9 +172,9 @@ async def lifespan(app):
 
     yield
 
-    for task in (login_task, broadcast_task, pnl_task, daily_task):
+    for task in (login_task, broadcast_task, pnl_task, daily_task, order_sync_task):
         task.cancel()
-    for task in (login_task, broadcast_task, pnl_task, daily_task):
+    for task in (login_task, broadcast_task, pnl_task, daily_task, order_sync_task):
         try:
             await task
         except asyncio.CancelledError:

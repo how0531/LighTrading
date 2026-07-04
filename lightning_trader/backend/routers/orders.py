@@ -53,32 +53,16 @@ class SymbolRequest(BaseModel):
 
 # ─── 內部工具 ──────────────────────────────────────────────
 
-async def _get_working_orders_snapshot() -> list:
+async def _get_working_orders_snapshot() -> dict:
     """
     從 Shioaji 取得已確認的活躍委託快照。
     呼叫 update_status() 強制同步最新狀態後再查詢。
     """
+    from backend.services.order_sync import build_working_orders
     try:
         await shared.run_in_broker_thread(shared.shioaji_client.api.update_status)
         trades = await shared.run_in_broker_thread(shared.shioaji_client.get_order_history)
-        active_statuses = {'PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'}
-        working = []
-        for t in trades:
-            status_name = t.status.status.name if hasattr(t.status, 'status') else getattr(t.status, 'name', 'Unknown')
-            if status_name in active_statuses:
-                raw_symbol = getattr(t.contract, 'symbol', '')
-                if not raw_symbol:
-                    raw_symbol = getattr(t.contract, 'code', '')
-                working.append({
-                    "symbol": raw_symbol,
-                    "action": "Buy" if t.order.action == Action.Buy else "Sell",
-                    "price": float(t.order.price),
-                    "qty": t.order.quantity,
-                    "filled_qty": getattr(t.status, 'deal_quantity', getattr(t.status, 'filled_quantity', 0)),
-                    "status": status_name,
-                    "order_id": getattr(t.order, 'id', getattr(t.order, 'seqno', '')),
-                })
-        return {"seq_no": shared.generate_order_seq(), "orders": working}
+        return {"seq_no": shared.generate_order_seq(), "orders": build_working_orders(trades)}
     except Exception as e:
         logger.error(f"_get_working_orders_snapshot 失敗: {e}")
         return {"seq_no": shared.generate_order_seq(), "orders": []}

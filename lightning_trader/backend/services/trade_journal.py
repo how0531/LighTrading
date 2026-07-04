@@ -162,6 +162,38 @@ def record_trade(trade_data: dict) -> bool:
         return False
 
 
+def insert_fill(fill: dict) -> bool:
+    """
+    對帳器（order_sync）用：直接寫入標準化 fill dict。
+    回傳是否為「新」列（journal 已有同 id 則 False，callback 路徑天然去重）。
+    """
+    row = {
+        "id": str(fill.get("id") or ""),
+        "ts": int(fill.get("ts") or time.time() * 1000),
+        "symbol": str(fill.get("symbol") or "").upper(),
+        "action": "Buy" if str(fill.get("action", "")).lower() in ("b", "buy") else "Sell",
+        "price": float(fill.get("price") or 0),
+        "qty": int(fill.get("qty") or 0),
+        "order_id": str(fill.get("order_id") or ""),
+        "raw": fill.get("raw") or "",
+        "created_at": int(time.time() * 1000),
+    }
+    if not row["id"] or not row["symbol"] or row["price"] <= 0 or row["qty"] <= 0:
+        return False
+    try:
+        with _DB_LOCK:
+            conn = _connect()
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO fills (id, ts, symbol, action, price, qty, order_id, raw, created_at)"
+                " VALUES (:id, :ts, :symbol, :action, :price, :qty, :order_id, :raw, :created_at)",
+                row,
+            )
+        return cur.rowcount > 0
+    except Exception as e:
+        logger.error(f"trade_journal.insert_fill 失敗: {e}")
+        return False
+
+
 def fetch_fills(from_ts: Optional[int] = None, to_ts: Optional[int] = None,
                 symbol: Optional[str] = None, limit: int = 500) -> list[dict]:
     """讀取近期成交。ts 為 unix ms。"""

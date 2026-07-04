@@ -329,25 +329,10 @@ async def sync_all():
     try:
         # 1. update_status：強制券商主機把外部 session 的單也同步回來
         await shared.run_in_broker_thread(client.api.update_status)
-        # 2. list_trades → 活躍委託快照
+        # 2. list_trades → 活躍委託快照（與 orders.py / order_sync 共用 builder）
+        from backend.services.order_sync import build_working_orders
         trades = await shared.run_in_broker_thread(client.get_order_history)
-        active_statuses = {"PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"}
-        working = []
-        from shioaji.constant import Action as _Action
-        for t in trades:
-            status_name = t.status.status.name if hasattr(t.status, "status") else getattr(t.status, "name", "Unknown")
-            if status_name not in active_statuses:
-                continue
-            raw_symbol = getattr(t.contract, "symbol", "") or getattr(t.contract, "code", "")
-            working.append({
-                "symbol": raw_symbol,
-                "action": "Buy" if t.order.action == _Action.Buy else "Sell",
-                "price": float(t.order.price),
-                "qty": t.order.quantity,
-                "filled_qty": getattr(t.status, "deal_quantity", getattr(t.status, "filled_quantity", 0)),
-                "status": status_name,
-                "order_id": getattr(t.order, "id", getattr(t.order, "seqno", "")),
-            })
+        working = build_working_orders(trades)
         # 3. list_positions
         positions = await shared.run_in_broker_thread(client.list_positions)
         # 4. 觸發一次帳務廣播

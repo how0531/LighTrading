@@ -94,6 +94,34 @@ class FakePosition(SimpleNamespace):
                          price=price, pnl=pnl)
 
 
+def make_trade(code: str, action: Action, price: float, qty: int,
+               status: str = "Submitted", ordno: str = "",
+               deals: list | None = None, filled_qty: int = 0):
+    """組一個 list_trades() 回傳的 trade 物件（測試外部管道委託/成交用）。
+
+    deals: [(price, qty, seq, ts_sec), ...]
+    """
+    deal_objs = [
+        SimpleNamespace(price=p, quantity=q, seq=seq, ts=ts)
+        for (p, q, seq, ts) in (deals or [])
+    ]
+    return SimpleNamespace(
+        contract=make_stock_contract(code),
+        order=SimpleNamespace(
+            id=ordno or f"EXT-{code}", seqno=ordno or f"EXT-{code}",
+            ordno=ordno or f"EXT-{code}",
+            action=action, price=price, quantity=qty,
+            account=SimpleNamespace(account_id="1234567"),
+        ),
+        status=SimpleNamespace(
+            status=SimpleNamespace(name=status),
+            deal_quantity=filled_qty,
+            deals=deal_objs,
+            modified_at=None,
+        ),
+    )
+
+
 # ─── Contracts 樹 ───────────────────────────────────────────
 
 class _StocksNode:
@@ -154,6 +182,7 @@ class FakeShioaji:
 
         self.placed_orders: list[dict] = []
         self.positions: list[FakePosition] = []   # 測試自行注入
+        self.trades: list = []                     # 測試自行注入（make_trade）
         self._order_seq = 0
         self._order_callback = None
 
@@ -211,7 +240,7 @@ class FakeShioaji:
         return []
 
     def list_trades(self):
-        return []
+        return list(self.trades)
 
     def snapshots(self, contracts):
         return []

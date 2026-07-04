@@ -174,6 +174,35 @@ describe('TradingContext WS 訊息路由', () => {
     expect(orderHistoryCalls()).toBe(baseline + 2);
   });
 
+  it('WorkingOrdersSnapshot 推播：直接套用委託快照（外部管道下單即時出現）', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+    await act(async () => { vi.advanceTimersByTime(600); });
+    const baseline = orderHistoryCalls();
+
+    const ext = [{ symbol: '2330', action: 'Buy', price: 500, qty: 2,
+                   filled_qty: 0, status: 'Submitted', order_id: 'EXT001' }];
+    await act(async () => {
+      ws.message({ type: 'WorkingOrdersSnapshot', seq_no: 100, data: { orders: ext } });
+    });
+    // 直接套用，不再打 REST
+    expect(orderHistoryCalls()).toBe(baseline);
+    expect(probe.ctx?.workingOrders).toHaveLength(1);
+    expect(probe.ctx?.workingOrders[0].order_id).toBe('EXT001');
+
+    // 舊 seq 的快照忽略（防亂序）
+    await act(async () => {
+      ws.message({ type: 'WorkingOrdersSnapshot', seq_no: 99, data: { orders: [] } });
+    });
+    expect(probe.ctx?.workingOrders).toHaveLength(1);
+
+    // 新 seq 的空快照 → 委託消失（外部刪單）
+    await act(async () => {
+      ws.message({ type: 'WorkingOrdersSnapshot', seq_no: 101, data: { orders: [] } });
+    });
+    expect(probe.ctx?.workingOrders).toHaveLength(0);
+  });
+
   it('斷線重連：指數退避 + jitter 排程', async () => {
     // Math.random = 0.5 → jitter 係數 = 0.8 + 0.5*0.4 = 1.0（確定性延遲）
     vi.spyOn(Math, 'random').mockReturnValue(0.5);

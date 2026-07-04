@@ -4,6 +4,28 @@
 
 ---
 
+## [2.2.0] - 2026-07-04
+
+### 🔄 外部管道下單即時同步（委託對帳迴圈）
+
+* **問題**：Shioaji 只推播「本 session 下的單」。從券商 App / 其他 API session 下單，
+  這裡的介面看不到委託即時出現（要等前端 5 秒輪詢），外部「成交」更是完全
+  進不了 journal——交易日誌、已實現損益、風控熔斷全部漏算外部管道。
+* **新增 `backend/services/order_sync.py`**：背景迴圈（預設每 2.5 秒，
+  `LIGHTRADE_ORDER_SYNC_INTERVAL` 可調，0=停用）向券商 `update_status` + `list_trades`：
+  - 活躍委託快照有變化 → 直接推播 `WorkingOrdersSnapshot` 給前端
+    （沿用 snapshot seq 防亂序，前端不用再打 REST），外部掛單/刪單 ~2.5 秒內出現
+  - 對帳出 journal 沒有的成交（id = ordno#seq，與 callback 路徑天然去重）→
+    補進 journal、觸發已實現損益重算、作廢持倉快取、推播 `TradeUpdate`
+    （前端成交通知）、發射 `on_fill`（Bracket 母單在 callback 漏接時的補償）
+* **快照 builder 三處合一**：orders.py / accounts.sync_all / 對帳迴圈共用
+  `build_working_orders`（之前各自複製一份）。
+* 前端 `TradingContext` 新增 `WorkingOrdersSnapshot` 訊息處理（直接套用快照）。
+* 測試：後端對帳（外部委託推播 / 外部成交入帳 / 指紋與 id 去重 / 外部刪單）
+  + 前端快照套用與 seq 防亂序，共 +4。
+
+---
+
 ## [2.1.0] - 2026-07-03
 
 ### 🛡️ 資金安全（P0）

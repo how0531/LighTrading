@@ -277,15 +277,15 @@ lightning_trader/
 
 1. **API Key 永遠不送到前端**：若 `.env` 已設定，前端登入頁可不填金鑰。
 2. **LIVE 模式有紅色全畫面警示**：避免 SIM/LIVE 誤操作。
-3. **所有下單路徑都過 RiskManager**：`/place_order`、`/reverse`、改單、智慧單觸發皆前置檢查（部位上限 + 日虧損熔斷 + 頻率/重複防呆）。日虧損由真實資料餵入：未實現來自即時 PnL、已實現來自成交 journal 的 FIFO 重算。
-4. **保護性出場永遠放行**：一鍵平倉與「平既有部位」的停損觸發不受熔斷封鎖——風控停止交易後仍能出場，只擋開新倉。
-5. **WARNING 級檢查（市價單/價格偏離/反向）需二次確認**：API 回 409 `CONFIRM_REQUIRED`，前端確認後帶 `confirm: true` 重送。
-6. **智慧單持久化**：停損/移停/OCO/Bracket 落地 SQLite（`~/.lightrade/smart_orders.db`），backend 重啟自動 re-arm；移停的 watermark 重啟後從當下市價重新追蹤。
-7. **可選 API Token 認證**：設定 `LIGHTRADE_API_TOKEN` 後，所有 `/api`（除 health）需帶 `X-API-Token` header、WebSocket 需帶 `?token=`。**Docker / LAN 部署（backend 綁 0.0.0.0）務必設定**——CORS 只能約束瀏覽器，不是伺服器端存取控制。
-8. **SIMULATION 預設 true**；且 `SIMULATION=false` 時預設不做開機自動登入，需 `LIGHTRADE_ALLOW_LIVE_AUTOLOGIN=true` 明確允許。
-9. **每日 04:00 自動重置日虧損計數**：避免跨日造成假性 trading_disabled。
-10. **CORS 限定本機**：可由 `LIGHTRADE_ALLOWED_ORIGINS` 環境變數擴增。
-
+3. **外部管道下單即時同步**：Shioaji 只推播「本 session 下的單」，從券商 App / 其他 API session 下的單沒有 callback。後端的委託對帳迴圈（預設每 2.5 秒，`LIGHTRADE_ORDER_SYNC_INTERVAL` 可調）會向券商同步並主動推播活躍委託快照給前端，外部「成交」也會補進 journal（交易日誌 / 已實現損益 / 風控熔斷都算得到）。
+4. **所有下單路徑都過 RiskManager**：`/place_order`、`/reverse`、改單、智慧單觸發皆前置檢查（部位上限 + 日虧損熔斷 + 頻率/重複防呆）。日虧損由真實資料餵入：未實現來自即時 PnL、已實現來自成交 journal 的 FIFO 重算。
+5. **保護性出場永遠放行**：一鍵平倉與「平既有部位」的停損觸發不受熔斷封鎖——風控停止交易後仍能出場，只擋開新倉。
+6. **WARNING 級檢查（市價單/價格偏離/反向）需二次確認**：API 回 409 `CONFIRM_REQUIRED`，前端確認後帶 `confirm: true` 重送。
+7. **智慧單持久化**：停損/移停/OCO/Bracket 落地 SQLite（`~/.lightrade/smart_orders.db`），backend 重啟自動 re-arm；移停的 watermark 重啟後從當下市價重新追蹤。
+8. **可選 API Token 認證**：設定 `LIGHTRADE_API_TOKEN` 後，所有 `/api`（除 health）需帶 `X-API-Token` header、WebSocket 需帶 `?token=`。**Docker / LAN 部署（backend 綁 0.0.0.0）務必設定**——CORS 只能約束瀏覽器，不是伺服器端存取控制。
+9. **SIMULATION 預設 true**；且 `SIMULATION=false` 時預設不做開機自動登入，需 `LIGHTRADE_ALLOW_LIVE_AUTOLOGIN=true` 明確允許。
+10. **每日 04:00 自動重置日虧損計數**：避免跨日造成假性 trading_disabled。
+11. **CORS 限定本機**：可由 `LIGHTRADE_ALLOWED_ORIGINS` 環境變數擴增。
 ---
 
 ## 文件

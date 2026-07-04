@@ -56,6 +56,7 @@ def _reset_state():
     sj_client.active_stock_account = _fake_api()._accounts[0]
     sj_client.active_futopt_account = _fake_api()._accounts[1]
     _fake_api().positions = []
+    _fake_api().trades = []
     _fake_api().placed_orders.clear()
     rm = _rm()
     rm.reset_daily()
@@ -278,7 +279,77 @@ def test_deal_callback_reaches_fill_pipeline():
         shared.engine.event_bus.on_fill.disconnect(fills.append)
 
 
-# ─── 8. API Token 認證（最後執行：會 reload main） ──────────
+# ─── 9. 委託對帳迴圈（外部管道下單即時同步） ────────────────
+
+def test_order_sync_pushes_external_orders_and_fills():
+    """從其他管道（券商 App / 另一個 API session）下的單不會有 callback ——
+    對帳迴圈必須：推播活躍委託快照 + 把外部成交補進 journal。"""
+    import asyncio
+    from backend.services import order_sync, trade_journal
+    from fake_shioaji import make_trade
+
+    _fake_api().trades = [
+        # 外部掛的活躍委託
+        make_trade("2330", Action.Buy, 500.0, 2, status="Submitted", ordno="EXT001"),
+        # 外部已成交的單（帶一筆 deal）
+        make_trade("2890", Action.Sell, 20.0, 1, status="Filled", ordno="EXT002",
+                   deals=[(20.0, 1, "S1", time.time())], filled_qty=1),
+    ]
+    order_sync._last_fingerprint = ""
+    while not shared.quotes_to_broadcast.empty():
+        shared.quotes_to_broadcast.get_nowait()
+
+    result = asyncio.run(order_sync.sync_once())
+    assert result["changed"] is True
+    assert result["new_fills"] == 1
+
+    msgs = []
+    while not shared.quotes_to_broadcast.empty():
+        msgs.append(shared.quotes_to_broadcast.get_nowait())
+    snap = next(m for m in msgs if m["type"] == "WorkingOrdersSnapshot")
+    assert [o["symbol"] for o in snap["data"]["orders"]] == ["2330"]
+    assert snap["data"]["orders"][0]["qty"] == 2
+    assert snap["seq_no"] > 0
+    assert any(m["type"] == "TradeUpdate" and m["data"].get("source") == "order_sync"
+               for m in msgs)
+
+    # 外部成交已入 journal（已實現損益 / 交易日誌不再漏算外部管道）
+    fills = trade_journal.fetch_fills(symbol="2890", limit=10)
+    assert any(f["order_id"] == "EXT002" for f in fills)
+
+    # 同一狀態再跑一輪：無變化、無新成交（快照指紋 + journal id 去重）
+    result2 = asyncio.run(order_sync.sync_once())
+    assert result2 == {"changed": False, "new_fills": 0}
+
+
+def test_order_sync_detects_cancellation_from_other_channel():
+    """外部管道刪單後，快照變化也要推播（委託從畫面消失）。"""
+    import asyncio
+    from backend.services import order_sync
+    from fake_shioaji import make_trade
+
+    _fake_api().trades = [
+        make_trade("2330", Action.Buy, 500.0, 2, status="Submitted", ordno="EXT010"),
+    ]
+    order_sync._last_fingerprint = ""
+    asyncio.run(order_sync.sync_once())
+
+    # 外部把單刪了
+    _fake_api().trades = [
+        make_trade("2330", Action.Buy, 500.0, 2, status="Cancelled", ordno="EXT010"),
+    ]
+    while not shared.quotes_to_broadcast.empty():
+        shared.quotes_to_broadcast.get_nowait()
+    result = asyncio.run(order_sync.sync_once())
+    assert result["changed"] is True
+    msgs = []
+    while not shared.quotes_to_broadcast.empty():
+        msgs.append(shared.quotes_to_broadcast.get_nowait())
+    snap = next(m for m in msgs if m["type"] == "WorkingOrdersSnapshot")
+    assert snap["data"]["orders"] == []
+
+
+# ─── 10. API Token 認證（最後執行：會 reload main） ──────────
 
 def test_zz_api_token_auth():
     import importlib
