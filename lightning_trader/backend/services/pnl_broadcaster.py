@@ -104,6 +104,29 @@ def _compute_pnl_payload() -> dict:
     }
 
 
+_HEARTBEAT_MSG = json.dumps({"type": "Heartbeat"})
+_HEARTBEAT_EVERY_S = 3.0
+_last_heartbeat_at: float = 0.0
+
+
+async def _broadcast_heartbeat() -> None:
+    """
+    輕量心跳（至多每 3 秒）：前端 stale watchdog 需要穩定的訊息流，
+    才能把「盤後/未登入沒行情（正常）」與「連線假死（要強制重連）」分開。
+    之前只有 PnLUpdate 當心跳，但它在未登入或無持倉時不會發。
+    """
+    global _last_heartbeat_at
+    now = _time.monotonic()
+    if now - _last_heartbeat_at < _HEARTBEAT_EVERY_S or not shared.active_connections:
+        return
+    _last_heartbeat_at = now
+    for conn in list(shared.active_connections):
+        try:
+            await asyncio.wait_for(conn.send_text(_HEARTBEAT_MSG), timeout=1.0)
+        except Exception:
+            await shared.drop_connection(conn)
+
+
 def _feed_risk_manager(payload: dict) -> None:
     """把即時未實現損益 + 持倉快照餵給 RiskManager（日虧損熔斷的資料源）。"""
     rm = getattr(shared.engine, "risk_manager", None) if shared.engine else None
@@ -123,9 +146,10 @@ async def _broadcast_pnl(payload: dict):
     msg = json.dumps({"type": "PnLUpdate", "data": payload})
     async def _send(conn):
         try:
-            await asyncio.wait_for(conn.send_text(msg), timeout=0.2)
+            await asyncio.wait_for(conn.send_text(msg), timeout=1.0)
         except Exception:
-            shared.active_connections.discard(conn)
+            # 移除 + 真正關閉，讓客戶端 onclose 觸發自動重連（見 shared.drop_connection）
+            await shared.drop_connection(conn)
     tasks = [_send(c) for c in list(shared.active_connections)]
     await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -147,6 +171,9 @@ async def pnl_broadcaster():
             _tick_event.clear()
             await asyncio.sleep(_DEBOUNCE_MS / 1000.0)
             _tick_event.clear()
+
+            # 心跳在任何 early-continue 之前送：未登入/盤後也要維持訊息流
+            await _broadcast_heartbeat()
 
             client = shared.shioaji_client
             if not client or not getattr(client, "_is_connected", False):

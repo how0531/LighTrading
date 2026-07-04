@@ -376,10 +376,19 @@ async def websocket_quotes(websocket: WebSocket):
                     syms = [s for s in msg["symbols"] if isinstance(s, str) and s.strip()]
                     accepted = []
                     rejected = []
+                    aliases = {}   # 使用者輸入 → canonical（tick 廣播用的 key）
                     for s in syms[:30]:   # 上限 30 個避免訂太多
                         try:
-                            ok = await shared.run_in_broker_thread(shared.shioaji_client.subscribe_background, s)
-                            (accepted if ok else rejected).append(s.upper())
+                            canonical = await shared.run_in_broker_thread(
+                                shared.shioaji_client.subscribe_background, s)
+                            if canonical:
+                                accepted.append(s.upper())
+                                # canonical 與輸入不同時（例如 2330 → TSE2330），
+                                # 前端必須知道對應關係，否則 tick 對不上 key
+                                if canonical.upper() != s.upper():
+                                    aliases[s.upper()] = canonical.upper()
+                            else:
+                                rejected.append(s.upper())
                         except Exception as e:
                             logger.warning(f"watch 背景訂閱 {s} 失敗: {e}")
                             rejected.append(s.upper())
@@ -391,6 +400,7 @@ async def websocket_quotes(websocket: WebSocket):
                         "action": "watch",
                         "symbols": accepted,
                         "rejected": rejected,
+                        "aliases": aliases,
                     }))
             except json.JSONDecodeError:
                 pass

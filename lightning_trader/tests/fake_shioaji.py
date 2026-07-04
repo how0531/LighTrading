@@ -62,9 +62,11 @@ class FakeContract(SimpleNamespace):
     pass
 
 
-def make_stock_contract(code: str, name: str = "測試股") -> FakeContract:
+def make_stock_contract(code: str, name: str = "測試股",
+                        symbol: str | None = None) -> FakeContract:
+    """symbol 預設等於 code；傳入不同值可模擬 TSE 前綴（如 TSE2330）"""
     return FakeContract(
-        symbol=code, code=code, name=name,
+        symbol=symbol or code, code=code, name=name,
         security_type="STK", limit_up=0.0, limit_down=0.0,
     )
 
@@ -176,9 +178,10 @@ class FakeShioaji:
             Futures=_EmptyCategoryNode(),
             Options=_EmptyCategoryNode(),
         )
-        # 預設放一檔測試股票
+        # 預設放幾檔測試股票（1101 模擬 symbol 帶 TSE 前綴、與 code 不同的情境）
         self.Contracts.Stocks.add(make_stock_contract("2330", "台積電"))
         self.Contracts.Stocks.add(make_stock_contract("2890", "永豐金"))
+        self.Contracts.Stocks.add(make_stock_contract("1101", "台泥", symbol="TSE1101"))
 
         self.placed_orders: list[dict] = []
         self.positions: list[FakePosition] = []   # 測試自行注入

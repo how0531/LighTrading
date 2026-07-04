@@ -150,6 +150,11 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const auxWatchRef = useRef<Set<string>>(new Set());      // 多圖看盤等輔助來源
   const watchRetryCountRef = useRef<number>(0);   // Sprint 12 R2：watch error ack retry 計數
   const watchRejectedRef = useRef<Set<string>>(new Set()); // R4：記住已警告過的 rejected，避免每次重連都重複 toast
+  const subscribeRetryCountRef = useRef<number>(0); // 開機競態：backend 未登入時訂閱失敗的 retry 計數
+  // canonical → 使用者輸入 的別名表（backend watch ack 的 aliases）。
+  // tick 廣播用 canonical（例如 TSE2330），自選清單存使用者輸入（2330），
+  // 沒有這層對應報價看板/自選列會永遠對不上 key
+  const canonicalAliasRef = useRef<Record<string, string>>({});
 
   const refreshSmartOrders = useCallback(async (symbol?: string) => {
     try {
@@ -313,6 +318,16 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         isTickStaleRef.current = wantTickStale;
         setIsTickStale(wantTickStale);
       }
+      // ★ 假死自癒：後端每 ≤3 秒有 Heartbeat，>12 秒完全無訊息代表連線
+      // 已無聲死亡（伺服器踢除/半開連線）——socket 看起來還是 OPEN，
+      // onclose 永遠不會來，必須主動 close 觸發既有的退避重連
+      if (msgElapsed > 12000) {
+        const sock = wsRef.current;
+        if (sock && sock.readyState === WebSocket.OPEN) {
+          console.warn('[WS] >12s 無任何訊息，判定連線假死，強制重連');
+          sock.close();
+        }
+      }
     }, 1000);
     return () => clearInterval(timer);
   }, [isConnected]);
@@ -401,7 +416,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
             mergeQuote(data.data as Partial<QuoteData>);
           }
           // Sprint 12：所有 Tick（含 target）都更新 watchlistDirtyRef，讓 watchlist panel 拿到報價
-          const tickSym = String(data.data.Symbol || '').trim().toUpperCase();
+          // tick 帶的是 canonical symbol —— 先映射回使用者輸入的 key（如 TSE2330 → 2330）
+          const rawTickSym = String(data.data.Symbol || '').trim().toUpperCase();
+          const tickSym = canonicalAliasRef.current[rawTickSym] ?? rawTickSym;
           const tickPrice = Number(data.data.Price || 0);
           if (tickSym && tickPrice > 0 && watchSymbolsRef.current.has(tickSym)) {
             // 先看 dirty 緩衝，再 fallback 到已 flush 的 state，確保 volume 累加跨 flush 不歸零
@@ -432,7 +449,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
             bidaskDirtyRef.current = true;
           }
           // Sprint 34：背景商品的 BidAsk 也會被全廣播過來，擷取第一檔買/賣價給報價看板
-          const baSym = String(data.data.Symbol || '').trim().toUpperCase();
+          const rawBaSym = String(data.data.Symbol || '').trim().toUpperCase();
+          const baSym = canonicalAliasRef.current[rawBaSym] ?? rawBaSym;
           if (baSym && watchSymbolsRef.current.has(baSym)) {
             const bid = Array.isArray(data.data.BidPrice) ? Number(data.data.BidPrice[0] || 0) : 0;
             const ask = Array.isArray(data.data.AskPrice) ? Number(data.data.AskPrice[0] || 0) : 0;
@@ -489,7 +507,20 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           // 成交回報也觸發一次 REST 同步，確保填協數量正確
           scheduleOrderRefresh();
         } else if (data.action === 'subscribe' && data.status === 'success') {
+          subscribeRetryCountRef.current = 0;
           if (data.symbol) setTargetSymbol(data.symbol);
+        } else if (data.action === 'subscribe' && data.status === 'error') {
+          // 開機競態：WS 比 Shioaji 自動登入（~2s）先就緒，訂閱會先失敗。
+          // 之前這裡沒有 retry → 主報價空白直到使用者手動重選商品
+          if (subscribeRetryCountRef.current < 8) {
+            subscribeRetryCountRef.current += 1;
+            setTimeout(() => {
+              const wsNow = wsRef.current;
+              if (wsNow && wsNow.readyState === WebSocket.OPEN) {
+                wsNow.send(JSON.stringify({ action: 'subscribe', symbol: targetSymbolRef.current }));
+              }
+            }, 2500);
+          }
         } else if (data.action === 'watch' && data.status === 'error') {
           // Sprint 12 R2：backend 還沒登入 → 3 秒後 retry 一次（最多 5 次）
           if (watchRetryCountRef.current < 5 && watchSymbolsRef.current.size > 0) {
@@ -507,6 +538,13 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         } else if (data.action === 'watch' && data.status === 'success') {
           // 成功了就重置 retry 計數
           watchRetryCountRef.current = 0;
+          // 記下 canonical → 使用者輸入 的別名（例如 TSE2330 → 2330），
+          // tick/bidask 進來時先映射回自選清單的 key
+          if (data.aliases && typeof data.aliases === 'object') {
+            for (const [requested, canonical] of Object.entries(data.aliases as Record<string, string>)) {
+              canonicalAliasRef.current[String(canonical).toUpperCase()] = String(requested).toUpperCase();
+            }
+          }
           // Sprint 12 R4：被拒絕的 symbol 提示使用者，但只在第一次警告
           // —— 重連、自動 retry、UI re-render 都不該重複跳 toast 騷擾。
           const rejected = Array.isArray(data.rejected) ? data.rejected as string[] : [];

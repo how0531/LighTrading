@@ -495,18 +495,22 @@ class ShioajiClient:
         threading.Timer(0.5, self.trigger_account_update).start()
         return contract.symbol
 
-    def subscribe_background(self, symbol: str) -> bool:
+    def subscribe_background(self, symbol: str) -> str:
         """
         背景訂閱商品報價：不切換 current_contract，但
           1. 登記 resolver alias，讓 tick.code 回呼能對應到 user-facing symbol
           2. 訂閱 Tick（PnL 計算所需）
           3. 推送一份 Snapshot（Reference/LimitUp/LimitDown/初始 BidAsk）給前端，
              避免使用者切換到該商品時看不到漲跌停或一檔買賣盤
+
+        回傳 canonical symbol（tick 廣播用的 key；失敗回 ""）——
+        呼叫端（WS watch ack）必須把 canonical 告訴前端，否則使用者輸入
+        「2330」而 tick 帶「TSE2330」時，前端對不上 key、報價永遠不顯示。
         """
         contract = self.get_contract(symbol)
         if not contract:
             logger.warning(f"subscribe_background: 找不到合約 {symbol}")
-            return False
+            return ""
         try:
             self.symbol_resolver.register(contract)
             canonical = self.symbol_resolver.canonical(contract.symbol)
@@ -557,10 +561,10 @@ class ShioajiClient:
                             self._direct_quote_callback(bidask_data)
             except Exception as snap_err:
                 logger.warning(f"subscribe_background {symbol} snapshot 失敗: {snap_err}")
-            return True
+            return canonical
         except Exception as e:
             logger.warning(f"subscribe_background {symbol} 失敗: {e}")
-            return False
+            return ""
 
     def place_order(self, symbol: str, price: float, action: Action, qty: int, order_type: OrderType = OrderType.ROD, price_type=None, order_lot=None, order_cond=None):
         contract = self.get_contract(symbol)

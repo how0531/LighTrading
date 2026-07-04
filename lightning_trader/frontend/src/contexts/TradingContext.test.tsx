@@ -203,6 +203,55 @@ describe('TradingContext WS 訊息路由', () => {
     expect(probe.ctx?.workingOrders).toHaveLength(0);
   });
 
+  it('subscribe 失敗（backend 未登入）→ 2.5 秒後自動重試', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+    const subCount = () => ws.sent.filter((s) => s.includes('"subscribe"')).length;
+    const initial = subCount(); // onopen 已送 1 次
+
+    await act(async () => {
+      ws.message({ action: 'subscribe', status: 'error', symbol: 'TXFR1', message: '尚未登入' });
+    });
+    expect(subCount()).toBe(initial); // 不立即重送
+    await act(async () => { vi.advanceTimersByTime(2500); });
+    expect(subCount()).toBe(initial + 1); // 2.5 秒後 retry
+  });
+
+  it('連線假死（>12 秒無任何訊息）→ 強制 close 觸發自動重連', async () => {
+    vi.spyOn(Math, 'random').mockReturnValue(0.5);
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+    expect(MockWebSocket.instances.length).toBe(1);
+
+    // 13 秒完全沒有訊息（後端 Heartbeat 每 3 秒會發，沒有代表連線已死）
+    await act(async () => { vi.advanceTimersByTime(13000); });
+    expect(ws.readyState).toBe(MockWebSocket.CLOSED);
+
+    // onclose → 既有退避重連
+    await act(async () => { vi.advanceTimersByTime(1100); });
+    expect(MockWebSocket.instances.length).toBe(2);
+  });
+
+  it('watch aliases：tick 帶 canonical symbol 也能更新自選報價', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    act(() => { probe.ctx!.watchSymbols(['2330']); });
+    await act(async () => {
+      ws.message({
+        action: 'watch', status: 'success',
+        symbols: ['2330'], rejected: [], aliases: { '2330': 'TSE2330' },
+      });
+    });
+
+    // 後端 tick 廣播帶 canonical（TSE2330）→ 必須映射回自選 key（2330）
+    act(() => {
+      ws.message({ type: 'Tick', data: { Symbol: 'TSE2330', Price: 600, Volume: 3 } });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(probe.ctx?.watchlistQuotes['2330']?.price).toBe(600);
+  });
+
   it('斷線重連：指數退避 + jitter 排程', async () => {
     // Math.random = 0.5 → jitter 係數 = 0.8 + 0.5*0.4 = 1.0（確定性延遲）
     vi.spyOn(Math, 'random').mockReturnValue(0.5);

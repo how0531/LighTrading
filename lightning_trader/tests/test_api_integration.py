@@ -349,7 +349,23 @@ def test_order_sync_detects_cancellation_from_other_channel():
     assert snap["data"]["orders"] == []
 
 
-# ─── 10. API Token 認證（最後執行：會 reload main） ──────────
+# ─── 10. WebSocket watch：canonical alias 回報 ──────────────
+
+def test_ws_watch_ack_returns_canonical_aliases():
+    """tick 廣播用 canonical symbol（如 TSE1101），自選清單存使用者輸入（1101）。
+    watch ack 必須回報對應關係，否則前端對不上 key、報價永遠不顯示。"""
+    import json as _json
+    with client.websocket_connect("/ws/quotes") as ws:
+        ws.send_text(_json.dumps({"action": "watch", "symbols": ["1101", "2330"]}))
+        msg = ws.receive_json()
+        assert msg["status"] == "success" and msg["action"] == "watch"
+        assert set(msg["symbols"]) == {"1101", "2330"}
+        # 1101 的 canonical 是 TSE1101 → 要有 alias；2330 相同 → 不用
+        assert msg["aliases"] == {"1101": "TSE1101"}
+        assert msg["rejected"] == []
+
+
+# ─── 11. API Token 認證（最後執行：會 reload main） ──────────
 
 def test_zz_api_token_auth():
     import importlib

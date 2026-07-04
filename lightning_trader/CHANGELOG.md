@@ -4,6 +4,31 @@
 
 ---
 
+## [2.2.1] - 2026-07-04
+
+### 📈 報價顯示穩定性（三個「報價常常不顯示」的根因）
+
+* **廣播逾時誤踢 → 殭屍連線（主因）**：報價廣播對單一客戶端送出逾時 0.1 秒
+  就把連線從集合移除但「不關閉 socket」——瀏覽器分頁切背景 / GC / 網路抖動
+  都很容易超過 100ms。被踢後客戶端的 WS 仍是 OPEN、onclose 永遠不觸發、
+  永遠不重連，報價從此凍結。修復：逾時放寬到 1 秒、踢除時真正 `close()`
+  讓前端走既有重連（`shared.drop_connection`，quote/pnl/broadcast_ws 三處統一）。
+* **假死自癒**：後端新增每 ≤3 秒的輕量 `Heartbeat`（未登入/盤後也發，
+  之前只有 PnLUpdate 當心跳但它無持倉時不發）；前端 stale watchdog 升級——
+  >12 秒完全無訊息且 socket 看似 OPEN 時主動 close 觸發重連，
+  任何形式的無聲斷線（伺服器踢除、半開連線、睡眠喚醒）都能自癒。
+* **開機競態**：前端 WS 50ms 就緒、Shioaji 自動登入要 ~2 秒，訂閱先失敗且
+  之前「沒有 retry」→ 主報價空白直到手動重選商品。修復：subscribe error ack
+  觸發 2.5 秒間隔自動重試（最多 8 次，涵蓋登入最慢情境）。
+* **watch ack 別名修復**：tick 廣播用 canonical symbol（如 `TSE2330`），
+  自選清單存使用者輸入（`2330`）——watch ack 之前回的是輸入字串，前端對不上
+  key，報價看板/自選列永遠沒資料。修復：`subscribe_background` 回傳 canonical、
+  watch ack 帶 `aliases` 對應表、前端 tick/bidask 先映射再查自選 key。
+* 測試：後端 watch alias ack + 前端（subscribe retry / 假死強制重連 /
+  alias tick 映射），共 +4。
+
+---
+
 ## [2.2.0] - 2026-07-04
 
 ### 🔄 外部管道下單即時同步（委託對帳迴圈）

@@ -96,6 +96,22 @@ def submit_order_task(fn):
     return order_executor.submit(fn)
 
 
+async def drop_connection(conn: WebSocket) -> None:
+    """
+    把 WebSocket 從活躍集合移除「並且真正關閉它」。
+
+    之前各廣播器逾時/失敗時只做 discard 不 close —— 客戶端的 socket
+    仍是 OPEN，onclose 永遠不會觸發、也就永遠不會自動重連，
+    報價從此凍結（使用者看到的「報價常常不顯示」主因之一）。
+    close 之後客戶端會收到 onclose → 走既有的指數退避重連。
+    """
+    active_connections.discard(conn)
+    try:
+        await conn.close(code=1011)  # internal error / going away
+    except Exception:
+        pass  # 已斷線的 socket close 會丟例外，忽略
+
+
 async def broadcast_ws(msg_dict: dict):
     """將訊息廣播給所有活躍的 WebSocket 連接"""
     import json
@@ -104,4 +120,4 @@ async def broadcast_ws(msg_dict: dict):
         try:
             await conn.send_text(message)
         except Exception:
-            active_connections.discard(conn)
+            await drop_connection(conn)
