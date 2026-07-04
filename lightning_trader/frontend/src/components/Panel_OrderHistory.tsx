@@ -3,6 +3,7 @@ import { getOrderHistory, apiClient } from '../api/client';
 import { useTradingCore } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
 import { useApiErrorToast } from '../hooks/useApiErrorToast';
+import { isActiveOrderStatus } from '../utils/orderStatus';
 
 interface Trade {
   time: string;
@@ -32,7 +33,7 @@ const getBadgeStyle = (status: string) => {
   const baseStyle = "border rounded px-1.5 py-0.5 text-[10px] whitespace-nowrap";
   if (status === 'Filled') return `${baseStyle} bg-slate-600/30 text-slate-300 border-slate-600/50`;
   if (status === 'Cancelled') return `${baseStyle} bg-slate-500/10 text-slate-500 border-slate-500/20`;
-  if (['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(status)) return `${baseStyle} bg-yellow-500/20 text-yellow-400 border-yellow-500/30`;
+  if (isActiveOrderStatus(status)) return `${baseStyle} bg-yellow-500/20 text-yellow-400 border-yellow-500/30`;
   if (['Failed', 'Rejected'].includes(status)) return `${baseStyle} bg-red-500/20 text-red-400 border-red-500/30`;
   return `${baseStyle} bg-slate-500/20 text-slate-400 border-slate-500/30`;
 };
@@ -167,7 +168,7 @@ const Panel_OrderHistory: React.FC = () => {
 
   const validTrades = trades.filter(t => t.symbol && t.symbol.trim() !== "");
   const cancellable = validTrades.filter(t =>
-    ['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(t.status)
+    isActiveOrderStatus(t.status)
   );
 
   const toggleSelected = (key: string) => {
@@ -270,7 +271,7 @@ const Panel_OrderHistory: React.FC = () => {
             ) : (
               validTrades.map((t, idx) => {
                 const k = tradeKey(t);
-                const isCancellable = ['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(t.status);
+                const isCancellable = isActiveOrderStatus(t.status);
                 return (
                 <tr key={`${t.time}-${idx}`} className={`hover:bg-white/5 transition-colors ${selected.has(k) ? 'bg-amber-500/10 ring-1 ring-amber-500/30' : 'bg-slate-700/20'}`}>
                   <td className="py-2 px-2">
@@ -313,7 +314,7 @@ const Panel_OrderHistory: React.FC = () => {
                       >
                         {formatStatusText(t.status, t.failed_msg)}
                       </span>
-                      {['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(t.status) && (
+                      {isActiveOrderStatus(t.status) && (
                         <>
                           <button
                             onClick={() => handleUpdateQty(t)}

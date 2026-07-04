@@ -54,6 +54,11 @@ class MockWebSocket {
     this.onclose?.();
   }
 
+  closeWith(code: number) {
+    this.readyState = MockWebSocket.CLOSED;
+    (this.onclose as unknown as (ev: { code: number }) => void)?.({ code });
+  }
+
   // ── 測試 helpers ──
   open() {
     this.readyState = MockWebSocket.OPEN;
@@ -230,6 +235,54 @@ describe('TradingContext WS 訊息路由', () => {
     // onclose → 既有退避重連
     await act(async () => { vi.advanceTimersByTime(1100); });
     expect(MockWebSocket.instances.length).toBe(2);
+  });
+
+  it('token 認證失敗（4401 close）→ 停止自動重連', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+    expect(MockWebSocket.instances.length).toBe(1);
+
+    await act(async () => { ws.closeWith(4401); });
+    await act(async () => { vi.advanceTimersByTime(60000); });
+    // 帶著同一個壞 token 重連只會無限 4401 —— 不得自動重連
+    expect(MockWebSocket.instances.length).toBe(1);
+  });
+
+  it('subscribe 重試不設次數上限（LIVE 手動登入可能很久）', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+    const subCount = () => ws.sent.filter((s) => s.includes('"subscribe"')).length;
+    const initial = subCount();
+
+    // 10 輪失敗（超過舊的 8 次上限）—— 每輪都要再重試
+    for (let i = 0; i < 10; i++) {
+      await act(async () => {
+        ws.message({ action: 'subscribe', status: 'error', message: '尚未登入' });
+      });
+      await act(async () => { vi.advanceTimersByTime(10000); }); // 延遲封頂 10s
+      expect(subCount()).toBe(initial + i + 1);
+    }
+  });
+
+  it('Price=0 但帶 Reference/漲跌停的快照不被丟棄（盤前 ladder 建得起來）', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    act(() => {
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 0, Reference: 95, LimitUp: 104.5, LimitDown: 85.5 } });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(probe.ctx?.quote?.Reference).toBe(95);
+    expect(probe.ctx?.quote?.LimitUp).toBe(104.5);
+    expect(probe.ctx?.quote?.Price).toBe(0);
+
+    // 第一筆真實成交進來後，靜態欄位保留、價格更新
+    act(() => {
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 96, Volume: 1 } });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(probe.ctx?.quote?.Price).toBe(96);
+    expect(probe.ctx?.quote?.Reference).toBe(95);
   });
 
   it('watch aliases：tick 帶 canonical symbol 也能更新自選報價', async () => {

@@ -24,6 +24,38 @@ from dataclasses import dataclass, field
 logger = logging.getLogger(__name__)
 
 
+def signed_position_qty(direction, qty) -> int:
+    """
+    部位方向 → 有號口數的唯一定義：Buy 為正、Sell 為負。
+
+    ★ 未知 / 缺漏的 direction 一律回 0（不猜方向）——
+    之前三處各自複製這段邏輯且預設相反（risk_manager 視非 Sell 為 +、
+    order_guard/orders.py 視非 Buy 為 −），同一筆部位在兩道防線會算出
+    正負相反的淨額。
+    """
+    try:
+        q = int(qty or 0)
+    except (TypeError, ValueError):
+        return 0
+    d = str(direction or "")
+    if d == "Buy":
+        return q
+    if d == "Sell":
+        return -q
+    return 0
+
+
+def net_position_of(positions, symbol: str) -> int:
+    """把持倉列表聚合成指定商品的有號淨部位（多帳號/多列相加）。"""
+    sym = (symbol or "").strip().upper()
+    net = 0
+    for p in positions or []:
+        if (p.get("symbol") or "").upper() != sym:
+            continue
+        net += signed_position_qty(p.get("direction"), p.get("qty", 0))
+    return net
+
+
 class CheckLevel(Enum):
     """檢查結果等級"""
     OK = "ok"             # 通過
@@ -145,9 +177,7 @@ class RiskManager:
             sym = (p.get("symbol") or "").upper()
             if not sym:
                 continue
-            qty = int(p.get("qty", 0) or 0)
-            sign = -1 if p.get("direction") == "Sell" else 1
-            net[sym] = net.get(sym, 0) + sign * qty
+            net[sym] = net.get(sym, 0) + signed_position_qty(p.get("direction"), p.get("qty", 0))
         self._current_positions = net
 
     def _periodic_check(self):
@@ -203,14 +233,28 @@ class RiskManager:
         if price < 0:
             return CheckResult.block("委託價格不可為負數")
 
-        # === 1. 全域交易開關 ===
-        if not self.config.trading_enabled:
-            return CheckResult.block("交易已被風控停止，請確認日虧損狀況")
+        # ★ reduce-only 判定（唯一定義點）：方向與現有淨部位相反、
+        #   且口數不超過淨部位 → 純平倉/減倉。
+        #   熔斷（步驟 1/2）不得封鎖出場 —— 之前這個例外只做在智慧單
+        #   觸發路徑與 flatten 按鈕，「手動下單面板」在熔斷後連平倉單
+        #   都送不出去，使用者被鎖在虧損部位裡。
+        if position_qty != 0:
+            net_current = signed_position_qty(position_direction, position_qty)
+        else:
+            net_current = self._current_positions.get(symbol, 0)
+        delta = qty if action == "Buy" else -qty
+        is_reduce_only = (net_current != 0 and net_current * delta < 0
+                          and abs(delta) <= abs(net_current))
 
-        # === 2. 日虧損上限 ===
-        r = self._check_daily_loss()
-        if not r.passed:
-            return r
+        # === 1. 全域交易開關（reduce-only 豁免） ===
+        if not self.config.trading_enabled and not is_reduce_only:
+            return CheckResult.block("交易已被風控停止，請確認日虧損狀況（平倉單不受此限）")
+
+        # === 2. 日虧損上限（reduce-only 豁免） ===
+        if not is_reduce_only:
+            r = self._check_daily_loss()
+            if not r.passed:
+                return r
 
         # === 3. 部位上限 ===
         r = self._check_max_position(symbol, action, qty, position_qty, position_direction)

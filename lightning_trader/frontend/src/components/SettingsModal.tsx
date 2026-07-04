@@ -413,7 +413,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                     <ToggleItem label="緊湊模式" description="DOM 列高 32px → 24px，多顯示約 33% 檔位" enabled={settings.visuals.compactMode} onToggle={() => handleToggle('visuals', 'compactMode')} />
                     <ToggleItem label="顯示 VWAP" description="在閃電下單列顯示成交均價線" enabled={settings.visuals.showVWAP} onToggle={() => handleToggle('visuals', 'showVWAP')} />
                     <ToggleItem label="顯示 今日高低點" description="標記今日最高價與最低價" enabled={settings.visuals.showHL} onToggle={() => handleToggle('visuals', 'showHL')} />
-                    <ToggleItem label="顯示 成交量分布 (Volume Profile)" description="顯示各價位成交量分布圖" enabled={settings.visuals.showVolumeProfile} onToggle={() => handleToggle('visuals', 'showVolumeProfile')} />
                   </div>
                 </section>
               </div>

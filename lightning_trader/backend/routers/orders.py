@@ -242,13 +242,9 @@ async def reverse_position(req: SymbolRequest):
                 "code": "POSITIONS_UNAVAILABLE",
                 "user_msg": "無法取得持倉狀態，反向已取消，請稍後再試",
             })
-        # 聚合同商品所有列（多帳號/多列）成有號淨部位
-        net = 0
-        for p in positions:
-            if (p.get("symbol") or "").upper() != req.symbol.upper():
-                continue
-            q = int(p.get("qty", 0) or 0)
-            net += q if p.get("direction") == "Buy" else -q
+        # 聚合同商品所有列（多帳號/多列）成有號淨部位（共用唯一定義）
+        from core.risk_manager import net_position_of
+        net = net_position_of(positions, req.symbol)
         if net != 0:
             pos_dir = "Buy" if net > 0 else "Sell"
             reverse_action = "Sell" if net > 0 else "Buy"

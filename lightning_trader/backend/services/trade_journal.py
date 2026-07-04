@@ -118,8 +118,15 @@ def extract_fill(trade_data: dict) -> Optional[dict]:
         trade_data.get("ordno") or trade_data.get("seqno")
         or order.get("ordno") or order.get("seqno") or ""
     )
-    # 唯一 id：order_id + 成交序 / 時間，避免重複寫入
-    deal_seq = trade_data.get("dealseq") or trade_data.get("seq") or int(time.time() * 1000)
+    # 唯一 id：order_id + 「每筆成交」的交易所序號。
+    # ★ 必須優先取 exchange_seq —— Shioaji Deal 回報的欄位是
+    #   trade_id/seqno/ordno/exchange_seq/ts（沒有 dealseq/seq），而
+    #   order_sync 對帳路徑用 list_trades 的 Deal.seq（= exchange_seq）產生 id。
+    #   之前這裡落到 wall-clock 時間戳，同一筆成交兩條路徑 id 不同 →
+    #   INSERT OR IGNORE 去重失效 → 成交重複入帳、日已實現損益翻倍。
+    #   注意不可用 seqno（那是「委託」序號，同一單的多筆部分成交會撞成一筆）。
+    deal_seq = (trade_data.get("exchange_seq") or trade_data.get("dealseq")
+                or trade_data.get("seq") or int(time.time() * 1000))
     fill_id = f"{order_id or 'noid'}#{deal_seq}"
 
     try:

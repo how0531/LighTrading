@@ -54,7 +54,6 @@ export interface Settings {
   visuals: {
     showVWAP: boolean;
     showHL: boolean;
-    showVolumeProfile: boolean;
     fontSize: number;
     compactMode: boolean;     // ★ Sprint 10 R7a：DOM row 高度 h-8 → h-6（多 ~33% 可視檔位）
   };
@@ -112,7 +111,6 @@ const DEFAULT_SETTINGS: Settings = {
   visuals: {
     showVWAP: true,
     showHL: true,
-    showVolumeProfile: true,
     fontSize: 12,
     compactMode: false,
   },

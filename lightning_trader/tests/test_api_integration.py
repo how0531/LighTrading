@@ -260,6 +260,34 @@ def test_realized_feed_matches_open_leg_before_boundary():
     assert rm._daily_realized_pnl == -5000
 
 
+def test_reduce_only_order_allowed_during_halt():
+    """熔斷後手動下單面板必須仍能送出「平倉方向、不超過部位」的單——
+    之前 pre_order_check 第 1 步無條件封鎖，使用者被鎖在虧損部位裡。"""
+    _fake_api().positions = [FakePosition("2330", 2, Action.Buy, price=500.0)]
+    _rm().config.trading_enabled = False
+
+    # 平倉方向（Sell 2，不超過淨部位 2）→ 放行
+    r = client.post("/api/place_order", json={
+        "symbol": "2330", "price": 495.0, "action": "Sell", "qty": 2,
+        "confirm": True,  # 反向確認 warning 已由使用者確認
+    })
+    assert r.status_code == 200, r.text
+    assert len(_fake_api().placed_orders) == 1
+
+    # 開倉方向（再買）→ 仍被熔斷擋下
+    r2 = client.post("/api/place_order", json={
+        "symbol": "2330", "price": 500.0, "action": "Buy", "qty": 1, "confirm": True,
+    })
+    assert r2.status_code == 422
+    assert r2.json()["detail"]["code"] == "RISK_BLOCK"
+
+    # 超過部位的反向單（Sell 5 > 淨 2）→ 也擋（那是反向開倉）
+    r3 = client.post("/api/place_order", json={
+        "symbol": "2330", "price": 495.0, "action": "Sell", "qty": 5, "confirm": True,
+    })
+    assert r3.status_code == 422
+
+
 # ─── 8. 成交回報 → fill 管線（signal_trade_update 死線回歸） ─
 
 def test_deal_callback_reaches_fill_pipeline():
@@ -277,6 +305,34 @@ def test_deal_callback_reaches_fill_pipeline():
         assert fills[0]["qty"] == 1
     finally:
         shared.engine.event_bus.on_fill.disconnect(fills.append)
+
+
+def test_callback_and_sync_fill_ids_dedupe():
+    """同一筆成交走 callback（deal msg 有 exchange_seq）與對帳迴圈（Deal.seq）
+    必須產生相同 id —— 之前 callback 落到時間戳 fallback，去重失效、
+    成交重複入帳、日已實現損益翻倍。"""
+    import asyncio
+    from backend.services import order_sync, trade_journal
+    from fake_shioaji import make_trade
+
+    # 1. callback 路徑先記（Shioaji Deal msg 形狀：ordno + exchange_seq，無 dealseq/seq）
+    cb = _fake_api()._order_callback
+    cb("OrderState.StockDeal", {"code": "2330", "action": "Buy", "price": 100.0,
+                                "quantity": 1, "ordno": "DUP1", "exchange_seq": "E77"})
+    before = len(trade_journal.fetch_fills(symbol="2330", limit=50))
+
+    # 2. 對帳迴圈看到同一筆成交（list_trades 的 Deal.seq == exchange_seq）
+    _fake_api().trades = [
+        make_trade("2330", Action.Buy, 100.0, 1, status="Filled", ordno="DUP1",
+                   deals=[(100.0, 1, "E77", time.time())], filled_qty=1),
+    ]
+    order_sync._last_fingerprint = ""
+    order_sync._seen_fill_ids.clear()
+    result = asyncio.run(order_sync.sync_once())
+
+    after = len(trade_journal.fetch_fills(symbol="2330", limit=50))
+    assert result["new_fills"] == 0, "同一筆成交被重複入帳（id 分歧，去重失效）"
+    assert after == before
 
 
 # ─── 9. 委託對帳迴圈（外部管道下單即時同步） ────────────────

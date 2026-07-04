@@ -4,6 +4,29 @@
 
 ---
 
+## [2.2.2] - 2026-07-04
+
+### 🔍 完整 Code Review 修復（8 視角掃描 → 10 項確認缺陷 + 清理）
+
+**資金安全（正確性）**
+* **成交去重失效修復**：Shioaji Deal 回報實際欄位是 `exchange_seq`（無 `dealseq`/`seq`，見 repo 內 shioaji 型別文件），callback 路徑之前落到 wall-clock 時間戳，與對帳迴圈的 `Deal.seq` 對不上 → 同筆成交重複入帳、日已實現損益翻倍、熔斷誤觸。改為優先取 `exchange_seq`。
+* **熔斷期間手動平倉被鎖死**：reduce-only 豁免之前只做在智慧單觸發與 flatten 按鈕，手動下單面板在熔斷後連平倉單都送不出去。改為在 `pre_order_check` 內統一判定 reduce-only（方向與淨部位相反且不超量），所有下單路徑一致豁免。
+* **OCO 觸發失敗變單邊保護**：一腿觸發但市價單送出失敗 re-arm 時，已被連帶取消的配對腿不會復活 → 部位只剩單邊保護。改為 re-arm 時配對腿一起復活；放棄重試時也保留配對腿。
+* **淨部位正負號三處分歧**：`risk_manager`/`order_guard`/`orders.py` 對未知 direction 的預設正負相反。收斂為 `risk_manager.signed_position_qty`/`net_position_of` 單一定義（未知方向一律回 0）。
+
+**延遲 / 可用性**
+* **對帳與 FIFO 重算移出下單佇列**：`order_sync`（每 2.5s 的 update_status+list_trades）與已實現損益重算之前都排在手動下單共用的單 worker broker 執行緒 → head-of-line 延遲尖峰。新增專用 `sync_executor`；已實現重算加合流防抖（0.2s 聚合窗）；`order_sync` 加 in-memory fill id watermark，不再每輪對全部 deals 重打 SQLite。
+* **心跳獨立成 task**：WS 心跳之前內嵌在 pnl 迴圈，會被排在 broker 執行緒的慢 `list_positions` 餓死 → 前端誤判假死、重連風暴。改為獨立 asyncio task，不受 broker 阻塞影響。
+* **錯誤 token 無限重連**：4401（token 認證失敗）之前被 onclose 當一般斷線無限重試。改為辨識 4401、停止重連並提示使用者。
+* **開機訂閱重試無上限**：subscribe 失敗重試之前 8 次（~20s）用完就停，LIVE 手動登入慢於此則主報價永久空白。改為無次數上限、延遲 ×1.5 封頂 10s、pending 旗標防重複、成功 ack 重置。
+* **盤前快照報價不顯示**：`mergeQuote` 之前對 Price=0 的訊息整筆丟棄，盤前/未成交商品只有 Reference/漲跌停的快照被丟 → DOM ladder 建不出檔位。改為保留帶靜態欄位的快照（不進逐筆 tape）。
+
+**清理**
+* RISK_BLOCKED 哨兵收斂為 core 單一定義、backend import（消除跨模組字串耦合）；`_cancel_linked` 復用 `_deactivate_linked_nolock` 謂詞；成交副作用扇出收斂為 `order_guard.fill_side_effects`（callback 與對帳路徑共用）；活躍委託狀態集合收斂為前端 `utils/orderStatus.ts`（消除 5 處複製）；移除死掉的 422 RISK_WARNING 分支與 Volume Profile 開關。
+* 測試：+8（成交 id 去重、reduce-only 豁免、OCO 腿復活、signed_position_qty/net_position_of、4401 停止重連、無上限訂閱重試、盤前快照保留）。後端 112 + 前端 206 全綠。
+
+---
+
 ## [2.2.1] - 2026-07-04
 
 ### 📈 報價顯示穩定性（三個「報價常常不顯示」的根因）

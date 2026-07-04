@@ -20,6 +20,7 @@ client.place_order，完全繞過 RiskManager，即使 trading_enabled=False 也
   之後的增量餵回 RiskManager。
 """
 import logging
+import threading
 import time
 from datetime import datetime, timedelta
 from typing import Optional
@@ -39,39 +40,32 @@ _POS_CACHE_MAX_AGE_S = 2.0
 
 def _net_position(symbol: str) -> Optional[int]:
     """
-    查詢商品目前有號淨部位（Buy 為正）。
+    查詢商品目前有號淨部位（Buy 為正；聚合用 risk_manager 的唯一定義，
+    避免三處複製的正負號預設分歧）。
     優先用 pnl_broadcaster 的新鮮快取；查詢失敗回 None（未知）。
     """
-    sym = symbol.strip().upper()
-
-    def _sum(positions) -> int:
-        net = 0
-        for p in positions or []:
-            if (p.get("symbol") or "").upper() != sym:
-                continue
-            qty = int(p.get("qty", 0) or 0)
-            net += qty if p.get("direction") == "Buy" else -qty
-        return net
+    from core.risk_manager import net_position_of
 
     # 1. 新鮮快取（每次 tick 都在刷新，1s TTL）
     try:
         from backend.services import pnl_broadcaster as pb
         if pb._pos_cache and (time.monotonic() - pb._pos_cache_time) < _POS_CACHE_MAX_AGE_S:
-            return _sum(pb._pos_cache)
+            return net_position_of(pb._pos_cache, symbol)
     except Exception:
         pass
 
     # 2. 直接向券商查
     try:
-        return _sum(shared.shioaji_client.list_positions())
+        return net_position_of(shared.shioaji_client.list_positions(), symbol)
     except Exception as e:
         logger.warning(f"order_guard 查持倉失敗: {e}")
         return None
 
 
-#: smart_place_order 的哨兵回傳值：風控攔下（與「下單失敗」區分，
-#: 引擎看到 BLOCKED 不會 re-arm，看到 None / 例外才會）
-RISK_BLOCKED = "RISK_BLOCKED"
+# 哨兵單一定義在 core（引擎的契約），backend 直接 import ——
+# 之前兩邊各自定義字串常數、只靠字面相等耦合，分歧時 bracket 會把
+# 被攔下的進場當成功、掛出沒有母單的幽靈 OCO
+from core.smart_order_engine import RISK_BLOCKED  # noqa: E402
 
 
 def smart_place_order(symbol: str, price: float, action: str, qty: int):
@@ -151,10 +145,59 @@ def _risk_day_start_ms() -> int:
     return int(start.timestamp() * 1000)
 
 
+# 已實現重算的合流排程：成交爆量時每筆 fill 都全量重算會把佇列塞爆，
+# 用 pending 旗標 + 短暫聚合窗把一波 fills 合併成一次重算
+_refresh_lock = threading.Lock()
+_refresh_queued = False
+
+
+def schedule_refresh_daily_realized() -> None:
+    """排程一次已實現損益重算（丟到 sync executor，波段內自動合流）。"""
+    global _refresh_queued
+    with _refresh_lock:
+        if _refresh_queued:
+            return
+        _refresh_queued = True
+    try:
+        shared.submit_sync_task(_run_refresh_coalesced)
+    except Exception:
+        with _refresh_lock:
+            _refresh_queued = False
+
+
+def _run_refresh_coalesced() -> None:
+    global _refresh_queued
+    time.sleep(0.2)   # 聚合同一波成交（sync executor 專用執行緒，睡得起）
+    with _refresh_lock:
+        _refresh_queued = False
+    refresh_daily_realized()
+
+
+def fill_side_effects(fill: Optional[dict]) -> None:
+    """
+    成交後的共用副作用（callback 路徑與 order_sync 對帳路徑共用，
+    之前兩處 copy-paste 各自維護）：
+      1. 發射 on_fill（Bracket 母單成交偵測）
+      2. 作廢 PnL 持倉快取（下一 tick 用新部位重算）
+      3. 排程已實現損益重算（風控熔斷資料源；合流防抖）
+    """
+    try:
+        if fill and shared.engine:
+            shared.engine.event_bus.on_fill.emit(fill)
+    except Exception:
+        pass
+    try:
+        from backend.services import pnl_broadcaster as pb
+        pb.on_fill_event()
+    except Exception:
+        pass
+    schedule_refresh_daily_realized()
+
+
 def refresh_daily_realized():
     """
     重算「本風控日」的已實現損益，餵給 RiskManager。
-    每筆成交回報後由 bridge 呼叫（丟進 broker thread，不佔行情執行緒）。
+    請透過 schedule_refresh_daily_realized() 排程（合流 + 不佔下單佇列）。
 
     作法：對近 30 天 fills 做完整 FIFO（跨午夜的夜盤回合、昨日開倉今日平倉
     都能正確配對），取風控日邊界（或最近一次手動 reset）後的累積增量。

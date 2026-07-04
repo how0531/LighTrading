@@ -96,6 +96,22 @@ def submit_order_task(fn):
     return order_executor.submit(fn)
 
 
+# 背景對帳/重算通道：order_sync 的 update_status+list_trades（每 2.5s）
+# 與已實現損益的 FIFO 重算都是慢工作，不能排在「手動下單」共用的
+# broker 佇列前面造成 head-of-line 阻塞。
+sync_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="sync")
+
+
+async def run_in_sync_thread(func, *args, **kwargs):
+    """在背景對帳 executor 上執行慢的券商查詢/重算，不佔用下單佇列。"""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(sync_executor, functools.partial(func, *args, **kwargs))
+
+
+def submit_sync_task(fn):
+    return sync_executor.submit(fn)
+
+
 async def drop_connection(conn: WebSocket) -> None:
     """
     把 WebSocket 從活躍集合移除「並且真正關閉它」。

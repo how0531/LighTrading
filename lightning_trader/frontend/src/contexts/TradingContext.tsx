@@ -5,6 +5,7 @@ import type { QuoteData, BidAskData } from '../types';
 import { apiClient } from '../api/client';
 import { resolveWsUrl } from '../utils/backendUrl';
 import { computeLocalPnL } from '../utils/pnl';
+import { isActiveOrderStatus } from '../utils/orderStatus';
 import { useToast } from './ToastContext';
 
 export interface AccountPosition {
@@ -151,6 +152,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const watchRetryCountRef = useRef<number>(0);   // Sprint 12 R2：watch error ack retry 計數
   const watchRejectedRef = useRef<Set<string>>(new Set()); // R4：記住已警告過的 rejected，避免每次重連都重複 toast
   const subscribeRetryCountRef = useRef<number>(0); // 開機競態：backend 未登入時訂閱失敗的 retry 計數
+  const subscribeRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // canonical → 使用者輸入 的別名表（backend watch ack 的 aliases）。
   // tick 廣播用 canonical（例如 TSE2330），自選清單存使用者輸入（2330），
   // 沒有這層對應報價看板/自選列會永遠對不上 key
@@ -178,10 +180,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
       if (newSeq >= snapshotSeqRef.current) {
         snapshotSeqRef.current = newSeq;
-        const active = historyList.filter((o) =>
-          o.status === 'PendingSubmit' || o.status === 'PreSubmitted' ||
-          o.status === 'Submitted' || o.status === 'PartFilled'
-        );
+        const active = historyList.filter((o) => isActiveOrderStatus(o.status));
         setWorkingOrders((prev) => (sameOrders(prev, active) ? prev : active));
       }
     } catch { /* 靜默，維持舊狀態 */ }
@@ -337,7 +336,12 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const prev = latestQuoteRef.current;
     const newPrice = (incoming.Price != null && incoming.Price > 0)
       ? incoming.Price : (prev?.Price ?? 0);
-    if (newPrice === 0) return; // 跳過無效 tick
+    // ★ 盤前 / 尚未成交的商品：snapshot 只有 Reference/漲跌停、Price=0。
+    //   不能整筆丟棄 —— 否則 DOM ladder 在第一筆成交前建不出價格檔位、
+    //   看不到參考價與漲跌停線（「報價不顯示」的無成交情境）
+    const hasStatic = (incoming.Reference ?? 0) > 0
+      || (incoming.LimitUp ?? 0) > 0 || (incoming.LimitDown ?? 0) > 0;
+    if (newPrice === 0 && !hasStatic) return; // 完全沒有可用欄位才丟棄
 
     const merged: QuoteData = {
       Symbol: incoming.Symbol ?? prev?.Symbol ?? targetSymbolRef.current,
@@ -356,7 +360,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
     latestQuoteRef.current = merged;
     quoteDirtyRef.current = true;
-    pendingHistoryRef.current.push(merged);
+    if (newPrice > 0) {
+      pendingHistoryRef.current.push(merged); // Price=0 的靜態快照不進逐筆 tape
+    }
   }, []);
 
   // WebSocket 連線管理 — 定義為 ref 函式避免 useEffect 依賴問題。
@@ -508,18 +514,26 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           scheduleOrderRefresh();
         } else if (data.action === 'subscribe' && data.status === 'success') {
           subscribeRetryCountRef.current = 0;
+          if (subscribeRetryTimerRef.current) {
+            clearTimeout(subscribeRetryTimerRef.current);
+            subscribeRetryTimerRef.current = null;
+          }
           if (data.symbol) setTargetSymbol(data.symbol);
         } else if (data.action === 'subscribe' && data.status === 'error') {
-          // 開機競態：WS 比 Shioaji 自動登入（~2s）先就緒，訂閱會先失敗。
-          // 之前這裡沒有 retry → 主報價空白直到使用者手動重選商品
-          if (subscribeRetryCountRef.current < 8) {
+          // 開機競態：WS 比 Shioaji 登入先就緒，訂閱會先失敗。
+          // 不設次數上限 —— LIVE 模式使用者可能好幾分鐘後才手動登入，
+          // 用完就停會讓主報價永久空白。pending 旗標防重複排程，
+          // 延遲 2.5s 起每次 ×1.5 封頂 10s（登入成功的 ack 會重置）
+          if (!subscribeRetryTimerRef.current) {
+            const delay = Math.min(10000, 2500 * Math.pow(1.5, subscribeRetryCountRef.current));
             subscribeRetryCountRef.current += 1;
-            setTimeout(() => {
+            subscribeRetryTimerRef.current = setTimeout(() => {
+              subscribeRetryTimerRef.current = null;
               const wsNow = wsRef.current;
               if (wsNow && wsNow.readyState === WebSocket.OPEN) {
                 wsNow.send(JSON.stringify({ action: 'subscribe', symbol: targetSymbolRef.current }));
               }
-            }, 2500);
+            }, delay);
           }
         } else if (data.action === 'watch' && data.status === 'error') {
           // Sprint 12 R2：backend 還沒登入 → 3 秒後 retry 一次（最多 5 次）
@@ -561,9 +575,15 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       } catch (err) { console.error('[WS error]', err); }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev?: CloseEvent) => {
       setIsConnected(false);
       if (isUnmounted.current) return;
+      // 4401 = 後端 token 認證失敗。帶著同一個壞 token 重連只會無限 4401，
+      // 停止自動重連並明確告知使用者（設定頁存新 token 時會 forceReconnect）
+      if (ev?.code === 4401) {
+        toast.error('API Token 無效或已變更，請在設定 → 連線/安全 更新後重新連線');
+        return;
+      }
       const delay = reconnectDelayRef.current;
       reconnectDelayRef.current = Math.min(delay * 2, 30000);
       // ±20% 隨機 jitter：多分頁 / 多視窗同時斷線時錯開重連風暴

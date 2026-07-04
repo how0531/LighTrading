@@ -145,20 +145,19 @@ def on_shioaji_trade_update(trade_data: dict):
         if shared.fastapi_loop:
             shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg_item)
 
-        # ★ 發射 on_fill 事件（SmartOrderEngine 的 Bracket 母單成交偵測靠這個；
-        #   之前只有死掉的 OrderManager 會發，導致 bracket 子單永遠不啟動）
+        # ★ Sprint 14：每筆 Deal/Fill 落地到 SQLite journal（極短 IO，~1ms，不會卡 tick）
         try:
-            from backend.services.trade_journal import extract_fill
-            fill = extract_fill(trade_data)
-            if fill and shared.engine:
-                shared.engine.event_bus.on_fill.emit(fill)
+            from backend.services import trade_journal
+            trade_journal.record_trade(trade_data)
         except Exception:
             pass
 
-        # ★ 通知 pnl_broadcaster：成交 → 持倉變動 → 作廢快取
+        # ★ 成交共用副作用（on_fill 事件 / PnL 快取作廢 / 已實現重算排程）
+        #   —— 與 order_sync 對帳路徑共用同一個 helper
         try:
-            from backend.services import pnl_broadcaster as pb
-            pb.on_fill_event(trade_data)
+            from backend.services.trade_journal import extract_fill
+            from backend.services.order_guard import fill_side_effects
+            fill_side_effects(extract_fill(trade_data))
         except Exception:
             pass
 
@@ -167,21 +166,6 @@ def on_shioaji_trade_update(trade_data: dict):
             from backend.services.pnl_broadcaster import subscribe_position_contracts
             if shared.fastapi_loop:
                 asyncio.run_coroutine_threadsafe(subscribe_position_contracts(), shared.fastapi_loop)
-        except Exception:
-            pass
-
-        # ★ Sprint 14：每筆 Deal/Fill 落地到 SQLite journal（極短 IO，~1ms，不會卡 tick）
-        try:
-            from backend.services import trade_journal
-            trade_journal.record_trade(trade_data)
-        except Exception:
-            pass
-
-        # ★ 成交後重算當日已實現損益 → 餵 RiskManager（日虧損熔斷的資料源）
-        #   丟進 broker thread 執行，不佔用 Shioaji 回呼執行緒
-        try:
-            from backend.services.order_guard import refresh_daily_realized
-            shared.submit_to_broker_thread(refresh_daily_realized)
         except Exception:
             pass
 

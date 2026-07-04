@@ -355,10 +355,8 @@ class SmartOrderEngine:
     def _cancel_linked(self, linked_id: str):
         """REST cancel 路徑用：標記 + 立即持久化（非行情執行緒，inline 寫檔 OK）"""
         with self._lock:
-            for order in self._smart_orders:
-                if order.id == linked_id and order.is_active:
-                    order.is_active = False
-                    self._persist(order)
+            for order in self._deactivate_linked_nolock(linked_id):
+                self._persist(order)
 
     def _deactivate_linked_nolock(self, linked_id: str) -> List["SmartOrder"]:
         """觸發路徑用：僅標記（呼叫者已持鎖），持久化延後到 dispatch。"""
@@ -369,18 +367,6 @@ class SmartOrderEngine:
                 out.append(order)
         return out
 
-    def _dispatch_persist(self, orders: List["SmartOrder"]):
-        """把持久化寫檔丟出行情執行緒（無 dispatch 時 inline，測試/standalone 用）。"""
-        if not orders:
-            return
-        def _save():
-            for o in orders:
-                self._persist(o)
-        if self._dispatch is not None:
-            self._dispatch(_save)
-        else:
-            _save()
-
     # ──── 洗價檢查 (每個 tick 觸發) ────
 
     def _on_tick(self, symbol: str, tick_data: dict):
@@ -390,7 +376,7 @@ class SmartOrderEngine:
             return
 
         triggered = []
-        linked_cancelled: List[SmartOrder] = []
+        linked_by_order: dict = {}
         with self._lock:
             for order in self._smart_orders:
                 if not order.is_active or order.symbol != symbol:
@@ -409,18 +395,19 @@ class SmartOrderEngine:
                         triggered.append(order)
 
             # 在 lock 內先標記為非 active，確保同一張單不會被下一個 tick 重複觸發；
-            # SQLite 寫檔不在 lock 內、也不在行情執行緒上做
+            # SQLite 寫檔不在 lock 內、也不在行情執行緒上做。
+            # 每張觸發單記住「自己取消掉的配對腿」—— 下單失敗 re-arm 時
+            # 配對腿必須一起復活，否則 OCO 變成單邊保護
             for order in triggered:
                 order.is_active = False
                 order.is_triggered = True
                 order.triggered_at = datetime.now().isoformat()
                 if order.linked_id:
-                    linked_cancelled.extend(self._deactivate_linked_nolock(order.linked_id))
+                    linked_by_order[order.id] = self._deactivate_linked_nolock(order.linked_id)
 
         # 實際下單在 lock 外執行（並透過 dispatch 離開行情執行緒）
         for order in triggered:
-            self._execute_trigger(order, price)
-        self._dispatch_persist(linked_cancelled)
+            self._execute_trigger(order, price, linked_by_order.get(order.id, []))
 
     def _check_mit(self, order: SmartOrder, price: float) -> bool:
         """檢查觸價條件"""
@@ -448,7 +435,8 @@ class SmartOrderEngine:
             trigger_price = order.watermark + order.trailing_offset
             return price >= trigger_price
 
-    def _execute_trigger(self, order: SmartOrder, trigger_price: float):
+    def _execute_trigger(self, order: SmartOrder, trigger_price: float,
+                         linked_legs: Optional[List["SmartOrder"]] = None):
         """
         執行觸發: 送出市價單（下單 I/O 透過 dispatch 離開行情執行緒）。
 
@@ -456,7 +444,11 @@ class SmartOrderEngine:
         若在送單前就把 DB 標成已消耗，process 在送單前當機會讓停損無聲消失；
         反過來（送單成功但落地前當機）重啟會 re-arm 重送一次保護單，
         方向上寧可重複保護、不可丟失保護。
+
+        linked_legs：本次觸發連帶取消的 OCO 配對腿。成功/被攔下時一併落地；
+        下單「失敗」re-arm 時必須一起復活，否則 OCO 從此變成單邊保護。
         """
+        legs = linked_legs or []
         logger.info(f"[SmartOrder] 觸發! {order.id} ({order.order_type.value}): "
                     f"{order.action} {order.symbol} {order.qty}口 @ 觸發價={trigger_price:.2f}")
 
@@ -468,16 +460,25 @@ class SmartOrderEngine:
                 logger.error(f"[SmartOrder] 觸發下單例外 {order.id}: {e}", exc_info=True)
                 result = None
 
-            if result == RISK_BLOCKED or result:
-                # 成功送出，或被風控攔下（攔下=已消耗，不重試）→ 落地最終狀態
+            # RISK_BLOCKED 是 truthy 字串 —— result 為任何非 None/非空值
+            # 都代表「已消耗」（成功送出，或被風控攔下不重試）
+            if result:
                 self._persist(order)
+                for leg in legs:
+                    self._persist(leg)
                 return
 
             # 下單失敗 → re-arm 重試（上限 _MAX_TRIGGER_RETRIES）
+            rearmed_legs: List[SmartOrder] = []
             with self._lock:
                 order.retry_count += 1
                 if order.retry_count >= _MAX_TRIGGER_RETRIES:
                     self._persist(order)
+                    # 放棄重試：復活配對腿，至少保住另一邊的保護
+                    for leg in legs:
+                        leg.is_active = True
+                        self._persist(leg)
+                        rearmed_legs.append(leg)
                     logger.error(f"[SmartOrder] {order.id} 觸發下單連續失敗 "
                                  f"{order.retry_count} 次，放棄重試")
                     try:
@@ -486,15 +487,23 @@ class SmartOrderEngine:
                             f"智慧單 {order.id} 觸發下單失敗且已達重試上限，保護單未成交！")
                     except Exception:
                         pass
-                    return
-                order.is_active = True
-                order.is_triggered = False
-                order.triggered_at = None
-                order.watermark = None
-                self._persist(order)
-            logger.warning(f"[SmartOrder] {order.id} 觸發下單失敗，已 re-arm "
-                           f"(重試 {order.retry_count}/{_MAX_TRIGGER_RETRIES})")
-            self.event_bus.on_smart_order_added.emit(order.to_dict())
+                else:
+                    order.is_active = True
+                    order.is_triggered = False
+                    order.triggered_at = None
+                    order.watermark = None
+                    self._persist(order)
+                    # 配對腿一起復活（下一次觸發會再取消一次）
+                    for leg in legs:
+                        leg.is_active = True
+                        self._persist(leg)
+                        rearmed_legs.append(leg)
+                    logger.warning(f"[SmartOrder] {order.id} 觸發下單失敗，已 re-arm "
+                                   f"(重試 {order.retry_count}/{_MAX_TRIGGER_RETRIES})")
+            if order.is_active:
+                self.event_bus.on_smart_order_added.emit(order.to_dict())
+            for leg in rearmed_legs:
+                self.event_bus.on_smart_order_added.emit(leg.to_dict())
 
         if self._dispatch is not None:
             self._dispatch(_send)

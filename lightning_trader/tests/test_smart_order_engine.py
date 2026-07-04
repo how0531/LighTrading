@@ -171,6 +171,25 @@ def test_trigger_place_failure_rearms_then_gives_up():
     assert len(rec.calls) == 3
 
 
+def test_oco_leg_restored_when_trigger_send_fails():
+    """OCO 一腿觸發但下單失敗 → re-arm 時「配對腿必須一起復活」，
+    否則 OCO 從此變成單邊保護（審查發現 #3 的回歸）。"""
+    bus, rec, eng = _make(result=False)
+    eng.add_oco("TXFA5", "Sell", 1, take_profit=21100, stop_loss=20900)
+    assert len(eng.get_active_orders()) == 2
+
+    bus.on_tick.emit("TXFA5", {"Price": 21100})  # 停利腿觸發，下單失敗
+    active = eng.get_active_orders()
+    assert len(active) == 2, "下單失敗後 OCO 兩腿都要復活（含被連帶取消的停損腿）"
+
+    # 連續失敗達上限放棄後：至少保住配對腿的保護
+    bus.on_tick.emit("TXFA5", {"Price": 21100})
+    bus.on_tick.emit("TXFA5", {"Price": 21100})
+    active = eng.get_active_orders()
+    assert len(active) == 1, "放棄重試後應保留配對腿（單邊裸露比雙邊消失好）"
+    assert active[0]["trigger_price"] == 20900  # 剩下的是停損腿
+
+
 def test_trigger_risk_blocked_is_consumed_not_rearmed():
     """被風控攔下（回 RISK_BLOCKED 哨兵）→ 視為已消耗，不 re-arm 不重試。"""
     bus = EventBus()

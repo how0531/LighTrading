@@ -106,25 +106,34 @@ def _compute_pnl_payload() -> dict:
 
 _HEARTBEAT_MSG = json.dumps({"type": "Heartbeat"})
 _HEARTBEAT_EVERY_S = 3.0
-_last_heartbeat_at: float = 0.0
 
 
-async def _broadcast_heartbeat() -> None:
+async def heartbeat_loop():
     """
-    輕量心跳（至多每 3 秒）：前端 stale watchdog 需要穩定的訊息流，
-    才能把「盤後/未登入沒行情（正常）」與「連線假死（要強制重連）」分開。
-    之前只有 PnLUpdate 當心跳，但它在未登入或無持倉時不會發。
+    獨立的 WS 心跳 task（main.py lifespan 啟動）。
+
+    前端 stale watchdog 需要穩定的訊息流，才能把「盤後/未登入沒行情
+    （正常）」與「連線假死（要強制重連）」分開。必須獨立於 pnl 迴圈 ——
+    pnl 迴圈會 await 排在 broker 執行緒上的 list_positions，一個慢的
+    券商呼叫（30 天 kbars、全商品搜尋）就能讓內嵌心跳停發 >12 秒，
+    前端反而把健康的連線誤判成假死、強制重連。
     """
-    global _last_heartbeat_at
-    now = _time.monotonic()
-    if now - _last_heartbeat_at < _HEARTBEAT_EVERY_S or not shared.active_connections:
-        return
-    _last_heartbeat_at = now
-    for conn in list(shared.active_connections):
+    logger.info("★ WS 心跳已啟動（每 %.0fs）" % _HEARTBEAT_EVERY_S)
+    while True:
         try:
-            await asyncio.wait_for(conn.send_text(_HEARTBEAT_MSG), timeout=1.0)
-        except Exception:
-            await shared.drop_connection(conn)
+            await asyncio.sleep(_HEARTBEAT_EVERY_S)
+            if not shared.active_connections:
+                continue
+            for conn in list(shared.active_connections):
+                try:
+                    await asyncio.wait_for(conn.send_text(_HEARTBEAT_MSG), timeout=1.0)
+                except Exception:
+                    await shared.drop_connection(conn)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"heartbeat_loop 錯誤: {e}")
+            await asyncio.sleep(1)
 
 
 def _feed_risk_manager(payload: dict) -> None:
@@ -171,9 +180,6 @@ async def pnl_broadcaster():
             _tick_event.clear()
             await asyncio.sleep(_DEBOUNCE_MS / 1000.0)
             _tick_event.clear()
-
-            # 心跳在任何 early-continue 之前送：未登入/盤後也要維持訊息流
-            await _broadcast_heartbeat()
 
             client = shared.shioaji_client
             if not client or not getattr(client, "_is_connected", False):

@@ -34,6 +34,10 @@ SYNC_INTERVAL_S = float(os.environ.get("LIGHTRADE_ORDER_SYNC_INTERVAL", "2.5"))
 ACTIVE_STATUSES = {"PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"}
 
 _last_fingerprint: str = ""
+# 本 session 已處理過的 fill id（in-memory watermark）：
+# 沒有它，每 2.5 秒會對「當天全部 deals」各打一次 INSERT OR IGNORE，
+# 活躍日尾盤等於每輪數百次無效的 SQLite 寫鎖競爭
+_seen_fill_ids: set = set()
 
 
 def build_working_orders(trades) -> list[dict]:
@@ -145,7 +149,9 @@ async def sync_once() -> dict:
             logger.warning(f"order_sync 向券商同步失敗: {e}")
             return None
 
-    trades = await shared.run_in_broker_thread(_pull)
+    # ★ 走專用 sync executor —— update_status×N + list_trades 每 2.5 秒
+    #   一輪，若與手動下單共用 broker 佇列會造成 head-of-line 延遲尖峰
+    trades = await shared.run_in_sync_thread(_pull)
     if trades is None:
         return {"changed": False, "new_fills": 0}
 
@@ -164,8 +170,12 @@ async def sync_once() -> dict:
         logger.info(f"order_sync: 活躍委託變化 → 推播快照（{len(working)} 筆）")
 
     # 2. 對帳成交（含外部管道）→ journal / 風控 / 前端通知
+    from backend.services.order_guard import fill_side_effects
     new_fills = 0
     for fill in extract_deal_fills(trades):
+        if fill["id"] in _seen_fill_ids:
+            continue  # 本 session 已處理過，不再打 SQLite
+        _seen_fill_ids.add(fill["id"])
         if not trade_journal.insert_fill(fill):
             continue  # journal 已有（本 session callback 已記過）
         new_fills += 1
@@ -175,24 +185,8 @@ async def sync_once() -> dict:
             **fill, "code": fill["symbol"], "quantity": fill["qty"],
             "state": "SyncDeal", "source": "order_sync",
         }})
-        # Bracket 母單成交補償（callback 漏接時）；引擎端 is_triggered 冪等
-        try:
-            if shared.engine:
-                shared.engine.event_bus.on_fill.emit(fill)
-        except Exception:
-            pass
-
-    if new_fills:
-        try:
-            from backend.services import pnl_broadcaster as pb
-            pb.on_fill_event()
-        except Exception:
-            pass
-        try:
-            from backend.services.order_guard import refresh_daily_realized
-            shared.submit_to_broker_thread(refresh_daily_realized)
-        except Exception:
-            pass
+        # 共用副作用：on_fill（bracket 補償）/ PnL 快取作廢 / 已實現重算排程
+        fill_side_effects(fill)
 
     return {"changed": changed, "new_fills": new_fills}
 

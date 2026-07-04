@@ -229,18 +229,9 @@ export function useDOMLogic() {
     } catch (e) {
       const err = normalizeApiError(e);
       setOrderFeedback({ price, action, status: 'error' });
-      // RISK_WARNING → 提供「仍要下單」的 action 按鈕（Sprint 1 後端可回 warning level）
-      if (err.level === 'warning') {
-        toast.warn(err.user_msg, {
-          actionLabel: '仍要下單',
-          onAction: () => {
-            // 未來可附 confirm 旗標到後端；目前 warning 後端尚未支援 bypass，提示即可
-            toast.info('已收到，請手動再次點擊下單以確認');
-          },
-        });
-      } else {
-        toast.error(err.user_msg || '下單失敗');
-      }
+      // WARNING 級風控已改為 409 CONFIRM_REQUIRED，在 sendOrder 內處理
+      // （確認後帶 confirm=true 重送）；到這裡的都是真正的錯誤
+      toast.error(err.user_msg || '下單失敗');
     }
     isOrderPendingRef.current = false;
     feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 800);
