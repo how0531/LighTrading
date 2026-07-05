@@ -121,7 +121,7 @@ const DashboardContent: React.FC = () => {
   const [isFocusMode, setIsFocusMode] = useState(presetDef ? presetDef.focusMode : true);
   // Sprint 11 R1：focus mode 內的 DOM / Chart tab 切換
   const [focusTab, setFocusTab] = useState<'dom' | 'chart'>('dom');
-  const { accountSummary } = useTradingCore();
+  const { accountSummary, riskAlert } = useTradingCore();
   const isLive = accountSummary.is_simulation === false;
   // 桌面版接 Electron auto-updater 事件→Toast；非 Electron 環境會自動 no-op。
   useElectronUpdater();
@@ -187,7 +187,10 @@ const DashboardContent: React.FC = () => {
         <div className="mb-2 -mx-4 px-4 py-1.5 bg-red-700/30 border-y border-red-500/60 flex items-center gap-2 text-red-200 text-xs font-bold">
           <ShieldAlert className="w-4 h-4 flex-shrink-0" />
           <span>
-            風控已停止交易：可能因日虧損達上限。
+            {/* Item 13：WS RiskStatusUpdate 帶真正的熔斷原因；沒有才 fallback 泛用文案 */}
+            {riskAlert?.reason
+              ? `風控已停止交易：${riskAlert.reason}。`
+              : '風控已停止交易：可能因日虧損達上限。'}
             {riskStatus && (
               <>
                 {' 目前損益 '}

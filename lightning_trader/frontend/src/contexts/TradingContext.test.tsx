@@ -334,6 +334,78 @@ describe('TradingContext WS 訊息路由', () => {
     expect(probe.ctx?.watchlistQuotes['2330']?.volume).toBe(1238);
   });
 
+  it('TradeUpdate 成交事件 → recentFills（正規化 + 重複 id 忽略）', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    // Shioaji deal callback 風格欄位（code / quantity / ordno / id）
+    await act(async () => {
+      ws.message({
+        type: 'TradeUpdate',
+        data: { id: 'D1', code: '2330', action: 'Buy', price: 600, quantity: 2, ordno: 'A001' },
+      });
+    });
+    expect(probe.ctx?.recentFills).toHaveLength(1);
+    expect(probe.ctx?.recentFills[0]).toMatchObject({
+      id: 'D1', symbol: '2330', action: 'Buy', price: 600, qty: 2,
+    });
+
+    // 重複 id → 忽略（不新增）
+    await act(async () => {
+      ws.message({
+        type: 'TradeUpdate',
+        data: { id: 'D1', code: '2330', action: 'Buy', price: 600, quantity: 2 },
+      });
+    });
+    expect(probe.ctx?.recentFills).toHaveLength(1);
+
+    // 無 id → compound fallback（order_id#price#qty）；SyncDeal 風格欄位（symbol / qty / order_id）
+    await act(async () => {
+      ws.message({
+        type: 'TradeUpdate',
+        data: { symbol: '2330', action: 'Sell', price: 601, qty: 1, order_id: 'B001' },
+      });
+    });
+    expect(probe.ctx?.recentFills).toHaveLength(2);
+    // 新的在前
+    expect(probe.ctx?.recentFills[0]).toMatchObject({
+      id: 'B001#601#1', symbol: '2330', action: 'Sell', price: 601, qty: 1,
+    });
+
+    // 純狀態回報（無 symbol / qty）不進 recentFills
+    await act(async () => {
+      ws.message({ type: 'TradeUpdate', data: { status: 'Filled' } });
+    });
+    expect(probe.ctx?.recentFills).toHaveLength(2);
+  });
+
+  it('ConnectionState → brokerState 更新；WS 斷線重設為 unknown', async () => {
+    const { ws } = await setup();
+    expect(probe.ctx?.brokerState).toBe('unknown');
+    await act(async () => { ws.open(); });
+
+    // hello frame
+    await act(async () => {
+      ws.message({ type: 'ConnectionState', data: { broker: 'connected' } });
+    });
+    expect(probe.ctx?.brokerState).toBe('connected');
+
+    await act(async () => {
+      ws.message({ type: 'ConnectionState', data: { broker: 'reconnecting' } });
+    });
+    expect(probe.ctx?.brokerState).toBe('reconnecting');
+
+    // 未知值忽略
+    await act(async () => {
+      ws.message({ type: 'ConnectionState', data: { broker: 'weird' } });
+    });
+    expect(probe.ctx?.brokerState).toBe('reconnecting');
+
+    // WS 斷線 → 券商狀態未知
+    await act(async () => { ws.close(); });
+    expect(probe.ctx?.brokerState).toBe('unknown');
+  });
+
   it('斷線重連：指數退避 + jitter 排程', async () => {
     // Math.random = 0.5 → jitter 係數 = 0.8 + 0.5*0.4 = 1.0（確定性延遲）
     vi.spyOn(Math, 'random').mockReturnValue(0.5);

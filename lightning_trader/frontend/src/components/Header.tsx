@@ -32,7 +32,7 @@ interface HeaderProps {
 }
 
 const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode, layoutPreset = 'custom', onSelectPreset }) => {
-  const { isConnected, isTickStale, targetSymbol, subscribe, forceReconnect } = useTradingCore();
+  const { isConnected, isTickStale, brokerState, targetSymbol, subscribe, forceReconnect } = useTradingCore();
   const { totalRealtimePnl } = useQuotes(); // 即時 PnL 跟著 tick 走 → 高頻 context
   const [symInput, setSymInput] = React.useState(targetSymbol);
   const [balance, setBalance] = useState<BalanceState | null>(null);
@@ -75,6 +75,26 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
     if (symInput) subscribe(symInput);
   };
 
+  // Item 11：四級連線狀態燈 — 優先序：WS 斷線 > 券商斷線/重連 > 無 TICK > 正常
+  const brokerTrouble = brokerState === 'reconnecting' || brokerState === 'disconnected';
+  const connLevel: 'offline' | 'broker' | 'notick' | 'online' =
+    !isConnected ? 'offline'
+    : brokerTrouble ? 'broker'
+    : isTickStale ? 'notick'
+    : 'online';
+  const connDotClass = {
+    offline: 'bg-[#EF4444]',
+    broker: 'bg-orange-400 shadow-[0_0_6px_rgba(251,146,60,0.5)]',
+    notick: 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)]',
+    online: 'bg-[#10B981] shadow-[0_0_6px_rgba(16,185,129,0.3)]',
+  }[connLevel];
+  const connLabel = {
+    offline: 'OFFLINE',
+    broker: brokerState === 'reconnecting' ? '券商重連中' : '券商斷線',
+    notick: '無TICK/盤後',
+    online: 'ONLINE',
+  }[connLevel];
+
   return (
     <div className="glass-panel w-full px-5 py-3 rounded-lg flex items-center justify-between border border-slate-700/50 mb-6 transition-all duration-300">
       <div className="flex items-center gap-4">
@@ -82,15 +102,11 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
         <div>
           <h2 className="text-lg font-black tracking-[0.2em] text-white italic transition-transform hover:scale-105 cursor-default font-mono">LIGHTRADE</h2>
           <div className="flex items-center gap-1.5 mt-0.5">
-            <div className={`w-1.5 h-1.5 rounded-full ${
-              !isConnected ? 'bg-[#EF4444]'
-              : isTickStale ? 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)]'
-              : 'bg-[#10B981] shadow-[0_0_6px_rgba(16,185,129,0.3)]'
-            }`}></div>
+            <div className={`w-1.5 h-1.5 rounded-full ${connDotClass}`}></div>
             <span className="text-[10px] text-slate-400 font-mono tracking-widest uppercase font-bold">
-              {!isConnected ? 'OFFLINE' : isTickStale ? 'NO-TICK' : 'ONLINE'}
+              {connLabel}
             </span>
-            {(!isConnected || isTickStale) && (
+            {connLevel !== 'online' && (
               <button
                 type="button"
                 onClick={forceReconnect}

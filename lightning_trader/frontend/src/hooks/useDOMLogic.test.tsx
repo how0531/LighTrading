@@ -55,6 +55,7 @@ const quotesValue: QuotesContextType = {
 function makeCoreValue(): TradingCoreContextType {
   return {
     isConnected: true, isStale: false, isTickStale: false,
+    brokerState: 'connected', recentFills: [], riskAlert: null,
     targetSymbol: '2330', setTargetSymbol: vi.fn(),
     watchSymbols: vi.fn(), setAuxWatch: vi.fn(),
     accountSummary: { '當日交易': 0, '參考損益': 0, positions: [], is_simulation: true, msg_count: 0 },

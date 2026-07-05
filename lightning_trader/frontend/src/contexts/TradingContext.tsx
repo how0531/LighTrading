@@ -7,6 +7,7 @@ import { resolveWsUrl } from '../utils/backendUrl';
 import { computeLocalPnL } from '../utils/pnl';
 import { isActiveOrderStatus } from '../utils/orderStatus';
 import { useToast } from './ToastContext';
+import { playSound } from '../utils/sound';
 
 export interface AccountPosition {
   symbol: string; qty: number; direction: 'Buy' | 'Sell'; price: number; pnl: number; account?: string; raw_qty?: number;
@@ -34,6 +35,16 @@ export interface SmartOrderData {
   trigger_price: number; trigger_condition: string; trailing_offset: number;
   take_profit_price: number; stop_loss_price: number;
   is_active: boolean; is_triggered: boolean; created_at: string; triggered_at?: string;
+}
+// Item 11：券商端連線狀態（後端 ConnectionState 推播；WS 斷線時重設為 unknown）
+export type BrokerState = 'connected' | 'disconnected' | 'reconnecting' | 'unknown';
+// Item 12：正規化後的成交事件（TradeUpdate 驅動的全成通知資料源）
+export interface FillEvent {
+  id: string; symbol: string; action: 'Buy' | 'Sell'; price: number; qty: number;
+}
+// Item 13：風控熔斷即時告警（後端 RiskStatusUpdate 推播）
+export interface RiskAlert {
+  level: 'block' | 'warning'; reason: string; at: number;
 }
 // Sprint 12：watchlist 用的 mini quote（多 symbol 同時跑時不要塞整份 QuoteData）
 export interface MiniQuote {
@@ -74,6 +85,9 @@ export interface TradingCoreContextType {
   isConnected: boolean;
   isStale: boolean;          // 任何訊息都沒收到（連線假死）
   isTickStale: boolean;      // 連線正常但沒 tick（盤後或商品冷門）
+  brokerState: BrokerState;  // Item 11：後端 ↔ 券商（Shioaji）的連線狀態
+  recentFills: FillEvent[];  // Item 12：最近成交事件（新的在前，最多 20 筆）
+  riskAlert: RiskAlert | null; // Item 13：最近一次風控熔斷告警（WS 即時）
   targetSymbol: string; setTargetSymbol: (sym: string) => void;
   watchSymbols: (syms: string[]) => void;
   // Sprint 34：輔助訂閱來源（多圖看盤）。與 watchSymbols 的自選清單取聯集，
@@ -109,6 +123,20 @@ const sameOrders = (a: WorkingOrder[], b: WorkingOrder[]): boolean =>
 
 const ORDER_REFRESH_DEBOUNCE_MS = 500;
 const ORDER_POLL_INTERVAL_MS = 5000;
+const MAX_RECENT_FILLS = 20;         // recentFills 保留筆數
+const MAX_SEEN_FILL_IDS = 500;       // 成交去重 Set 上限（超過砍最舊一半）
+const RISK_TOAST_DEDUPE_MS = 5000;   // 相同熔斷原因 5 秒內不重複 toast
+
+// Set 去重容器封頂：超過上限時刪掉最舊的一半（Set 迭代順序 = 插入順序）
+const trimSet = (set: Set<string>, max: number): void => {
+  if (set.size <= max) return;
+  const it = set.values();
+  for (let i = 0; i < Math.floor(max / 2); i++) {
+    const v = it.next();
+    if (v.done) break;
+    set.delete(v.value);
+  }
+};
 
 export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
@@ -134,6 +162,15 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   // 委託單狀態（部分由 WebSocket OrderUpdate 即時更新，部分由 REST 初始化）
   const [workingOrders, setWorkingOrders] = useState<WorkingOrder[]>([]);
+
+  // Item 11：券商端連線狀態（後端 ConnectionState hello frame + 推播）
+  const [brokerState, setBrokerState] = useState<BrokerState>('unknown');
+  // Item 12：最近成交事件（TradeUpdate 正規化後，新的在前）
+  const [recentFills, setRecentFills] = useState<FillEvent[]>([]);
+  const seenFillIdsRef = useRef<Set<string>>(new Set());
+  // Item 13：風控熔斷即時告警 + toast 去重（相同原因 5 秒內只跳一次）
+  const [riskAlert, setRiskAlert] = useState<RiskAlert | null>(null);
+  const lastRiskToastRef = useRef<{ reason: string; at: number }>({ reason: '', at: 0 });
 
   // 即時損益狀態（後端 WS PnLUpdate 推播）
   const [realtimePositions, setRealtimePositions] = useState<RealtimePosition[]>([]);
@@ -517,6 +554,47 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         } else if (data.type === 'TradeUpdate' && data.data) {
           // 成交回報也觸發一次 REST 同步，確保填協數量正確
           scheduleOrderRefresh();
+          // Item 12：正規化成交 payload → recentFills（全成通知的主要資料源）。
+          // 欄位來源可能是 Shioaji deal callback 或 order_sync SyncDeal，鍵名不一致：
+          // symbol/code、quantity/qty、order_id/ordno、id 有時缺 → compound fallback。
+          const d = data.data as Record<string, unknown>;
+          const fillSymbol = String(d.symbol ?? d.code ?? '').trim().toUpperCase();
+          const fillAction: 'Buy' | 'Sell' =
+            String(d.action ?? '').toLowerCase() === 'sell' ? 'Sell' : 'Buy';
+          const fillPrice = Number(d.price ?? 0);
+          const fillQty = Number(d.quantity ?? d.qty ?? 0);
+          const fillOrderId = String(d.order_id ?? d.ordno ?? '');
+          const fillId = d.id != null && String(d.id) !== ''
+            ? String(d.id)
+            : `${fillOrderId}#${fillPrice}#${fillQty}`;
+          if (fillSymbol && fillQty > 0 && !seenFillIdsRef.current.has(fillId)) {
+            seenFillIdsRef.current.add(fillId);
+            trimSet(seenFillIdsRef.current, MAX_SEEN_FILL_IDS);
+            const fill: FillEvent = {
+              id: fillId, symbol: fillSymbol, action: fillAction, price: fillPrice, qty: fillQty,
+            };
+            setRecentFills((prev) => [fill, ...prev].slice(0, MAX_RECENT_FILLS));
+          }
+        } else if (data.type === 'ConnectionState' && data.data) {
+          // Item 11：後端 ↔ 券商連線狀態（WS accept 後的 hello frame 也走這裡）
+          const b = String(data.data.broker || '');
+          if (b === 'connected' || b === 'disconnected' || b === 'reconnecting') {
+            setBrokerState(b);
+          }
+        } else if (data.type === 'RiskStatusUpdate' && data.data) {
+          // Item 13：風控熔斷即時告警 — 不等 30s 輪詢，WS 到就跳
+          const level: RiskAlert['level'] = data.data.level === 'block' ? 'block' : 'warning';
+          const reason = String(data.data.reason || '風控觸發');
+          const at = Date.now();
+          setRiskAlert({ level, reason, at });
+          if (level === 'block') {
+            const last = lastRiskToastRef.current;
+            if (last.reason !== reason || at - last.at >= RISK_TOAST_DEDUPE_MS) {
+              lastRiskToastRef.current = { reason, at };
+              toast.error(`風控熔斷：${reason}`);
+              playSound('risk_halt');
+            }
+          }
         } else if (data.action === 'subscribe' && data.status === 'success') {
           subscribeRetryCountRef.current = 0;
           if (subscribeRetryTimerRef.current) {
@@ -582,6 +660,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
     ws.onclose = (ev?: CloseEvent) => {
       setIsConnected(false);
+      setBrokerState('unknown'); // Item 11：WS 斷了就不知道券商端狀態，重連後 hello frame 會補
       if (isUnmounted.current) return;
       // 4401 = 後端 token 認證失敗。帶著同一個壞 token 重連只會無限 4401，
       // 停止自動重連並明確告知使用者（設定頁存新 token 時會 forceReconnect）
@@ -755,7 +834,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
 
   // 低頻：連線 / 帳戶 / 委託 + 全部 action（action 皆 useCallback，value 很少換新）
   const coreValue = useMemo<TradingCoreContextType>(() => ({
-    isConnected, isStale, isTickStale,
+    isConnected, isStale, isTickStale, brokerState, recentFills, riskAlert,
     targetSymbol: targetSymbolState, setTargetSymbol,
     watchSymbols, setAuxWatch,
     accountSummary, accounts, activeAccount,
@@ -763,7 +842,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     subscribe, selectAccount, cancelOrder, flattenPosition,
     smartOrders, refreshSmartOrders,
   }), [
-    isConnected, isStale, isTickStale, targetSymbolState, setTargetSymbol,
+    isConnected, isStale, isTickStale, brokerState, recentFills, riskAlert,
+    targetSymbolState, setTargetSymbol,
     watchSymbols, setAuxWatch, accountSummary, accounts, activeAccount,
     workingOrders, refreshOrders, scheduleOrderRefresh, syncAll, forceReconnect,
     subscribe, selectAccount, cancelOrder, flattenPosition,
