@@ -18,15 +18,23 @@ import {
   CandlestickSeries,
   HistogramSeries,
   LineSeries,
+  createSeriesMarkers,
   type IChartApi,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
+  type IPriceLine,
+  type SeriesMarker,
   type CandlestickData,
   type HistogramData,
   type LineData,
   type Time,
+  type MouseEventParams,
 } from 'lightweight-charts';
 import { useQuotes, useTradingCore } from '../contexts/TradingContext';
-import { apiClient } from '../api/client';
+import { useSettings } from '../contexts/SettingsContext';
+import { useToast } from '../contexts/ToastContext';
+import { apiClient, normalizeApiError } from '../api/client';
+import { symbolMatches } from '../utils/instrument';
 import {
   computeSMA as _sma, computeVWAP as _vwap, computeRSI as _rsi,
   computeEMA as _ema, computeBollinger as _boll,
@@ -111,14 +119,30 @@ const IndicatorBtn: React.FC<{ on: boolean; onClick: () => void; label: string; 
   );
 
 const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
-  const { targetSymbol } = useTradingCore();
+  const { targetSymbol, workingOrders, accountSummary, scheduleOrderRefresh } = useTradingCore();
   const { quote, watchlistQuotes } = useQuotes(); // K 線需要 tick 資料
+  const { settings } = useSettings();
+  const { toast } = useToast();
   // 有 symbol prop → 固定該商品；否則跟隨 targetSymbol
   const effSymbol = (symbol ?? targetSymbol) || '';
   const isPinned = !!symbol;
   const mini = isPinned ? watchlistQuotes[effSymbol.toUpperCase()] : undefined;
+  // 互動下單只在「跟隨主商品」時啟用；pinned（多圖宮格）保持純顯示
+  const interactive = !isPinned;
+  const [chartQty, setChartQty] = useState(1);
+  // 讓 subscribeClick 的 handler（mount 一次）讀到最新值，不必每次 re-subscribe
+  const clickStateRef = useRef({
+    symbol: effSymbol,
+    qty: chartQty,
+    price: 0,
+    interactive,
+    confirmNeeded: true,
+    toast,
+    scheduleOrderRefresh,
+  });
 
   const [timeframe, setTimeframe] = useState<Timeframe>('1m');
+  const [barsVersion, setBarsVersion] = useState(0); // kbars 載入完成的訊號（成交標記對齊用）
   // 指標 toggles
   const [showMA20, setShowMA20] = useState(!compact);
   const [showMA60, setShowMA60] = useState(!compact);
@@ -144,6 +168,9 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
   const lastVolRef = useRef<HistogramData<Time> | null>(null);
   // 保留最近的聚合 bars，給指標重算用
   const aggregatedBarsRef = useRef<KBarApi[]>([]);
+  // Sprint B：圖上委託/持倉價格線 + 成交標記
+  const priceLinesRef = useRef<IPriceLine[]>([]);
+  const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
 
   // 初始化圖表（mount 一次）
   useEffect(() => {
@@ -223,6 +250,7 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
 
     chartRef.current = chart;
     candleSeriesRef.current = candle;
+    markersPluginRef.current = createSeriesMarkers(candle, []);
     volSeriesRef.current = vol;
     ma20SeriesRef.current = ma20;
     ma60SeriesRef.current = ma60;
@@ -237,6 +265,8 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
+      markersPluginRef.current = null;
+      priceLinesRef.current = [];
       volSeriesRef.current = null;
       ma20SeriesRef.current = null;
       ma60SeriesRef.current = null;
@@ -291,6 +321,7 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
         lastBarRef.current = candles[candles.length - 1] ?? null;
         lastVolRef.current = vols[vols.length - 1] ?? null;
         aggregatedBarsRef.current = bars;
+        setBarsVersion((v) => v + 1); // 通知成交標記 effect：bars 已就緒可對齊
         applyIndicators(bars);
         chartRef.current?.timeScale().fitContent();
       })
@@ -386,6 +417,163 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
     }
   }, [quote, mini, isPinned, tfMeta.seconds]);
 
+  // ── Sprint B：圖上委託單/持倉均價 價格線 ─────────────────
+  useEffect(() => {
+    const candle = candleSeriesRef.current;
+    if (!candle) return;
+    for (const line of priceLinesRef.current) {
+      try { candle.removePriceLine(line); } catch { /* chart 卸載中 */ }
+    }
+    priceLinesRef.current = [];
+    if (!interactive || !effSymbol) return;
+
+    const lines: IPriceLine[] = [];
+    // 持倉均價：金色虛線
+    const pos = (accountSummary.positions || []).find((p) => symbolMatches(effSymbol, p.symbol));
+    if (pos && pos.price > 0) {
+      lines.push(candle.createPriceLine({
+        price: pos.price,
+        color: '#D4AF37',
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: `${pos.direction === 'Buy' ? '多' : '空'}${pos.qty} 成本`,
+      }));
+    }
+    // 活躍委託：買紅/賣綠實線，標示（已成交/總量）
+    for (const o of workingOrders) {
+      if (!symbolMatches(effSymbol, o.symbol) || !(o.price > 0)) continue;
+      const isBuy = o.action === 'Buy';
+      const filled = o.filled_qty > 0 ? `${o.filled_qty}/` : '';
+      lines.push(candle.createPriceLine({
+        price: o.price,
+        color: isBuy ? PNL_COLOR_UP : PNL_COLOR_DOWN,
+        lineWidth: 1,
+        lineStyle: 0,
+        axisLabelVisible: true,
+        title: `${isBuy ? '買' : '賣'}${filled}${o.qty}`,
+      }));
+    }
+    priceLinesRef.current = lines;
+  }, [interactive, effSymbol, workingOrders, accountSummary.positions]);
+
+  // ── Sprint B：當日成交箭頭標記（買上/賣下）────────────────
+  useEffect(() => {
+    const plugin = markersPluginRef.current;
+    if (!plugin) return;
+    if (!interactive || !effSymbol) { plugin.setMarkers([]); return; }
+    let cancelled = false;
+    apiClient.get('/order_history')
+      .then((res) => {
+        if (cancelled || !markersPluginRef.current) return;
+        const bars = aggregatedBarsRef.current;
+        if (!bars.length) { markersPluginRef.current.setMarkers([]); return; }
+        const firstBar = bars[0].time;
+        const lastBar = bars[bars.length - 1].time;
+        interface HistOrder {
+          symbol: string; action: string; price: number; qty: number;
+          status: string; filled_qty: number; filled_avg_price: number; time: string;
+        }
+        const orders = ((res.data?.orders || []) as HistOrder[])
+          .filter((o) => symbolMatches(effSymbol, o.symbol)
+            && (o.status === 'Filled' || (o.filled_qty ?? 0) > 0));
+        const markers: SeriesMarker<Time>[] = [];
+        for (const o of orders) {
+          const parsed = Date.parse(o.time) / 1000;
+          if (!Number.isFinite(parsed)) continue;
+          // 對齊 bar bucket 並夾進現有資料範圍（時區/盤別偏差時退到最近的 bar）
+          let t = alignToBucket(parsed, tfMeta.seconds);
+          if (t < firstBar) t = firstBar;
+          if (t > lastBar) t = lastBar;
+          const isBuy = o.action === 'Buy';
+          markers.push({
+            time: t as Time,
+            position: isBuy ? 'belowBar' : 'aboveBar',
+            shape: isBuy ? 'arrowUp' : 'arrowDown',
+            color: isBuy ? PNL_COLOR_UP : PNL_COLOR_DOWN,
+            text: `${isBuy ? 'B' : 'S'}${o.filled_qty || o.qty}`,
+          });
+        }
+        markers.sort((a, b) => Number(a.time) - Number(b.time));
+        markersPluginRef.current.setMarkers(markers);
+      })
+      .catch(() => { /* 未登入等情況：不畫標記 */ });
+    return () => { cancelled = true; };
+  }, [interactive, effSymbol, tfMeta.seconds, workingOrders, barsVersion]);
+
+  // ── Sprint B：點擊圖表下單（現價下=掛買、上=掛賣）─────────
+  // clickStateRef 每 render 更新，click handler 只在 mount 訂閱一次
+  useEffect(() => {
+    clickStateRef.current = {
+      symbol: effSymbol,
+      qty: chartQty,
+      price: (isPinned ? (mini?.price ?? 0) : (quote?.Price ?? 0)) || 0,
+      interactive,
+      confirmNeeded: settings.confirmations.placeOrder && !settings.isCombatMode,
+      toast,
+      scheduleOrderRefresh,
+    };
+  });
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candle = candleSeriesRef.current;
+    if (!chart || !candle) return;
+
+    const onClick = (param: MouseEventParams<Time>) => {
+      const st = clickStateRef.current;
+      if (!st.interactive || !st.symbol || !param.point) return;
+      const raw = candle.coordinateToPrice(param.point.y);
+      if (raw == null || !(raw > 0)) return;
+      if (!(st.price > 0)) {
+        st.toast.warn('尚無現價，無法判斷買賣方向');
+        return;
+      }
+      const px = Number(raw.toFixed(2));
+      const action: 'Buy' | 'Sell' = px <= st.price ? 'Buy' : 'Sell';
+      const dir = action === 'Buy' ? '買進' : '賣出';
+      // 與 useDOMLogic 一致：前端確認過即帶 confirm:true 授權後端 WARNING；
+      // 戰鬥模式不預先授權，收到 409 再問一次
+      let preConfirmed = false;
+      if (st.confirmNeeded) {
+        if (!window.confirm(`確認${dir} ${st.symbol} ${st.qty} 單位 @ ${px}？（圖表下單）`)) return;
+        preConfirmed = true;
+      }
+      const payload = {
+        symbol: st.symbol, price: px, action, qty: st.qty,
+        order_type: 'ROD', price_type: 'LMT', order_cond: 'Cash', order_lot: 'Common',
+        ...(preConfirmed ? { confirm: true } : {}),
+      };
+      apiClient.post('/place_order', payload)
+        .then(() => {
+          st.toast.success(`圖表下單：${dir} ${st.qty} @ ${px}`);
+          st.scheduleOrderRefresh();
+        })
+        .catch(async (e) => {
+          const err = normalizeApiError(e);
+          if (err.status === 409 && err.code === 'CONFIRM_REQUIRED') {
+            const msg = [err.user_msg, ...(err.warnings ?? [])].filter(Boolean).join('\n');
+            if (window.confirm(msg)) {
+              try {
+                await apiClient.post('/place_order', { ...payload, confirm: true });
+                st.toast.success(`圖表下單：${dir} ${st.qty} @ ${px}`);
+                st.scheduleOrderRefresh();
+              } catch (e2) {
+                st.toast.error(normalizeApiError(e2).user_msg || '圖表下單失敗');
+              }
+            } else {
+              st.toast.info('已取消下單');
+            }
+            return;
+          }
+          st.toast.error(err.user_msg || '圖表下單失敗');
+        });
+    };
+
+    chart.subscribeClick(onClick);
+    return () => { chart.unsubscribeClick(onClick); };
+  }, []);
+
   const indicatorButtons = (
     <>
       <IndicatorBtn on={showMA20} onClick={() => setShowMA20((v) => !v)} label="MA20" title="20 期簡單移動平均"
@@ -444,11 +632,26 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
               <div className="w-px h-4 bg-slate-700 mx-1" />
             </>
           )}
+          {interactive && !compact && (
+            <label className="flex items-center gap-1 ml-1" title="圖表點擊下單口數">
+              <span className="text-[9px] text-slate-500 font-bold">口數</span>
+              <input
+                type="number" min={1} max={499} value={chartQty}
+                onChange={(e) => setChartQty(Math.max(1, Math.min(499, parseInt(e.target.value || '1', 10) || 1)))}
+                className="w-11 bg-[#101623] border border-slate-700 rounded text-right text-slate-200 text-[10px] px-1 py-0.5"
+              />
+            </label>
+          )}
           {timeframeButtons}
         </div>
       </div>
-      <div className="flex-1 min-h-0">
+      <div className="flex-1 min-h-0 relative">
         <div ref={containerRef} className="w-full h-full" />
+        {interactive && (
+          <div className="absolute bottom-1 left-1 z-10 text-[9px] text-slate-600 pointer-events-none select-none">
+            點擊圖面掛限價單（現價下=買 / 上=賣）
+          </div>
+        )}
       </div>
     </div>
   );
