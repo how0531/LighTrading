@@ -456,6 +456,8 @@ def test_ws_watch_ack_returns_canonical_aliases():
     watch ack 必須回報對應關係，否則前端對不上 key、報價永遠不顯示。"""
     import json as _json
     with client.websocket_connect("/ws/quotes") as ws:
+        hello = ws.receive_json()   # 連線後第一個 frame 是 ConnectionState hello
+        assert hello["type"] == "ConnectionState"
         ws.send_text(_json.dumps({"action": "watch", "symbols": ["1101", "2330"]}))
         msg = ws.receive_json()
         assert msg["status"] == "success" and msg["action"] == "watch"
@@ -556,6 +558,81 @@ def test_update_order_not_found_returns_structured_error():
     assert "找不到對應的委託" in detail["user_msg"]
 
 
+# ─── 13. UX batch 2：連線狀態推播 / 熔斷即時廣播 / 盤後 watchdog ───
+
+def test_ws_hello_frame_reports_broker_connection_state():
+    """WS 連上後第一個 frame 必須是 ConnectionState hello（晚加入的客戶端
+    才能立即同步券商連線狀態，不用等下一次狀態變化）。"""
+    with client.websocket_connect("/ws/quotes") as ws:
+        msg = ws.receive_json()
+        assert msg["type"] == "ConnectionState"
+        assert msg["data"]["broker"] == "connected"   # fixture 設 _is_connected=True
+
+
+def test_risk_breach_emits_risk_status_update_to_broadcast_queue():
+    """on_risk_breach 除了 webhook dispatcher 外，必須同時廣播
+    RiskStatusUpdate 給前端（熔斷告警即時可見）。"""
+    import asyncio
+
+    async def run():
+        old_loop = shared.fastapi_loop
+        shared.fastapi_loop = asyncio.get_running_loop()
+        try:
+            while not shared.quotes_to_broadcast.empty():
+                shared.quotes_to_broadcast.get_nowait()
+            shared.engine.event_bus.on_risk_breach.emit("block", "測試熔斷")
+            await asyncio.sleep(0.05)   # 讓 call_soon_threadsafe 消化
+            msgs = []
+            while not shared.quotes_to_broadcast.empty():
+                msgs.append(shared.quotes_to_broadcast.get_nowait())
+            return msgs
+        finally:
+            shared.fastapi_loop = old_loop
+
+    msgs = asyncio.run(run())
+    updates = [m for m in msgs if m["type"] == "RiskStatusUpdate"]
+    assert updates, f"沒有 RiskStatusUpdate 進佇列: {msgs}"
+    assert updates[0]["data"]["level"] == "block"
+    assert updates[0]["data"]["reason"] == "測試熔斷"
+
+
+def test_in_quote_session_handles_cross_midnight_and_security_type():
+    """盤後 watchdog 修復核心：_in_quote_session 必須正確處理
+    STK/期貨時段表切換與 TAIFEX 夜盤 15:00–05:00 跨午夜區間。"""
+    from datetime import datetime as _dt
+    from types import SimpleNamespace
+
+    sj = shared.shioaji_client
+    old_contract = sj.current_contract
+    try:
+        # 無合約 → 一律 False（沒有行情可等）
+        sj.current_contract = None
+        assert sj._in_quote_session() is False
+
+        def at(h, m):
+            return _dt(2026, 7, 3, h, m)
+
+        # 期貨（security_type != 'STK'）→ TAIFEX 日盤 + 夜盤
+        sj.current_contract = SimpleNamespace(symbol="TXFG6", security_type="FUT")
+        assert sj._in_quote_session(now=at(9, 0)) is True      # 日盤中
+        assert sj._in_quote_session(now=at(13, 45)) is True    # 日盤收盤邊界
+        assert sj._in_quote_session(now=at(14, 30)) is False   # 日夜盤之間
+        assert sj._in_quote_session(now=at(23, 59)) is True    # 夜盤（跨午夜前）
+        assert sj._in_quote_session(now=at(3, 0)) is True      # 夜盤（跨午夜後）
+        assert sj._in_quote_session(now=at(5, 0)) is True      # 夜盤收盤邊界
+        assert sj._in_quote_session(now=at(6, 0)) is False     # 夜盤結束後
+
+        # 股票（'STK'）→ 只有 TSE 日盤，夜間一律 False（盤後不得觸發 watchdog）
+        sj.current_contract = SimpleNamespace(symbol="2330", security_type="STK")
+        assert sj._in_quote_session(now=at(10, 0)) is True
+        assert sj._in_quote_session(now=at(8, 50)) is False    # 開盤前
+        assert sj._in_quote_session(now=at(14, 0)) is False    # 收盤後
+        assert sj._in_quote_session(now=at(23, 0)) is False    # 深夜
+        assert sj._in_quote_session(now=at(3, 0)) is False     # 凌晨
+    finally:
+        sj.current_contract = old_contract
+
+
 # ─── 12. API Token 認證（最後執行：會 reload main） ──────────
 
 def test_zz_api_token_auth():
@@ -578,6 +655,8 @@ def test_zz_api_token_auth():
 
         # WebSocket：帶對 token 才握手成功
         with c.websocket_connect("/ws/quotes?token=test-token-123") as ws:
+            hello = ws.receive_json()   # 第一個 frame 是 ConnectionState hello
+            assert hello["type"] == "ConnectionState"
             ws.send_text('{"action":"subscribe","symbol":"2330"}')
             msg = ws.receive_json()
             assert msg["status"] in ("success", "error")  # 未登入回 error，但代表已通過認證

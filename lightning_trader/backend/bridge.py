@@ -201,6 +201,26 @@ def on_smart_order_update(order_data: dict):
         logger.error(f"廣播智慧單回報時發生錯誤: {e}")
 
 
+def on_connection_state(state: str):
+    """券商連線狀態推播（connected / disconnected / reconnecting）"""
+    try:
+        msg_item = {"type": "ConnectionState", "data": {"broker": state}}
+        if shared.fastapi_loop:
+            shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg_item)
+    except Exception as e:
+        logger.error(f"廣播連線狀態時發生錯誤: {e}")
+
+
+def on_risk_breach_ws(level: str, message: str):
+    """風控熔斷/警示即時推播（與 webhook dispatcher 並存的第二個消費者）"""
+    try:
+        msg_item = {"type": "RiskStatusUpdate", "data": {"level": level, "reason": message}}
+        if shared.fastapi_loop:
+            shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg_item)
+    except Exception as e:
+        logger.error(f"廣播風控警示時發生錯誤: {e}")
+
+
 def wire_callbacks():
     """
     連接所有 Shioaji 回呼。在 main.py 初始化 engine 後呼叫一次。
@@ -222,6 +242,10 @@ def wire_callbacks():
         eng.event_bus.on_risk_breach.connect(on_risk_breach)
     except Exception as e:
         logger.warning(f"無法連接 risk_breach → alert_dispatcher: {e}")
+    # ★ UX batch 2：risk_breach → WebSocket 即時廣播（與 webhook 並存）
+    eng.event_bus.on_risk_breach.connect(on_risk_breach_ws)
+    # ★ UX batch 2：券商連線狀態 → WebSocket（之前 on_connection_state 零消費者）
+    eng.event_bus.on_connection_state.connect(on_connection_state)
 
     # 高頻報價使用直接回呼（繞過 Signal）
     client._direct_quote_callback = on_shioaji_quote

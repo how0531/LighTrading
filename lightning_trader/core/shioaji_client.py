@@ -10,6 +10,7 @@ from .symbol_resolver import SymbolResolver
 import json
 import logging
 import time
+from datetime import datetime, time as dtime
 from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -62,9 +63,34 @@ class ShioajiClient:
         self.check_connection()
         self._start_reconnect_timer()
 
+    def _in_quote_session(self, now: Optional[datetime] = None) -> bool:
+        """判斷 current_contract 此刻是否在行情時段內。
+
+        - 'STK' → TSE 日盤；其餘（期貨/選擇權）→ TAIFEX 日盤+夜盤
+          （與 place_order 選帳號用同一個 security_type 判別）
+        - 夜盤 15:00–05:00 跨午夜：start > end 時，now >= start 或 now <= end 即在盤中
+        - 沒有訂閱合約 → False（沒有行情可等，watchdog 不該觸發）
+        """
+        contract = self.current_contract
+        if contract is None:
+            return False
+        sec_type = getattr(contract, "security_type", None)
+        sessions = Config.TSE_SESSIONS if sec_type == 'STK' else Config.TAIFEX_SESSIONS
+        now_t = (now or datetime.now()).time()
+        for start_s, end_s in sessions:
+            start = dtime(*(int(x) for x in start_s.split(":")))
+            end = dtime(*(int(x) for x in end_s.split(":")))
+            if start <= end:
+                if start <= now_t <= end:
+                    return True
+            else:  # 跨午夜（例如 15:00 → 翌日 05:00）
+                if now_t >= start or now_t <= end:
+                    return True
+        return False
+
     def check_connection(self):
         if getattr(self, '_is_reconnecting', False): return
-        
+
         # 1. 檢查帳戶清單 API 存取
         api_ok = False
         if self._is_connected:
@@ -76,9 +102,12 @@ class ShioajiClient:
                 
         # 2. 檢查 Watchdog (最後收到行情封包的時間)
         # 縮短為 15 秒：當沖場景每秒都有 tick，超過 15 秒沒任何封包就視為靜默斷線
+        # ★ 盤後（收盤～開盤間）本來就沒有 tick —— 只在行情時段內才把靜默視為斷線，
+        #   否則盤後每 ~20 秒重登一次、整夜無限迴圈。list_accounts 檢查仍然照跑，
+        #   真正的 session 死亡在盤後一樣抓得到。
         watchdog_timeout = 15
         is_stale = False
-        if api_ok and self.current_contract and self._is_connected:
+        if api_ok and self.current_contract and self._is_connected and self._in_quote_session():
             elapsed = time.time() - getattr(self, 'last_message_time', time.time())
             if elapsed > watchdog_timeout:
                 logger.warning(f"Watchdog 觸發：超過 {watchdog_timeout} 秒未收到報價，疑似靜默斷線 (elapsed={elapsed:.1f}s)")
@@ -96,6 +125,11 @@ class ShioajiClient:
 
     def _attempt_reconnect(self):
         self._is_reconnecting = True
+        if self.event_bus:
+            try:
+                self.event_bus.on_connection_state.emit("reconnecting")
+            except Exception:
+                pass
         threading.Timer(5.0, self._do_login_reconnect).start()
 
     def _do_login_reconnect(self):

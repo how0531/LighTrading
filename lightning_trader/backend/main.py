@@ -334,6 +334,14 @@ async def websocket_quotes(websocket: WebSocket):
     await websocket.accept()
     shared.active_connections.add(websocket)
     logger.info(f"新的 WebSocket 客戶端已連接, 當前連接數: {len(shared.active_connections)}")
+    # ★ hello frame：晚加入的客戶端立即同步券商連線狀態（只發給這條連線）
+    try:
+        await websocket.send_text(json.dumps({
+            "type": "ConnectionState",
+            "data": {"broker": "connected" if shared.shioaji_client._is_connected else "disconnected"},
+        }))
+    except Exception as e:
+        logger.debug(f"發送 ConnectionState hello 失敗: {e}")
     try:
         while True:
             data = await websocket.receive_text()
