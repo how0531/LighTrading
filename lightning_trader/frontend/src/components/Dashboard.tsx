@@ -29,6 +29,8 @@ const TimeSalesPanel        = lazy(() => import('./TimeSalesPanel'));
 const MoversPanel           = lazy(() => import('./MoversPanel'));
 // Sprint 18：hotkey 速查表（非 lazy；很小、且 ? 觸發要永遠 mounted）
 import { HotkeyCheatSheet } from './HotkeyCheatSheet';
+// UX 批次 4：盤後 / 斷線狀態細橫幅（非 lazy；要在首屏立即反映連線狀態）
+import { ConnectionBanner } from './ConnectionBanner';
 import { ErrorBoundary } from './ErrorBoundary';
 import { TradingProvider, useTradingCore } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
@@ -207,6 +209,8 @@ const DashboardContent: React.FC = () => {
           </span>
         </div>
       )}
+      {/* UX 批次 4 Item 2：WS 斷線（紅）/ 券商重連（橘）/ 盤後無行情（灰）細橫幅 */}
+      <ConnectionBanner />
       <Header
         onOpenSettings={() => setIsSettingsOpen(true)}
         isLayoutLocked={isLayoutLocked}
@@ -215,6 +219,7 @@ const DashboardContent: React.FC = () => {
         onToggleFocusMode={() => setIsFocusMode(!isFocusMode)}
         layoutPreset={activePreset}
         onSelectPreset={applyPreset}
+        riskStatus={riskStatus}
       />
 
       {isFocusMode ? (

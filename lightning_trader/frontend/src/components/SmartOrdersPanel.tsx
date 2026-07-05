@@ -12,13 +12,23 @@
 import React, { useEffect, useState } from 'react';
 import { X, Zap, TrendingDown, Plus } from 'lucide-react';
 import { apiClient } from '../api/client';
-import { useTradingCore } from '../contexts/TradingContext';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
 import { useApiErrorToast } from '../hooks/useApiErrorToast';
-import { formatPrice } from '../utils/instrument';
+import { formatPrice, getTickSize } from '../utils/instrument';
+
+// UX 批次 4 Item 7：OCO / BRACKET 表單預填 — 現價 ∓ N tick 的建議值
+const PREFILL_TICKS = 10;
+
+/** 價格貼齊該商品的 tick 級距（避免 ±1% 算出不合法檔位） */
+function roundToTick(price: number, symbol: string): number {
+  const tick = getTickSize(price, symbol);
+  return Math.round(Math.round(price / tick) * tick * 100) / 100;
+}
 
 const SmartOrdersPanel: React.FC = () => {
   const { smartOrders, refreshSmartOrders, subscribe, targetSymbol } = useTradingCore();
+  const { quote } = useQuotes(); // Item 7：預填建議值需要現價
   const { toast } = useToast();
   const handleApiError = useApiErrorToast();
   // 新增智慧單表單（移停 / OCO / Bracket）
@@ -33,6 +43,36 @@ const SmartOrdersPanel: React.FC = () => {
 
   // mount 拉一次；之後靠 WS SmartOrderUpdate 增量同步（TradingContext 已接好）
   useEffect(() => { refreshSmartOrders(); }, [refreshSmartOrders]);
+
+  // Item 7：現價（無成交時退回參考價）
+  const curPrice = (quote?.Price ?? 0) > 0 ? quote!.Price : (quote?.Reference ?? 0);
+  // 停利在上/停損在下？OCO 的 action 是「平倉方向」（Sell=多頭出場 → 停利在上）；
+  // BRACKET 的 action 是「進場方向」（Buy 進場 → 停利在上）。
+  const tpAbove = addType === 'BRACKET' ? addAction === 'Buy' : addAction === 'Sell';
+
+  // 停損/停利欄位空白（=0）時，以現價 ∓ PREFILL_TICKS 個 tick 預填建議值。
+  // render 期 guarded setState（React 官方 derived-state 模式，與 useDOMLogic 一致）：
+  // 填入後條件即不成立，不會 loop；欄位被清空時會再以最新現價補建議值。
+  if (showAdd && (addType === 'OCO' || addType === 'BRACKET') && curPrice > 0 && targetSymbol) {
+    const tick = getTickSize(curPrice, targetSymbol);
+    if (addTP === 0) {
+      setAddTP(roundToTick(curPrice + (tpAbove ? 1 : -1) * PREFILL_TICKS * tick, targetSymbol));
+    }
+    if (addSL === 0) {
+      setAddSL(roundToTick(curPrice + (tpAbove ? -1 : 1) * PREFILL_TICKS * tick, targetSymbol));
+    }
+    if (addType === 'BRACKET' && addEntry === 0) {
+      setAddEntry(roundToTick(curPrice, targetSymbol));
+    }
+  }
+
+  // 一鍵「現價±1%」：direction-aware 覆寫停利/停損（貼齊 tick）
+  const applyOnePct = () => {
+    if (!(curPrice > 0) || !targetSymbol) { toast.warn('尚無現價，無法帶入 ±1%'); return; }
+    setAddTP(roundToTick(curPrice * (tpAbove ? 1.01 : 0.99), targetSymbol));
+    setAddSL(roundToTick(curPrice * (tpAbove ? 0.99 : 1.01), targetSymbol));
+    if (addType === 'BRACKET' && addEntry === 0) setAddEntry(roundToTick(curPrice, targetSymbol));
+  };
 
   const submitSmart = async () => {
     if (!targetSymbol) { toast.error('請先選定商品'); return; }
@@ -182,6 +222,19 @@ const SmartOrdersPanel: React.FC = () => {
                   className="w-16 bg-[#101623] border border-slate-700 rounded text-right text-slate-200 px-1 py-0.5"
                 />
               </label>
+              {/* Item 7：一鍵以現價 ±1% 帶入停利/停損（依方向自動決定上下） */}
+              <button
+                onClick={applyOnePct}
+                disabled={!(curPrice > 0)}
+                className={`px-1.5 py-0.5 rounded text-[10px] font-bold border transition-colors ${
+                  curPrice > 0
+                    ? 'bg-slate-800 hover:bg-slate-700 text-slate-300 border-slate-600 cursor-pointer'
+                    : 'bg-slate-900 text-slate-600 border-slate-800 cursor-not-allowed'
+                }`}
+                title={curPrice > 0 ? `以現價 ${formatPrice(curPrice, targetSymbol)} 的 ±1% 帶入停利/停損` : '尚無現價'}
+              >
+                現價±1%
+              </button>
             </>
           )}
           <button

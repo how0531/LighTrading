@@ -244,3 +244,81 @@ describe('useDOMLogic 前端確認（非戰鬥模式）', () => {
     expect(mockedPost).not.toHaveBeenCalled();
   });
 });
+
+// ─── UX 批次 4 Item 8：追買 / 追賣 / 市價熱鍵 ────────────────
+
+const quotesWithBook: QuotesContextType = {
+  ...quotesValue,
+  bidAsk: {
+    Symbol: '2330',
+    BidPrice: [99.5], BidVolume: [10],
+    AskPrice: [100.5], AskVolume: [8],
+    Time: '09:00:00',
+  },
+};
+
+const wrapperWithBook = ({ children }: { children: React.ReactNode }) => (
+  <ToastProvider>
+    <SettingsProvider>
+      <TradingCoreContext.Provider value={coreValue}>
+        <QuotesContext.Provider value={quotesWithBook}>
+          {children}
+        </QuotesContext.Provider>
+      </TradingCoreContext.Provider>
+    </SettingsProvider>
+  </ToastProvider>
+);
+
+describe('useDOMLogic 追價 / 市價熱鍵', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    // 戰鬥模式：一鍵直送，聚焦驗證 payload
+    localStorage.setItem('lightrade_settings', JSON.stringify({ isCombatMode: true }));
+    coreValue = makeCoreValue();
+    vi.clearAllMocks();
+    mockConfirm.mockReset();
+    mockedPost.mockResolvedValue({ data: {} });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('追買：以賣一價掛買（限價）', async () => {
+    const { result } = renderHook(() => useDOMLogic(), { wrapper: wrapperWithBook });
+    await act(async () => { await result.current.handleChaseOrder('Buy'); });
+    expect(mockedPost).toHaveBeenCalledTimes(1);
+    expect(mockedPost).toHaveBeenCalledWith('/place_order',
+      expect.objectContaining({ symbol: '2330', price: 100.5, action: 'Buy', price_type: 'LMT' }));
+  });
+
+  it('追賣：以買一價掛賣（限價）', async () => {
+    const { result } = renderHook(() => useDOMLogic(), { wrapper: wrapperWithBook });
+    await act(async () => { await result.current.handleChaseOrder('Sell'); });
+    expect(mockedPost).toHaveBeenCalledWith('/place_order',
+      expect.objectContaining({ symbol: '2330', price: 99.5, action: 'Sell', price_type: 'LMT' }));
+  });
+
+  it('市價熱鍵：price=0 + price_type MKT，且不改使用者的 priceType 選單', async () => {
+    const { result } = renderHook(() => useDOMLogic(), { wrapper: wrapperWithBook });
+    await act(async () => { await result.current.handleMarketOrder('Sell'); });
+    expect(mockedPost).toHaveBeenCalledWith('/place_order',
+      expect.objectContaining({ price: 0, action: 'Sell', price_type: 'MKT' }));
+    expect(result.current.priceType).toBe('LMT'); // 選單狀態不被市價熱鍵污染
+  });
+
+  it('無賣一價（bidAsk 缺）→ 追買不送單', async () => {
+    const { result } = renderHook(() => useDOMLogic(), { wrapper }); // bidAsk: null
+    await act(async () => { await result.current.handleChaseOrder('Buy'); });
+    expect(mockedPost).not.toHaveBeenCalled();
+  });
+
+  it('非戰鬥模式：追買也要走確認流（拒絕 → 不送單）', async () => {
+    localStorage.clear(); // 回到預設（confirmations.placeOrder=true, 非戰鬥）
+    mockConfirm.mockResolvedValue(false);
+    const { result } = renderHook(() => useDOMLogic(), { wrapper: wrapperWithBook });
+    await act(async () => { await result.current.handleChaseOrder('Buy'); });
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+    expect(mockedPost).not.toHaveBeenCalled();
+  });
+});

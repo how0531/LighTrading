@@ -20,6 +20,11 @@ const ACTION_LABEL: Record<string, string> = {
   CancelAll:    '全部刪單（兩側）',
   Flatten:      '一鍵平倉（先撤兩側）',
   ScrollCenter: 'DOM 捲到當前價',
+  // UX 批次 4 Item 8
+  ChaseBuy:     '追買（以賣一價掛買）',
+  ChaseSell:    '追賣（以買一價掛賣）',
+  MarketBuy:    '市價買進',
+  MarketSell:   '市價賣出',
 };
 
 const STATIC_HOTKEYS: Array<{ keys: string; label: string }> = [

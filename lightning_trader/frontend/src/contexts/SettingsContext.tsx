@@ -26,9 +26,12 @@ export interface SizingSettings {
 }
 
 // 快捷鍵行為定義
+// UX 批次 4 Item 8：新增追買（賣一價掛買）/ 追賣（買一價掛賣）/ 市價買賣。
+// 「市價單送出」拆成買/賣兩個 action —— 無方向的市價熱鍵在交易終端太危險。
 export interface HotkeyItem {
   key: string;          // e.g. "F1", "Escape", "q", " "
-  action: 'Buy' | 'Sell' | 'CancelAll' | 'Flatten' | 'ScrollCenter';
+  action: 'Buy' | 'Sell' | 'CancelAll' | 'Flatten' | 'ScrollCenter'
+        | 'ChaseBuy' | 'ChaseSell' | 'MarketBuy' | 'MarketSell';
   label: string;
 }
 
@@ -127,6 +130,11 @@ const DEFAULT_SETTINGS: Settings = {
     { key: 'Escape', action: 'CancelAll',    label: '全刪掛單' },
     { key: 'Delete', action: 'Flatten',      label: '全部平倉' },
     { key: ' ',      action: 'ScrollCenter', label: '置中 (捲動到現價)' },
+    // UX 批次 4 Item 8
+    { key: 'q',      action: 'ChaseBuy',     label: '追買 (賣一價掛買)' },
+    { key: 'w',      action: 'ChaseSell',    label: '追賣 (買一價掛賣)' },
+    { key: 'a',      action: 'MarketBuy',    label: '市價買進' },
+    { key: 's',      action: 'MarketSell',   label: '市價賣出' },
   ],
   splitOrder: {
     enabled: false,
@@ -158,6 +166,21 @@ const DEFAULT_SETTINGS: Settings = {
   layoutPreset: 'custom',
 };
 
+/** 舊版（localStorage / 後端）存的 hotkeys 沒有新 action（追買/追賣/市價）
+ *  → 用預設補齊缺少的 action；使用者已占用的按鍵不覆蓋（避免衝突）。 */
+function mergeHotkeys(saved: unknown): HotkeyItem[] {
+  const base = Array.isArray(saved)
+    ? (saved as HotkeyItem[]).filter((h) => h && typeof h.key === 'string' && typeof h.action === 'string')
+    : [];
+  if (base.length === 0) return DEFAULT_SETTINGS.hotkeys;
+  const existingActions = new Set(base.map((h) => h.action));
+  const usedKeys = new Set(base.map((h) => h.key));
+  const additions = DEFAULT_SETTINGS.hotkeys.filter(
+    (d) => !existingActions.has(d.action) && !usedKeys.has(d.key),
+  );
+  return additions.length > 0 ? [...base, ...additions] : base;
+}
+
 interface SettingsContextType {
   settings: Settings;
   updateSetting: (updates: Partial<Settings> | ((prev: Settings) => Settings)) => void;
@@ -181,7 +204,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ...parsed,
           confirmations: { ...DEFAULT_SETTINGS.confirmations, ...parsed.confirmations },
           visuals: { ...DEFAULT_SETTINGS.visuals, ...parsed.visuals },
-          hotkeys: parsed.hotkeys || DEFAULT_SETTINGS.hotkeys,
+          hotkeys: mergeHotkeys(parsed.hotkeys),
           splitOrder: { ...DEFAULT_SETTINGS.splitOrder, ...parsed.splitOrder },
           qtyBySymbol: { ...DEFAULT_SETTINGS.qtyBySymbol, ...(parsed.qtyBySymbol || {}) },
           notifications: {
@@ -216,7 +239,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ...remote,
           confirmations: { ...prev.confirmations, ...(remote.confirmations || {}) },
           visuals: { ...prev.visuals, ...(remote.visuals || {}) },
-          hotkeys: remote.hotkeys || prev.hotkeys,
+          hotkeys: mergeHotkeys(remote.hotkeys || prev.hotkeys),
           splitOrder: { ...prev.splitOrder, ...(remote.splitOrder || {}) },
           sizing: { ...prev.sizing, ...(remote.sizing || {}) },
           fees: { ...prev.fees, ...(remote.fees || {}) },

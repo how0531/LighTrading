@@ -14,6 +14,8 @@ export interface QuoteData {
   TickTime: string;
   TickType?: number;
   Action: string;
+  /** 前端指派的單調序號（僅 quoteHistory 內的項目有）：tape 列的穩定 React key */
+  Seq?: number;
 }
 
 export interface BidAskData {

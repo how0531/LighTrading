@@ -28,6 +28,12 @@ export interface SplitProgress {
   aborted: boolean;
 }
 
+/** 拖曳改價進行中（UX 批次 4 Item 6）：舊價位掛單標籤顯示「改價中」樣式 */
+export interface ReplacingOrder {
+  price: number;
+  action: 'Buy' | 'Sell';
+}
+
 export function useDOMLogic() {
   // 低頻：連線 / 帳戶 / 委託 / actions
   const {
@@ -63,6 +69,9 @@ export function useDOMLogic() {
   const [splitProgress, setSplitProgress] = useState<SplitProgress | null>(null);
   const splitAbortRef = useRef(false);
   const abortSplit = useCallback(() => { splitAbortRef.current = true; }, []);
+
+  // 拖曳改價中的掛單（Item 6）：送出期間舊價位標籤轉虛線半透明
+  const [replacingOrder, setReplacingOrder] = useState<ReplacingOrder | null>(null);
 
   const syncTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -180,8 +189,10 @@ export function useDOMLogic() {
   }, [accountSummary.positions, targetSymbol]);
 
   // --- 下單邏輯 ---
-  const handlePlaceOrder = useCallback(async (price: number, action: 'Buy' | 'Sell') => {
+  // overridePriceType：市價熱鍵（Item 8）等呼叫端可強制 MKT，不動使用者的 priceType 選單
+  const handlePlaceOrder = useCallback(async (price: number, action: 'Buy' | 'Sell', overridePriceType?: string) => {
     if (!targetSymbol) return;
+    const effPriceType = overridePriceType ?? priceType;
     if (isOrderPendingRef.current) {
       // in-flight 去重：上一筆還在送 → 輕量回饋（1 秒內不重複跳）
       const now = Date.now();
@@ -199,7 +210,7 @@ export function useDOMLogic() {
       let preConfirmed = false;
       if (settings.confirmations.placeOrder && !settings.isCombatMode) {
         const dir = action === 'Buy' ? '買進' : '賣出';
-        const at = (priceType === 'MKT' || priceType === 'MKP') ? '市價' : price;
+        const at = (effPriceType === 'MKT' || effPriceType === 'MKP') ? '市價' : price;
         const ok = await confirm({
           title: '下單確認',
           message: `確認${dir} ${targetSymbol} ${orderValue} 單位 @ ${at}？`,
@@ -213,7 +224,7 @@ export function useDOMLogic() {
 
       const basePayload = {
         symbol: targetSymbol, price, action,
-        order_type: orderType, price_type: priceType, order_cond: orderCond, order_lot: orderLot,
+        order_type: orderType, price_type: effPriceType, order_cond: orderCond, order_lot: orderLot,
       };
 
       // 送單，處理後端 409 CONFIRM_REQUIRED（RiskManager WARNING 需 confirm:true 重送）。
@@ -284,7 +295,7 @@ export function useDOMLogic() {
           scheduleOrderRefresh();
           playSound('order_placed');
           const dirZh = action === 'Buy' ? '買' : '賣';
-          const atLabel = (priceType === 'MKT' || priceType === 'MKP') ? '市價' : price;
+          const atLabel = (effPriceType === 'MKT' || effPriceType === 'MKP') ? '市價' : price;
           toast.success(`${dirZh} ${placedQty} @ ${atLabel} ✓`);
         } else {
           setOrderFeedback(null); // 使用者取消：清掉 pending 閃爍即可
@@ -347,18 +358,22 @@ export function useDOMLogic() {
 
   const handleDropOrder = useCallback(async (e: React.DragEvent, newPrice: number, tgtAction: 'Buy' | 'Sell') => {
     e.preventDefault();
+    let oldPrice = 0;
     try {
       const dataStr = e.dataTransfer.getData('application/json');
       if (!dataStr) return;
       const data = JSON.parse(dataStr);
       if (data.action !== tgtAction) return;
 
-      const oldPrice = parseFloat(data.oldPriceStr);
+      oldPrice = parseFloat(data.oldPriceStr);
       if (oldPrice === newPrice) return;
 
       const oldKey = Math.round(oldPrice * 100);
       const qty = (tgtAction === 'Buy' ? workingBuyMap : workingSellMap).get(oldKey) || 0;
       if (qty <= 0) return;
+
+      // Item 6：送出期間舊價位標籤顯示「改價中」（虛線 / 半透明）
+      setReplacingOrder({ price: oldPrice, action: tgtAction });
 
       await apiClient.post('/update_order', {
         symbol: targetSymbol,
@@ -369,6 +384,7 @@ export function useDOMLogic() {
       });
 
       playSound('order_replaced');
+      toast.success(`改價成功：${tgtAction === 'Buy' ? '買' : '賣'} ${qty} 由 ${oldPrice} → ${newPrice}`);
       scheduleOrderRefresh();
     } catch (e) {
       const err = normalizeApiError(e);
@@ -376,9 +392,31 @@ export function useDOMLogic() {
         // 掛單其實已不存在（外部已刪/已成交）→ 立即對帳，清掉 ladder 上的殘留掛單徽章
         scheduleOrderRefresh();
       }
+      // 失敗：清掉「改價中」樣式即恢復原價位標籤（後端未改單，掛單仍在原價）
       handleApiError(e, '改單失敗');
+    } finally {
+      setReplacingOrder(null);
     }
-  }, [targetSymbol, workingBuyMap, workingSellMap, scheduleOrderRefresh, handleApiError]);
+  }, [targetSymbol, workingBuyMap, workingSellMap, scheduleOrderRefresh, handleApiError, toast]);
+
+  // ── UX 批次 4 Item 8：追買 / 追賣 / 市價熱鍵 ────────────────
+  // 追買＝以「賣一價」掛買（吃最優賣方流動性）；追賣＝以「買一價」掛賣。
+  // 都走 handlePlaceOrder → 沿用戰鬥模式 / 確認流 / 風控 409 confirm 全套。
+  const handleChaseOrder = useCallback(async (action: 'Buy' | 'Sell') => {
+    const askArr = bidAsk?.AskPrice || [];
+    const bidArr = bidAsk?.BidPrice || [];
+    const px = action === 'Buy' ? Number(askArr[0] || 0) : Number(bidArr[0] || 0);
+    if (!(px > 0)) {
+      toast.warn(action === 'Buy' ? '無賣一價，無法追買' : '無買一價，無法追賣');
+      return;
+    }
+    await handlePlaceOrder(px, action);
+  }, [bidAsk, handlePlaceOrder, toast]);
+
+  // 市價單熱鍵：price=0 + price_type MKT（不改使用者的 priceType 選單狀態）
+  const handleMarketOrder = useCallback(async (action: 'Buy' | 'Sell') => {
+    await handlePlaceOrder(0, action, 'MKT');
+  }, [handlePlaceOrder]);
 
   return {
     qData, bData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice, isSimulation,
@@ -388,7 +426,8 @@ export function useDOMLogic() {
     isSyncing, handleManualSync,
     workingBuyMap, workingSellMap, currentPosition,
     handlePlaceOrder, handleCancelOrder, handleAddStopOrder, handleDropOrder,
-    orderFeedback, smartOrders,
+    handleChaseOrder, handleMarketOrder,
+    orderFeedback, replacingOrder, smartOrders,
     splitProgress, abortSplit,
     targetSymbol, accountSummary, accounts, activeAccount, selectAccount,
     hotkeys,

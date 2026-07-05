@@ -244,7 +244,12 @@ const DOMHeaderInner: React.FC<DOMHeaderProps> = ({
       <div className="px-4 py-1 border-b border-slate-800 bg-[#161d2b] flex flex-wrap items-center gap-x-4 gap-y-0.5 font-mono tabular-nums leading-none">
         <div className="flex items-baseline gap-1.5">
           <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">現價</span>
-          <span className={`text-[15px] font-black ${changeCls}`}>{fmtOrDash(currentPrice)}</span>
+          {/* Item 11：切換商品後、首筆報價/快照抵達前顯示「訂閱中」而非殘留舊值 */}
+          {currentPrice <= 0 && refPrice <= 0 && targetSymbol ? (
+            <span className="text-[11px] font-bold text-slate-500 animate-pulse">訂閱中…</span>
+          ) : (
+            <span className={`text-[15px] font-black ${changeCls}`}>{fmtOrDash(currentPrice)}</span>
+          )}
         </div>
         <div className="flex items-baseline gap-1.5">
           <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">漲跌</span>

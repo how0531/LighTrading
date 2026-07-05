@@ -225,6 +225,38 @@ async def get_kbars(symbol: str, days: int = 1):
         return []
 
 
+class UnwatchRequest(BaseModel):
+    symbols: list[str]
+
+
+@router.post("/unwatch")
+async def unwatch(req: UnwatchRequest):
+    """
+    UX 批次 4 Item 10：退訂背景報價（自選清單移除商品時前端呼叫）。
+
+    對每個 symbol 呼叫 shioaji_client.unsubscribe_background（單一 broker 執行緒），
+    core 端會保護：持倉商品、當前 DOM 主商品不退訂（見 unsubscribe_background docstring）。
+    """
+    if not getattr(shared.shioaji_client, "_is_connected", False):
+        return {"status": "success", "removed": [], "skipped": [
+            s.strip().upper() for s in req.symbols if isinstance(s, str) and s.strip()
+        ]}
+    removed: list[str] = []
+    skipped: list[str] = []
+    for s in req.symbols[:30]:   # 與 watch 相同上限
+        if not isinstance(s, str) or not s.strip():
+            continue
+        sym = s.strip().upper()
+        try:
+            ok = await shared.run_in_broker_thread(
+                shared.shioaji_client.unsubscribe_background, sym)
+        except Exception as e:
+            logger.warning(f"unwatch 退訂 {sym} 失敗: {e}")
+            ok = False
+        (removed if ok else skipped).append(sym)
+    return {"status": "success", "removed": removed, "skipped": skipped}
+
+
 # 離線常用股票中文名稱資料庫。
 # 由於 Shioaji 有連線限制或偶爾斷線，為避免前端商品名稱因未連線成功而顯示為空白，
 # 此處提供常見與預設持倉代碼的靜態對照，作為高可用性（HA）的 fallback 方案。

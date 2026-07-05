@@ -10,8 +10,12 @@ function fmtTime(iso: string): string {
   return d.toLocaleTimeString('en-GB', { hour12: false });
 }
 
+// 未虛擬化 → 渲染上限（TradingContext 資料保留 500 筆）
+const RENDER_MAX = 200;
+
 const QuoteHistory: React.FC = () => {
   const { quoteHistory } = useQuotes();
+  const visible = quoteHistory.length > RENDER_MAX ? quoteHistory.slice(0, RENDER_MAX) : quoteHistory;
 
   return (
     <div className="glass-panel flex flex-col h-full rounded-xl border border-slate-700/50 overflow-hidden">
@@ -29,7 +33,7 @@ const QuoteHistory: React.FC = () => {
             </tr>
           </thead>
           <tbody>
-            {quoteHistory.map((q, idx) => {
+            {visible.map((q, idx) => {
               const prevPrice = idx < quoteHistory.length - 1 ? quoteHistory[idx + 1].Price : q.Price;
               // 台股慣例：紅漲 / 綠跌 / 平盤灰（與 WatchlistPanel 一致）
               const up = q.Price > prevPrice;
@@ -37,7 +41,8 @@ const QuoteHistory: React.FC = () => {
               const priceColor = up ? 'text-red-400' : down ? 'text-emerald-400' : 'text-slate-300';
 
               return (
-                <tr key={idx} className="border-b border-slate-800/50 hover:bg-slate-800/80 transition-colors">
+                // Seq = TradingContext 指派的穩定 key（避免 prepend 造成整列 re-key）
+                <tr key={q.Seq ?? `f${idx}`} className="border-b border-slate-800/50 hover:bg-slate-800/80 transition-colors">
                   <td className="px-4 py-2 text-slate-500">{fmtTime(q.TickTime)}</td>
                   <td className={`px-4 py-2 text-right font-bold ${priceColor}`}>
                     {formatPrice(q.Price, q.Symbol)}

@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import { getTickSize, formatPrice } from '../../utils/instrument';
 import type { QuoteData, BidAskData } from '../../types';
 import type { AccountPosition, SmartOrderData } from '../../contexts/TradingContext';
-import type { OrderFeedback } from '../../hooks/useDOMLogic';
+import type { OrderFeedback, ReplacingOrder } from '../../hooks/useDOMLogic';
 
 // Native CSS virtualization：瀏覽器自動跳過渲染畫面外的 row。
 // Chromium / WebKit / Firefox 都已支援（Electron 32 內嵌 Chromium ≥ 130 沒問題）。
@@ -36,6 +36,7 @@ interface DOMTableProps {
   workingSellMap: Map<number, number>;
   bData: Partial<BidAskData>;
   orderFeedback: OrderFeedback | null;
+  replacingOrder: ReplacingOrder | null;   // Item 6：拖曳改價中的掛單（舊價位）
   handleAddStopOrder: (p: number, action: 'Buy'|'Sell') => void;
   handleCancelOrder: (action: 'Buy'|'Sell', p?: number) => void;
   handlePlaceOrder: (p: number, action: 'Buy'|'Sell') => void;
@@ -45,7 +46,7 @@ interface DOMTableProps {
 const DOMTableInner: React.FC<DOMTableProps> = ({
   fullPrices, isStale, compactMode = false, qData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice,
   targetSymbol, currentPosition, flashDir, smartOrders, workingBuyMap, workingSellMap, bData,
-  orderFeedback, handleAddStopOrder, handleCancelOrder, handlePlaceOrder, handleDropOrder
+  orderFeedback, replacingOrder, handleAddStopOrder, handleCancelOrder, handlePlaceOrder, handleDropOrder
 }) => {
   // 拖曳目標 hover：用 pKey + action 標記目前 drop target，給單一格子強光提示
   const [dropTarget, setDropTarget] = React.useState<{ pKey: number; action: 'Buy' | 'Sell' } | null>(null);
@@ -97,6 +98,24 @@ const DOMTableInner: React.FC<DOMTableProps> = ({
   }, [bData]);
 
   if (fullPrices.length === 0) {
+    // UX 批次 4 Item 11：已有目標商品但首筆報價/快照未到 → 顯示「訂閱中」骨架，
+    // 而不是誤導性的「請輸入商品代碼」（切換商品時 TradingContext 已清空舊 quote）
+    if (targetSymbol) {
+      return (
+        <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-500 text-sm" data-testid="dom-subscribing">
+          <div className="flex items-center gap-2 animate-pulse">
+            <span className="w-2 h-2 rounded-full bg-[#D4AF37]" />
+            <span>訂閱中 {targetSymbol}…</span>
+          </div>
+          <div className="w-40 space-y-1.5 animate-pulse" aria-hidden>
+            <div className="h-2 rounded bg-slate-700/60" />
+            <div className="h-2 rounded bg-slate-700/40" />
+            <div className="h-2 rounded bg-slate-700/25" />
+          </div>
+          <span className="text-[10px] text-slate-600">等待首筆報價 / 快照抵達</span>
+        </div>
+      );
+    }
     return (
       <div className="flex items-center justify-center h-full text-slate-500 text-sm">
         請輸入商品代碼後按 LOAD 載入
@@ -181,6 +200,13 @@ const DOMTableInner: React.FC<DOMTableProps> = ({
           const smartBuyLine = smartBuyKeys.has(pKey);
           const smartSellLine = smartSellKeys.has(pKey);
 
+          // Item 6：這一格的掛單正在拖曳改價中 → 虛線 + 半透明「改價中」
+          const isBuyReplacing = replacingOrder != null && replacingOrder.action === 'Buy'
+            && Math.round(replacingOrder.price * 100) === pKey;
+          const isSellReplacing = replacingOrder != null && replacingOrder.action === 'Sell'
+            && Math.round(replacingOrder.price * 100) === pKey;
+          const replacingCls = 'opacity-50 outline outline-1 outline-dashed outline-white/70 animate-pulse';
+
           return (
             <tr key={p} data-price={pKey} style={compactMode ? COMPACT_ROW_STYLE : NORMAL_ROW_STYLE} className={`${compactMode ? 'h-6' : 'h-8'} transition-none relative ${isC ? (flashDir === 'up' ? 'bg-red-500/30' : flashDir === 'down' ? 'bg-green-500/30' : 'bg-[#D4AF37]/10 border-y border-[#D4AF37]/50 box-border') : 'border-b border-slate-800/80'} ${isLimitUp ? 'border-t-2 border-t-red-600/60' : ''} ${isLimitDown ? 'border-b-2 border-b-emerald-600/60' : ''} ${isCostLine ? 'border-y-2 border-dashed border-amber-500/50' : ''} ${smartBuyLine || smartSellLine ? 'border-y border-dashed border-purple-500/60' : ''} ${pnlZoneBg}`}>
               
@@ -205,7 +231,8 @@ const DOMTableInner: React.FC<DOMTableProps> = ({
                        e.dataTransfer.setData('application/json', JSON.stringify({ action: 'Buy', oldPriceStr: p.toString() }));
                        e.stopPropagation();
                     }}
-                    className="bg-red-600 text-white px-1.5 py-0.5 rounded text-[10px] shadow-sm cursor-grab active:cursor-grabbing inline-block"
+                    className={`bg-red-600 text-white px-1.5 py-0.5 rounded text-[10px] shadow-sm cursor-grab active:cursor-grabbing inline-block ${isBuyReplacing ? replacingCls : ''}`}
+                    title={isBuyReplacing ? '改價中…' : undefined}
                     onClick={(e) => e.stopPropagation()}
                   >
                     {myBuyQty}
@@ -268,7 +295,8 @@ const DOMTableInner: React.FC<DOMTableProps> = ({
                        e.dataTransfer.setData('application/json', JSON.stringify({ action: 'Sell', oldPriceStr: p.toString() }));
                        e.stopPropagation();
                     }}
-                    className="bg-emerald-600 text-white px-1.5 py-0.5 rounded text-[10px] shadow-sm cursor-grab active:cursor-grabbing inline-block"
+                    className={`bg-emerald-600 text-white px-1.5 py-0.5 rounded text-[10px] shadow-sm cursor-grab active:cursor-grabbing inline-block ${isSellReplacing ? replacingCls : ''}`}
+                    title={isSellReplacing ? '改價中…' : undefined}
                     onClick={(e) => e.stopPropagation()}
                   >
                     {mySellQty}

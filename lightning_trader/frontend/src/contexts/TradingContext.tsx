@@ -123,6 +123,8 @@ const sameOrders = (a: WorkingOrder[], b: WorkingOrder[]): boolean =>
 
 const ORDER_REFRESH_DEBOUNCE_MS = 500;
 const ORDER_POLL_INTERVAL_MS = 5000;
+// UX 批次 4 Item 1：tape（逐筆成交）資料保留 500 筆（渲染上限由面板自行控制）
+const QUOTE_HISTORY_MAX = 500;
 const MAX_RECENT_FILLS = 20;         // recentFills 保留筆數
 const MAX_SEEN_FILL_IDS = 500;       // 成交去重 Set 上限（超過砍最舊一半）
 const RISK_TOAST_DEDUPE_MS = 5000;   // 相同熔斷原因 5 秒內不重複 toast
@@ -268,6 +270,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const { toast } = useToast();
 
   // 穩定的 quote 緩衝區
+  const quoteSeqRef = useRef(0);   // Item 9：tape 穩定 key 的單調序號
   const latestQuoteRef = useRef<QuoteData | null>(null);
   const latestBidAskRef = useRef<BidAskData | null>(null);
   const quoteDirtyRef = useRef(false);   // 標記 quote 有新資料需同步
@@ -303,7 +306,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (pendingHistoryRef.current.length > 0) {
         const batch = pendingHistoryRef.current;
         pendingHistoryRef.current = [];
-        setQuoteHistory(prev => [...batch, ...prev].slice(0, 50));
+        setQuoteHistory(prev => [...batch, ...prev].slice(0, QUOTE_HISTORY_MAX));
       }
       if (pendingAccountRef.current !== null) {
         const summary = pendingAccountRef.current;
@@ -398,7 +401,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     latestQuoteRef.current = merged;
     quoteDirtyRef.current = true;
     if (newPrice > 0) {
-      pendingHistoryRef.current.push(merged); // Price=0 的靜態快照不進逐筆 tape
+      // Item 9：附上單調遞增 Seq，讓 tape 面板有穩定的 React key（避免整列 re-mount）
+      quoteSeqRef.current += 1;
+      pendingHistoryRef.current.push({ ...merged, Seq: quoteSeqRef.current }); // Price=0 的靜態快照不進逐筆 tape
     }
   }, []);
 
@@ -734,6 +739,14 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // ref 是給 onmessage handler 過濾用；WS 訊息是給後端 subscribe_background
   const applyWatch = useCallback(() => {
     const union = new Set<string>([...primaryWatchRef.current, ...auxWatchRef.current]);
+    // UX 批次 4 Item 10：算出「不再 watch」的 symbol → 通知後端退訂背景串流，
+    // 否則移除自選後 Tick+BidAsk 訂閱會持續洩漏。
+    // 保護交給後端（canonical 比對才可靠）：/unwatch 對「當前 DOM 主商品」只移出
+    // 背景清單、不切串流；持倉商品則完全跳過（PnL 需要 tick）。
+    const removed = Array.from(watchSymbolsRef.current).filter((s) => !union.has(s));
+    if (removed.length > 0) {
+      apiClient.post('/unwatch', { symbols: removed }).catch(() => { /* 靜默；重連時後端不持久化訂閱，洩漏自然消失 */ });
+    }
     watchSymbolsRef.current = union;
     // 移除掉不再 watch 的 symbol（舊資料留著會佔記憶體 + UI 顯示舊價）
     setWatchlistQuotes((prev) => {

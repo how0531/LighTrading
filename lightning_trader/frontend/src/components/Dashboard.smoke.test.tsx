@@ -50,8 +50,9 @@ describe('Dashboard smoke', () => {
         </ConfirmProvider>
       </ToastProvider>,
     );
-    // DOMTable 空狀態文案（尚無報價）
-    expect(await screen.findByText('請輸入商品代碼後按 LOAD 載入')).toBeInTheDocument();
+    // DOMTable 空狀態文案：預設 targetSymbol=2330、首筆報價未到 → 顯示「訂閱中」骨架
+    // （UX 批次 4 Item 11：不再殘留舊資料 / 誤導性的「請輸入商品代碼」）
+    expect(await screen.findByText(/訂閱中 2330/)).toBeInTheDocument();
     // focus-mode tab 存在
     expect(screen.getByText('閃電下單')).toBeInTheDocument();
     expect(screen.getByText('K 線')).toBeInTheDocument();

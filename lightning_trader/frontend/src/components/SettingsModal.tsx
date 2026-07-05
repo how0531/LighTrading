@@ -34,6 +34,11 @@ const ACTION_OPTIONS: { value: HotkeyItem['action']; label: string }[] = [
   { value: 'CancelAll',   label: '全刪掛單' },
   { value: 'Flatten',     label: '全部平倉' },
   { value: 'ScrollCenter',label: '置中 (捲到現價)' },
+  // UX 批次 4 Item 8
+  { value: 'ChaseBuy',    label: '追買 (賣一價掛買)' },
+  { value: 'ChaseSell',   label: '追賣 (買一價掛賣)' },
+  { value: 'MarketBuy',   label: '市價買進' },
+  { value: 'MarketSell',  label: '市價賣出' },
 ];
 
 const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {

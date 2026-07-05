@@ -511,6 +511,97 @@ def test_main_symbol_switch_spares_background_watched_symbol():
         sj.current_contract = old_contract
 
 
+# ─── UX 批次 4 Item 10：/api/unwatch 背景退訂（自選移除反訂閱） ───
+
+def test_unwatch_unsubscribes_background_symbol():
+    """自選清單移除 → /api/unwatch 必須真的退訂 Tick+BidAsk 並移出 _background_symbols
+    （之前完全沒有退訂路徑 → 訂閱洩漏）。"""
+    sj = shared.shioaji_client
+    api = _fake_api()
+    api.quote.unsubscribed.clear()
+    old_bg = set(sj._background_symbols)
+    old_contract = sj.current_contract
+    try:
+        sj._background_symbols.clear()
+        sj.current_contract = None
+        sj.subscribe_background("2890")
+        r = client.post("/api/unwatch", json={"symbols": ["2890"]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["removed"] == ["2890"]
+        assert body["skipped"] == []
+        assert ("2890", str(QuoteType.Tick)) in api.quote.unsubscribed
+        assert ("2890", str(QuoteType.BidAsk)) in api.quote.unsubscribed
+        assert "2890" not in sj._background_symbols
+    finally:
+        sj._background_symbols.clear()
+        sj._background_symbols.update(old_bg)
+        sj.current_contract = old_contract
+
+
+def test_unwatch_spares_position_symbol():
+    """持倉商品即使被自選移除也不能退訂 —— PnL 廣播依賴其 tick 串流。"""
+    sj = shared.shioaji_client
+    api = _fake_api()
+    api.quote.unsubscribed.clear()
+    api.positions = [FakePosition("2890", 3, Action.Buy, price=80.0)]
+    old_bg = set(sj._background_symbols)
+    old_contract = sj.current_contract
+    try:
+        sj._background_symbols.clear()
+        sj.current_contract = None
+        sj.subscribe_background("2890")
+        r = client.post("/api/unwatch", json={"symbols": ["2890"]})
+        assert r.status_code == 200, r.text
+        body = r.json()
+        assert body["removed"] == []
+        assert body["skipped"] == ["2890"]
+        assert all(code != "2890" for code, _ in api.quote.unsubscribed), \
+            "持倉商品被 unwatch 退訂，PnL 報價會無聲斷掉"
+        assert "2890" in sj._background_symbols
+    finally:
+        sj._background_symbols.clear()
+        sj._background_symbols.update(old_bg)
+        sj.current_contract = old_contract
+
+
+def test_unwatch_spares_current_dom_target_stream():
+    """當前 DOM 交易中的 targetSymbol：只移出背景清單、不得取消主訂閱串流
+    （之後主商品切走時 subscribe() 會照常取消）。"""
+    sj = shared.shioaji_client
+    api = _fake_api()
+    old_bg = set(sj._background_symbols)
+    old_contract = sj.current_contract
+    try:
+        sj._background_symbols.clear()
+        sj.subscribe("2330")              # 主商品 = 2330
+        sj.subscribe_background("2330")   # 同時在自選（背景訂閱）
+        api.quote.unsubscribed.clear()
+        r = client.post("/api/unwatch", json={"symbols": ["2330"]})
+        assert r.status_code == 200, r.text
+        assert r.json()["removed"] == ["2330"]
+        # 串流不能斷（DOM 還在用）
+        assert all(code != "2330" for code, _ in api.quote.unsubscribed), \
+            "unwatch 誤殺了當前主商品的報價串流"
+        # 但已移出背景清單 → 之後切換主商品時會照常退訂
+        assert "2330" not in sj._background_symbols
+        sj.subscribe("2890")
+        assert ("2330", str(QuoteType.Tick)) in api.quote.unsubscribed
+    finally:
+        sj._background_symbols.clear()
+        sj._background_symbols.update(old_bg)
+        sj.current_contract = old_contract
+
+
+def test_unwatch_not_connected_is_noop():
+    """未登入時 unwatch 不打 broker，回 skipped。"""
+    sj = shared.shioaji_client
+    sj._is_connected = False
+    r = client.post("/api/unwatch", json={"symbols": ["2890"]})
+    assert r.status_code == 200
+    assert r.json() == {"status": "success", "removed": [], "skipped": ["2890"]}
+
+
 def test_tick_total_volume_flows_to_broadcast_queue():
     """v1 tick 帶 total_volume → shioaji_client → bridge → 廣播佇列的
     Tick 訊息必須含 TotalVolume（前端不再自行累加成交量）。"""

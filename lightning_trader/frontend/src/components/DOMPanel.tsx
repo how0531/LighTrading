@@ -31,7 +31,8 @@ export const DOMPanel: React.FC = () => {
     isSyncing, handleManualSync,
     workingBuyMap, workingSellMap, currentPosition,
     handlePlaceOrder, handleCancelOrder, handleAddStopOrder, handleDropOrder,
-    orderFeedback, smartOrders, bData,
+    handleChaseOrder, handleMarketOrder,
+    orderFeedback, replacingOrder, smartOrders, bData,
     splitProgress, abortSplit,
     targetSymbol, accounts, activeAccount, selectAccount,
     hotkeys, accountEquity,
@@ -272,11 +273,25 @@ export const DOMPanel: React.FC = () => {
         case 'ScrollCenter':
           scrollToCurrentPrice();
           break;
+        // UX 批次 4 Item 8：追買（賣一價掛買）/ 追賣（買一價掛賣）/ 市價單。
+        // 走 handleChaseOrder / handleMarketOrder → 尊重戰鬥模式與確認流。
+        case 'ChaseBuy':
+          handleChaseOrder('Buy');
+          break;
+        case 'ChaseSell':
+          handleChaseOrder('Sell');
+          break;
+        case 'MarketBuy':
+          handleMarketOrder('Buy');
+          break;
+        case 'MarketSell':
+          handleMarketOrder('Sell');
+          break;
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [hotkeys, handlePlaceOrder, handleCancelOrder, handleFlatten, scrollToCurrentPrice, currentPrice, refPrice, setOrderValue, settings.sizing, updateSetting]);
+  }, [hotkeys, handlePlaceOrder, handleCancelOrder, handleFlatten, handleChaseOrder, handleMarketOrder, scrollToCurrentPrice, currentPrice, refPrice, setOrderValue, settings.sizing, updateSetting]);
 
 
   return (
@@ -307,7 +322,8 @@ export const DOMPanel: React.FC = () => {
           limitUp={limitUp} limitDown={limitDown} highPrice={highPrice} lowPrice={lowPrice} targetSymbol={targetSymbol}
           currentPosition={currentPosition} flashDir={flashDir} smartOrders={smartOrders}
           workingBuyMap={workingBuyMap} workingSellMap={workingSellMap} bData={bData}
-          orderFeedback={orderFeedback} handleAddStopOrder={handleAddStopOrder} handleCancelOrder={handleCancelOrder}
+          orderFeedback={orderFeedback} replacingOrder={replacingOrder}
+          handleAddStopOrder={handleAddStopOrder} handleCancelOrder={handleCancelOrder}
           handlePlaceOrder={handlePlaceOrder} handleDropOrder={handleDropOrder}
         />
       </div>

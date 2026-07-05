@@ -406,6 +406,28 @@ describe('TradingContext WS 訊息路由', () => {
     expect(probe.ctx?.brokerState).toBe('unknown');
   });
 
+  it('自選移除 → POST /unwatch 退訂背景報價（只送被移除的 symbol）', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+    const mockedPost = vi.mocked(apiClient.post);
+
+    act(() => { probe.ctx!.watchSymbols(['2330', '2890']); });
+    // 加入清單不觸發退訂
+    expect(mockedPost.mock.calls.filter((c) => c[0] === '/unwatch')).toHaveLength(0);
+    mockedPost.mockClear();
+
+    // 移除 2890 → 呼叫退訂 API，且只帶被移除的 symbol
+    // （targetSymbol / 持倉商品的保護在後端 /unwatch 以 canonical 比對處理）
+    act(() => { probe.ctx!.watchSymbols(['2330']); });
+    const unwatchCalls = mockedPost.mock.calls.filter((c) => c[0] === '/unwatch');
+    expect(unwatchCalls).toHaveLength(1);
+    expect(unwatchCalls[0][1]).toEqual({ symbols: ['2890'] });
+
+    // 清單不變 → 不重複退訂
+    act(() => { probe.ctx!.watchSymbols(['2330']); });
+    expect(mockedPost.mock.calls.filter((c) => c[0] === '/unwatch')).toHaveLength(1);
+  });
+
   it('斷線重連：指數退避 + jitter 排程', async () => {
     // Math.random = 0.5 → jitter 係數 = 0.8 + 0.5*0.4 = 1.0（確定性延遲）
     vi.spyOn(Math, 'random').mockReturnValue(0.5);

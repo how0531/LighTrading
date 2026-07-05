@@ -286,8 +286,10 @@ const Panel_OrderHistory: React.FC = () => {
               validTrades.map((t, idx) => {
                 const k = tradeKey(t);
                 const isCancellable = isActiveOrderStatus(t.status);
+                // UX 批次 4 Item 5：部分成交（活躍單已成交部分數量）→ 琥珀色列標記 + 進度徽章
+                const isPartialFill = isCancellable && t.filled_qty > 0 && t.filled_qty < t.qty;
                 return (
-                <tr key={`${t.time}-${idx}`} className={`hover:bg-white/5 transition-colors ${selected.has(k) ? 'bg-amber-500/10 ring-1 ring-amber-500/30' : 'bg-slate-700/20'}`}>
+                <tr key={`${t.time}-${idx}`} className={`hover:bg-white/5 transition-colors ${selected.has(k) ? 'bg-amber-500/10 ring-1 ring-amber-500/30' : isPartialFill ? 'bg-amber-500/5 border-l-2 border-amber-400/70' : 'bg-slate-700/20'}`}>
                   <td className="py-2 px-2">
                     {isCancellable && (
                       <input
@@ -322,7 +324,15 @@ const Panel_OrderHistory: React.FC = () => {
                   </td>
                   <td className="py-2 px-2 text-right">
                     <div className="flex items-center justify-end gap-2">
-                      <span 
+                      {isPartialFill && (
+                        <span
+                          className="border rounded px-1.5 py-0.5 text-[10px] whitespace-nowrap font-mono tabular-nums bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold"
+                          title={`部分成交：已成交 ${t.filled_qty} / 委託 ${t.qty}`}
+                        >
+                          {t.filled_qty}/{t.qty}
+                        </span>
+                      )}
+                      <span
                         className={getBadgeStyle(t.status)}
                         title={['Failed', 'Rejected'].includes(t.status) && t.failed_msg ? `原始原因: ${t.failed_msg}` : undefined}
                       >

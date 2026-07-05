@@ -614,6 +614,52 @@ class ShioajiClient:
             logger.warning(f"subscribe_background {symbol} 失敗: {e}")
             return ""
 
+    def unsubscribe_background(self, symbol: str) -> bool:
+        """
+        退訂背景商品報價（UX 批次 4 Item 10：自選清單移除後不再洩漏 Tick+BidAsk 訂閱）。
+
+        保護規則：
+          1. 持倉商品不退訂 —— PnL 廣播依賴其 tick（回 False，保留在 _background_symbols）
+          2. 當前 DOM 主商品（current_contract）不動串流 —— 只從 _background_symbols
+             移除，之後主商品切走時 subscribe() 會照常取消訂閱（回 True）
+          3. 不在背景清單的 symbol 視為 no-op（回 False）
+
+        回傳 True 表示已退訂（或已從背景清單移除、交由主訂閱管理）。
+        """
+        contract = self.get_contract(symbol)
+        if not contract:
+            logger.warning(f"unsubscribe_background: 找不到合約 {symbol}")
+            return False
+        canonical = self.symbol_resolver.canonical(getattr(contract, "symbol", "")) or str(symbol).strip().upper()
+        if canonical not in self._background_symbols:
+            return False
+
+        # 持倉商品：PnL 需要這條 tick 串流，絕不能退訂
+        try:
+            positions = self.list_positions()
+            if any((p.get("symbol") or "") == canonical for p in positions):
+                logger.info(f"unsubscribe_background 跳過 {canonical}：持倉中，PnL 需要背景報價")
+                return False
+        except Exception as e:
+            logger.debug(f"unsubscribe_background 查持倉失敗（保守跳過退訂）: {e}")
+            return False
+
+        with self._subscribe_lock:
+            self._background_symbols.discard(canonical)
+            # 當前 DOM 交易中的主商品：串流由主訂閱持有，不能在這裡取消；
+            # 已從背景清單移除，之後 subscribe() 切走時會照常 unsubscribe
+            cur = self.current_contract
+            if cur is not None and self.symbol_resolver.canonical(getattr(cur, "symbol", "")) == canonical:
+                logger.info(f"unsubscribe_background {canonical}：為當前主商品，僅移出背景清單")
+                return True
+            try:
+                self.api.quote.unsubscribe(contract, QuoteType.Tick)
+                self.api.quote.unsubscribe(contract, QuoteType.BidAsk)
+                logger.info(f"  ✅ 已退訂背景商品 {canonical} Tick+BidAsk")
+            except Exception as e:
+                logger.debug(f"unsubscribe_background {canonical} 取消訂閱例外: {e}")
+        return True
+
     def place_order(self, symbol: str, price: float, action: Action, qty: int, order_type: OrderType = OrderType.ROD, price_type=None, order_lot=None, order_cond=None):
         contract = self.get_contract(symbol)
         if not contract:

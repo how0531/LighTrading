@@ -6,14 +6,19 @@
  *   - 大單高亮（量 >= 門檻,門檻可調並存 localStorage）— isBigTrade
  *   - 底部買賣力道條 + delta（外盤量 - 內盤量）— summarizeFlow
  *
- * 資料源:TradingContext.quoteHistory（目標商品最近 50 筆,index 0 為最新）。
+ * 資料源:TradingContext.quoteHistory（目標商品最近 500 筆,index 0 為最新）。
+ * UX 批次 4:資料保留 500 筆（力道統計吃全量）；列表未虛擬化,
+ * 渲染上限維持 RENDER_MAX 筆避免長表拖慢 tick 重繪。
+ * 列元件 React.memo + 穩定 key（Seq）:新 tick 只掛新列,舊列不重繪。
  */
 import React, { useMemo, useState } from 'react';
 import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { formatPrice } from '../utils/instrument';
 import { classifyAggressor, isBigTrade, summarizeFlow, type FlowTick } from '../utils/tickFlow';
+import type { QuoteData } from '../types';
 
 const THRESHOLD_KEY = 'lighTrade_tape_threshold';
+const RENDER_MAX = 200;   // 未虛擬化的渲染上限（資料仍保留 500 筆供力道統計）
 
 function loadThreshold(): number {
   try {
@@ -34,6 +39,32 @@ function fmtTime(iso: string): string {
   return d.toLocaleTimeString('en-GB', { hour12: false });
 }
 
+// 單列抽成 memo 元件：props（q / prevPrice / threshold）沒變就不重繪。
+// 搭配穩定 key（q.Seq），新 tick 進來只需渲染新增的那一列。
+const TapeRow: React.FC<{
+  q: QuoteData;
+  prevPrice: number | undefined;
+  threshold: number;
+  targetSymbol: string;
+}> = React.memo(({ q, prevPrice, threshold, targetSymbol }) => {
+  const side = classifyAggressor(q.TickType, q.Price, prevPrice);
+  const big = isBigTrade(q.Volume, threshold);
+  const color = side === 'buy' ? 'text-red-400' : side === 'sell' ? 'text-emerald-400' : 'text-slate-400';
+  return (
+    <tr className={`border-b border-slate-800/40 hover:bg-slate-800/60 ${big ? 'bg-amber-500/10' : ''}`}>
+      <td className="px-2 py-0.5 text-slate-500">{fmtTime(q.TickTime)}</td>
+      <td className={`px-2 py-0.5 text-right font-bold ${color}`}>{q.Price > 0 ? formatPrice(q.Price, q.Symbol || targetSymbol) : '—'}</td>
+      <td className={`px-2 py-0.5 text-right ${big ? 'text-amber-300 font-bold' : 'text-slate-300'}`}>
+        {big && <span className="mr-0.5">●</span>}{q.Volume}
+      </td>
+      <td className={`px-2 py-0.5 text-center font-bold ${color}`}>
+        {side === 'buy' ? '外' : side === 'sell' ? '內' : '·'}
+      </td>
+    </tr>
+  );
+});
+TapeRow.displayName = 'TapeRow';
+
 const TimeSalesPanel: React.FC = () => {
   const { targetSymbol } = useTradingCore();
   const { quoteHistory } = useQuotes(); // 逐筆成交需要 tick 資料
@@ -52,6 +83,7 @@ const TimeSalesPanel: React.FC = () => {
   const summary = useMemo(() => summarizeFlow(flowTicks), [flowTicks]);
 
   const buyPct = Math.round(summary.buyPct);
+  const visible = quoteHistory.length > RENDER_MAX ? quoteHistory.slice(0, RENDER_MAX) : quoteHistory;
 
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
@@ -85,24 +117,22 @@ const TimeSalesPanel: React.FC = () => {
           <tbody>
             {quoteHistory.length === 0 ? (
               <tr><td colSpan={4} className="px-2 py-10 text-center text-slate-600 italic">尚無成交資料</td></tr>
-            ) : quoteHistory.map((q, idx) => {
-              const prevPrice = quoteHistory[idx + 1]?.Price;
-              const side = classifyAggressor(q.TickType, q.Price, prevPrice);
-              const big = isBigTrade(q.Volume, threshold);
-              const color = side === 'buy' ? 'text-red-400' : side === 'sell' ? 'text-emerald-400' : 'text-slate-400';
-              return (
-                <tr key={idx} className={`border-b border-slate-800/40 hover:bg-slate-800/60 ${big ? 'bg-amber-500/10' : ''}`}>
-                  <td className="px-2 py-0.5 text-slate-500">{fmtTime(q.TickTime)}</td>
-                  <td className={`px-2 py-0.5 text-right font-bold ${color}`}>{q.Price > 0 ? formatPrice(q.Price, q.Symbol || targetSymbol) : '—'}</td>
-                  <td className={`px-2 py-0.5 text-right ${big ? 'text-amber-300 font-bold' : 'text-slate-300'}`}>
-                    {big && <span className="mr-0.5">●</span>}{q.Volume}
-                  </td>
-                  <td className={`px-2 py-0.5 text-center font-bold ${color}`}>
-                    {side === 'buy' ? '外' : side === 'sell' ? '內' : '·'}
-                  </td>
-                </tr>
-              );
-            })}
+            ) : visible.map((q, idx) => (
+              <TapeRow
+                key={q.Seq ?? `f${idx}`}
+                q={q}
+                prevPrice={quoteHistory[idx + 1]?.Price}
+                threshold={threshold}
+                targetSymbol={targetSymbol}
+              />
+            ))}
+            {quoteHistory.length > RENDER_MAX && (
+              <tr>
+                <td colSpan={4} className="px-2 py-1.5 text-center text-[10px] text-slate-600 italic">
+                  顯示最近 {RENDER_MAX} 筆（統計含全部 {quoteHistory.length} 筆）
+                </td>
+              </tr>
+            )}
           </tbody>
         </table>
       </div>

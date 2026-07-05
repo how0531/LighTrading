@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
 import { useQuotes, useTradingCore } from '../contexts/TradingContext';
-import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw } from 'lucide-react';
+import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw, ShieldAlert } from 'lucide-react';
 import { apiClient, getAccountBalance } from '../api/client';
 import { SymbolPicker } from './SymbolPicker';
 import { PRESET_ORDER, presetLabel, LAYOUT_PRESETS, type LayoutPresetId } from '../utils/layoutPresets';
+import type { RiskStatus } from '../hooks/useRiskStatus';
 
 const QUICK_SYMBOLS = ['TXFR1', 'MXFR1', '2330', '2454'] as const;
 
@@ -29,9 +30,11 @@ interface HeaderProps {
   onToggleFocusMode?: () => void;
   layoutPreset?: LayoutPresetId;
   onSelectPreset?: (id: LayoutPresetId) => void;
+  /** UX 批次 4 Item 3：日虧損儀表（Dashboard 的 useRiskStatus 傳入，避免重複輪詢） */
+  riskStatus?: RiskStatus | null;
 }
 
-const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode, layoutPreset = 'custom', onSelectPreset }) => {
+const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode, layoutPreset = 'custom', onSelectPreset, riskStatus = null }) => {
   const { isConnected, isTickStale, brokerState, targetSymbol, subscribe, forceReconnect } = useTradingCore();
   const { totalRealtimePnl } = useQuotes(); // 即時 PnL 跟著 tick 走 → 高頻 context
   const [symInput, setSymInput] = React.useState(targetSymbol);
@@ -69,6 +72,19 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
   const marginUsedPct = balance && balance.equity > 0
     ? Math.min(100, Math.round((balance.margin_required / balance.equity) * 100))
     : 0;
+
+  // Item 3：日虧損儀表 — 當日損益 vs 日虧上限（max_daily_loss 為負值；>=0 視為未設定 → 隱藏）
+  const dailyPnl = riskStatus
+    ? riskStatus.daily_realized_pnl + riskStatus.daily_unrealized_pnl
+    : 0;
+  const hasLossLimit = riskStatus != null && riskStatus.max_daily_loss < 0;
+  const lossUsedPct = hasLossLimit
+    ? Math.min(100, Math.max(0, Math.round((Math.min(0, dailyPnl) / riskStatus!.max_daily_loss) * 100)))
+    : 0;
+  const riskLocked = riskStatus != null && riskStatus.trading_enabled === false;
+  const lossBarColor = riskLocked || lossUsedPct >= 80 ? 'bg-red-500'
+    : lossUsedPct >= 50 ? 'bg-amber-400'
+    : 'bg-emerald-500';
 
   const handleSub = (e: React.FormEvent) => {
     e.preventDefault();
@@ -152,6 +168,34 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
             }`}>
               P50 {latency.p50_ms}ms · P95 {latency.p95_ms}ms
             </span>
+          </div>
+        )}
+
+        {/* Item 3：日虧損儀表 — 虧損越接近上限 綠→黃→紅；熔斷時顯示鎖定 */}
+        {hasLossLimit && (
+          <div
+            className="hidden md:flex flex-col items-end mr-2 min-w-[96px]"
+            title={`當日損益 ${Math.round(dailyPnl).toLocaleString()} / 日虧上限 ${Math.round(riskStatus!.max_daily_loss).toLocaleString()}`}
+            data-testid="daily-loss-gauge"
+          >
+            <span className="text-[10px] text-slate-500 font-bold tracking-widest uppercase mb-0.5 flex items-center gap-1">
+              {riskLocked && <ShieldAlert className="w-3 h-3 text-red-400" />}
+              日虧損
+            </span>
+            <span className={`text-xs font-black font-mono tabular-nums ${riskLocked ? 'text-red-400' : dailyPnl < 0 ? 'text-slate-200' : 'text-slate-400'}`}>
+              {riskLocked ? '已鎖定' : `${Math.round(dailyPnl).toLocaleString()}`}
+            </span>
+            <div className="flex items-center gap-1 mt-0.5 w-full">
+              <div className="flex-1 h-1 bg-slate-800 rounded overflow-hidden">
+                <div
+                  className={`h-full transition-all ${lossBarColor}`}
+                  style={{ width: `${riskLocked ? 100 : lossUsedPct}%` }}
+                />
+              </div>
+              <span className={`text-[9px] font-mono tabular-nums ${lossUsedPct >= 80 || riskLocked ? 'text-red-400' : 'text-slate-500'}`}>
+                {riskLocked ? '100' : lossUsedPct}%
+              </span>
+            </div>
           </div>
         )}
 
