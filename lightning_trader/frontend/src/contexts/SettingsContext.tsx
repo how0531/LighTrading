@@ -7,6 +7,11 @@ import type { SizingMode } from '../utils/sizing';
 import type { FeeConfig } from '../utils/fees';
 import { DEFAULT_FEE_CONFIG } from '../utils/fees';
 import type { ChaseFinalAction } from '../utils/chase';
+import type { ChartIndicatorSettings } from '../utils/chartIndicatorSettings';
+import {
+  defaultChartIndicatorSettings,
+  normalizeChartIndicatorSettings,
+} from '../utils/chartIndicatorSettings';
 
 /** Sprint 28：智慧下單尺寸。
  *  mode 決定按下下單時最終口數的來源：
@@ -106,6 +111,8 @@ export interface Settings {
   layoutPreset: 'momentum' | 'daytrade' | 'swing' | 'marketwatch' | 'custom';
   /** Sprint C：DOM 追價模式送出 CHASE 智慧單時的預設參數 */
   chase: ChaseSettings;
+  /** Sprint E：圖表技術指標系統 — 啟用清單 + 參數 + 線樣式 + 收藏 + 自訂 JS 指標（含 code） */
+  chart: ChartIndicatorSettings;
 }
 
 /** 單一價格警報。symbol 是 canonical symbol。op above = 價格 >= price；below = <=。 */
@@ -179,6 +186,7 @@ const DEFAULT_SETTINGS: Settings = {
     maxChaseTicks: 10,
     finalAction: 'GIVE_UP',
   },
+  chart: defaultChartIndicatorSettings(),
 };
 
 /** 舊版（localStorage / 後端）存的 hotkeys 沒有新 action（追買/追賣/市價）
@@ -234,6 +242,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           showNetPnL: typeof parsed.showNetPnL === 'boolean' ? parsed.showNetPnL : DEFAULT_SETTINGS.showNetPnL,
           layoutPreset: parsed.layoutPreset || DEFAULT_SETTINGS.layoutPreset,
           chase: { ...DEFAULT_SETTINGS.chase, ...(parsed.chase || {}) },
+          chart: normalizeChartIndicatorSettings(parsed.chart),
         };
       } catch (e) {
         console.error("Failed to parse settings from localStorage", e);
@@ -260,6 +269,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           sizing: { ...prev.sizing, ...(remote.sizing || {}) },
           fees: { ...prev.fees, ...(remote.fees || {}) },
           chase: { ...prev.chase, ...(remote.chase || {}) },
+          chart: remote.chart ? normalizeChartIndicatorSettings(remote.chart) : prev.chart,
           notifications: {
             ...prev.notifications,
             ...(remote.notifications || {}),
@@ -308,6 +318,9 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (updates.sizing) next.sizing = { ...prev.sizing, ...updates.sizing };
       if (updates.fees) next.fees = { ...prev.fees, ...updates.fees };
       if (updates.chase) next.chase = { ...prev.chase, ...updates.chase };
+      // chart：active/custom 為陣列（整組替換語意）,不做深 merge；
+      // IndicatorPicker 一律以 functional update 寫入完整物件
+      if (updates.chart) next.chart = { ...prev.chart, ...updates.chart };
       return next;
     });
   };
