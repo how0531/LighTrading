@@ -151,6 +151,7 @@ class _EmptyCategoryNode:
 class FakeQuote:
     def __init__(self):
         self.subscribed: list[tuple] = []
+        self.unsubscribed: list[tuple] = []
 
     def set_on_tick_stk_v1_callback(self, fn): self.on_tick_stk = fn
     def set_on_bidask_stk_v1_callback(self, fn): self.on_bidask_stk = fn
@@ -162,7 +163,7 @@ class FakeQuote:
         self.subscribed.append((getattr(contract, "code", "?"), str(quote_type)))
 
     def unsubscribe(self, contract, quote_type):
-        pass
+        self.unsubscribed.append((getattr(contract, "code", "?"), str(quote_type)))
 
 
 class FakeShioaji:

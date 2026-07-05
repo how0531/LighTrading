@@ -103,7 +103,10 @@ async def set_active_account(req: AccountSwitchRequest):
     if success:
         return {"status": "success", "message": f"帳號已切換"}
     else:
-        raise HTTPException(status_code=400, detail="切換帳號失敗")
+        raise HTTPException(status_code=400, detail={
+            "code": "ACCOUNT_SWITCH_FAILED",
+            "user_msg": "切換帳號失敗",
+        })
 
 
 @router.get("/positions")
@@ -324,7 +327,10 @@ async def sync_all():
     """
     client = shared.shioaji_client
     if not getattr(client, "_is_connected", False):
-        raise HTTPException(status_code=409, detail="尚未登入，無法同步")
+        raise HTTPException(status_code=409, detail={
+            "code": "NOT_LOGGED_IN",
+            "user_msg": "尚未登入，無法同步",
+        })
 
     try:
         # 1. update_status：強制券商主機把外部 session 的單也同步回來
@@ -348,4 +354,7 @@ async def sync_all():
         }
     except Exception as e:
         logger.error(f"sync_all 失敗: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="同步失敗")
+        raise HTTPException(status_code=500, detail={
+            "code": "SYNC_FAILED",
+            "user_msg": "同步失敗",
+        })

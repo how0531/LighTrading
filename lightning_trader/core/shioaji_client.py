@@ -136,6 +136,8 @@ class ShioajiClient:
                     "Symbol": symbol,
                     "Price": float(tick.close),
                     "Volume": int(tick.volume),
+                    # 交易所當日累計成交量 — 前端不用再自己累加（避免重訂閱/重連時重複計數）
+                    "TotalVolume": int(getattr(tick, "total_volume", 0) or 0),
                     "Open": float(tick.open),
                     "High": float(tick.high),
                     "Low": float(tick.low),
@@ -185,6 +187,8 @@ class ShioajiClient:
                     "Symbol": symbol,
                     "Price": float(tick.close),
                     "Volume": int(tick.volume),
+                    # 交易所當日累計成交量（同 _on_tick_stk）
+                    "TotalVolume": int(getattr(tick, "total_volume", 0) or 0),
                     "Open": float(tick.open),
                     "High": float(tick.high),
                     "Low": float(tick.low),
@@ -429,11 +433,17 @@ class ShioajiClient:
             old_contract = self.current_contract
             # 切換到不同合約時，把舊合約的 latest price 清掉（避免新商品 DOM 用到舊價）
             if old_contract is not None and getattr(old_contract, "symbol", "") != getattr(contract, "symbol", ""):
-                try:
-                    self.api.quote.unsubscribe(old_contract, QuoteType.Tick)
-                    self.api.quote.unsubscribe(old_contract, QuoteType.BidAsk)
-                except Exception as e:
-                    logger.debug(f"取消訂閱舊合約時發生例外: {e}")
+                # ★ 防誤殺：舊商品若在背景訂閱清單（持倉/自選）中，絕不能取消訂閱 —
+                #   watchlist / PnL 依賴同一條 Tick/BidAsk 串流，取消會讓背景報價無聲斷掉。
+                old_canonical = self.symbol_resolver.canonical(getattr(old_contract, "symbol", ""))
+                if old_canonical in self._background_symbols:
+                    logger.info(f"跳過取消訂閱 {old_canonical}：仍在背景訂閱清單（持倉/自選）")
+                else:
+                    try:
+                        self.api.quote.unsubscribe(old_contract, QuoteType.Tick)
+                        self.api.quote.unsubscribe(old_contract, QuoteType.BidAsk)
+                    except Exception as e:
+                        logger.debug(f"取消訂閱舊合約時發生例外: {e}")
                 # 注意：持倉商品的價格仍由 subscribe_background 維護，不在此清除
             self.current_contract = contract
             # ★ 登記到 resolver，確保 tick.code 能映射回 user-facing symbol
@@ -457,6 +467,7 @@ class ShioajiClient:
                     "Symbol": canonical,
                     "Price": close_price,
                     "Volume": int(getattr(s, 'volume', 0)),
+                    "TotalVolume": int(getattr(s, 'total_volume', 0) or 0),
                     "Open": float(getattr(s, 'open', close_price)),
                     "High": float(getattr(s, 'high', close_price)),
                     "Low": float(getattr(s, 'low', close_price)),
@@ -499,7 +510,7 @@ class ShioajiClient:
         """
         背景訂閱商品報價：不切換 current_contract，但
           1. 登記 resolver alias，讓 tick.code 回呼能對應到 user-facing symbol
-          2. 訂閱 Tick（PnL 計算所需）
+          2. 訂閱 Tick（PnL 計算所需）+ BidAsk（watchlist 切回時的一檔買賣盤）
           3. 推送一份 Snapshot（Reference/LimitUp/LimitDown/初始 BidAsk）給前端，
              避免使用者切換到該商品時看不到漲跌停或一檔買賣盤
 
@@ -516,8 +527,10 @@ class ShioajiClient:
             canonical = self.symbol_resolver.canonical(contract.symbol)
 
             self.api.quote.subscribe(contract, QuoteType.Tick)
+            # ★ 背景商品也訂 BidAsk：watchlist 切回該商品時 DOM 一檔買賣盤才不會停在 snapshot
+            self.api.quote.subscribe(contract, QuoteType.BidAsk)
             self._background_symbols.add(canonical)
-            logger.info(f"  ✅ 背景訂閱 {symbol} Tick 成功 (canonical={canonical})")
+            logger.info(f"  ✅ 背景訂閱 {symbol} Tick+BidAsk 成功 (canonical={canonical})")
 
             # 推送 Snapshot 補齊 Reference / LimitUp / LimitDown / 初始一檔 BidAsk
             try:
@@ -532,6 +545,7 @@ class ShioajiClient:
                         "Symbol": canonical,
                         "Price": close_price,
                         "Volume": int(getattr(s, "volume", 0)),
+                        "TotalVolume": int(getattr(s, "total_volume", 0) or 0),
                         "Open": float(getattr(s, "open", close_price)),
                         "High": float(getattr(s, "high", close_price)),
                         "Low": float(getattr(s, "low", close_price)),

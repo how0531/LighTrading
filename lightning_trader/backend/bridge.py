@@ -69,9 +69,12 @@ def on_shioaji_quote(quote_data: dict):
             ref = float(_val(q.get('Reference', q.get('reference', 0))))
             lu = float(_val(q.get('LimitUp', q.get('limit_up', 0))))
             ld = float(_val(q.get('LimitDown', q.get('limit_down', 0))))
+            # 交易所當日累計量（前端不再自行累加，避免重連/重訂閱時重複計數）
+            tv = int(_val(q.get('TotalVolume', q.get('total_volume', 0))))
             if ref > 0: tick_data["Reference"] = ref
             if lu > 0: tick_data["LimitUp"] = lu
             if ld > 0: tick_data["LimitDown"] = ld
+            if tv > 0: tick_data["TotalVolume"] = tv
 
             if p_val > 0 or ref > 0 or v_val > 0:
                 items_to_send.append({"type": "Tick", "data": tick_data})

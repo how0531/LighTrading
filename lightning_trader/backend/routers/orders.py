@@ -178,7 +178,10 @@ async def update_order(req: UpdateOrderRequest):
     if success:
         return {"status": "success", "message": "改單指令已送出"}
     else:
-        raise HTTPException(status_code=400, detail="改單失敗，找不到對應的委託。")
+        raise HTTPException(status_code=400, detail={
+            "code": "ORDER_NOT_FOUND",
+            "user_msg": "改單失敗，找不到對應的委託。",
+        })
 
 
 @router.post("/cancel_all")
@@ -191,7 +194,10 @@ async def cancel_all(req: CancelAllRequest):
         return {"status": "success", "message": f"成功送出 {cancel_count} 筆刪單指令", "data": snapshot}
     except Exception as e:
         logger.error(f"批次刪單失敗: {e}")
-        raise HTTPException(status_code=500, detail="刪單過程遭遇錯誤")
+        raise HTTPException(status_code=500, detail={
+            "code": "CANCEL_FAILED",
+            "user_msg": "刪單過程遭遇錯誤",
+        })
 
 
 class FlattenRequest(BaseModel):
@@ -268,4 +274,7 @@ async def reverse_position(req: SymbolRequest):
     if success:
         return {"status": "success", "message": "一鍵反向指令已送出"}
     else:
-        raise HTTPException(status_code=400, detail="一鍵反向失敗")
+        raise HTTPException(status_code=400, detail={
+            "code": "REVERSE_FAILED",
+            "user_msg": "一鍵反向失敗",
+        })

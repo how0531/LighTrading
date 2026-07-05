@@ -35,7 +35,7 @@ from fastapi.testclient import TestClient  # noqa: E402
 from backend import main as backend_main  # noqa: E402
 from backend import shared  # noqa: E402
 from backend import rate_limit  # noqa: E402
-from fake_shioaji import Action, FakePosition  # noqa: E402
+from fake_shioaji import Action, FakePosition, QuoteType  # noqa: E402
 
 client = TestClient(backend_main.app)
 
@@ -465,7 +465,98 @@ def test_ws_watch_ack_returns_canonical_aliases():
         assert msg["rejected"] == []
 
 
-# ─── 11. API Token 認證（最後執行：會 reload main） ──────────
+# ─── 11. UX quick-wins：背景訂閱 BidAsk / 防誤殺 / TotalVolume / 錯誤封套 ───
+
+def test_subscribe_background_subscribes_tick_and_bidask():
+    """背景訂閱必須同時訂 Tick 與 BidAsk（watchlist 切回時 DOM 才有買賣盤）。"""
+    sj = shared.shioaji_client
+    api = _fake_api()
+    api.quote.subscribed.clear()
+    old_bg = set(sj._background_symbols)
+    try:
+        sj._background_symbols.clear()
+        canonical = sj.subscribe_background("2890")
+        assert canonical == "2890"
+        assert ("2890", str(QuoteType.Tick)) in api.quote.subscribed
+        assert ("2890", str(QuoteType.BidAsk)) in api.quote.subscribed
+        assert "2890" in sj._background_symbols
+    finally:
+        sj._background_symbols.clear()
+        sj._background_symbols.update(old_bg)
+
+
+def test_main_symbol_switch_spares_background_watched_symbol():
+    """主商品切換的 unsubscribe 不可誤殺背景訂閱（watchlist/持倉）的串流；
+    非背景商品切走時則必須照常取消訂閱。"""
+    sj = shared.shioaji_client
+    api = _fake_api()
+    api.quote.unsubscribed.clear()
+    old_bg = set(sj._background_symbols)
+    old_contract = sj.current_contract
+    try:
+        sj._background_symbols.clear()
+        sj.subscribe_background("2890")   # 2890 在 watchlist（背景訂閱）
+        sj.subscribe("2890")              # 主商品 = 2890
+        sj.subscribe("2330")              # 切走 → 2890 是背景商品，不能取消訂閱
+        assert all(code != "2890" for code, _ in api.quote.unsubscribed), \
+            "主商品切換誤殺了背景訂閱的 2890"
+        sj.subscribe("2890")              # 切走 2330（非背景商品）→ 應照常取消
+        assert ("2330", str(QuoteType.Tick)) in api.quote.unsubscribed
+        assert ("2330", str(QuoteType.BidAsk)) in api.quote.unsubscribed
+    finally:
+        sj._background_symbols.clear()
+        sj._background_symbols.update(old_bg)
+        sj.current_contract = old_contract
+
+
+def test_tick_total_volume_flows_to_broadcast_queue():
+    """v1 tick 帶 total_volume → shioaji_client → bridge → 廣播佇列的
+    Tick 訊息必須含 TotalVolume（前端不再自行累加成交量）。"""
+    import asyncio
+    from types import SimpleNamespace
+
+    async def run():
+        old_loop = shared.fastapi_loop
+        shared.fastapi_loop = asyncio.get_running_loop()
+        try:
+            while not shared.quotes_to_broadcast.empty():
+                shared.quotes_to_broadcast.get_nowait()
+            tick = SimpleNamespace(code="2330", close=505.0, volume=3,
+                                   total_volume=12345, open=500.0, high=506.0,
+                                   low=499.0, avg_price=502.5, tick_type=1,
+                                   datetime="2026-07-05 09:00:00")
+            _fake_api().quote.on_tick_stk(None, tick)   # 觸發已註冊的 v1 回呼
+            await asyncio.sleep(0.05)                    # 讓 call_soon_threadsafe 消化
+            msgs = []
+            while not shared.quotes_to_broadcast.empty():
+                msgs.append(shared.quotes_to_broadcast.get_nowait())
+            return msgs
+        finally:
+            shared.fastapi_loop = old_loop
+
+    msgs = asyncio.run(run())
+    ticks = [m for m in msgs if m["type"] == "Tick" and m["data"]["Symbol"] == "2330"]
+    assert ticks, f"沒有 Tick 訊息進佇列: {msgs}"
+    assert ticks[0]["data"]["TotalVolume"] == 12345
+    assert ticks[0]["data"]["Price"] == 505.0
+
+
+def test_update_order_not_found_returns_structured_error():
+    """改單找不到委託 → detail 必須是結構化封套（code + 中文 user_msg），
+    前端 normalizeApiError 才能還原中文訊息。"""
+    _fake_api().trades = []   # 沒有任何委託 → not found 路徑
+    r = client.post("/api/update_order", json={
+        "symbol": "2330", "action": "Buy",
+        "old_price": 500.0, "new_price": 501.0,
+    })
+    assert r.status_code == 400
+    detail = r.json()["detail"]
+    assert isinstance(detail, dict)
+    assert detail["code"] == "ORDER_NOT_FOUND"
+    assert "找不到對應的委託" in detail["user_msg"]
+
+
+# ─── 12. API Token 認證（最後執行：會 reload main） ──────────
 
 def test_zz_api_token_auth():
     import importlib
