@@ -44,7 +44,7 @@ export interface MiniQuote {
   low: number;
   updatedAt: number;      // local epoch ms
   // Sprint 34：報價看板需要的延伸欄位
-  volume?: number;        // 自「開始訂閱」起累計的成交量；重連會歸零（後端 tick 只給單筆量，前端累加）
+  volume?: number;        // 累計成交量：優先採後端 TotalVolume（交易所累計、單調自癒）；沒有才前端累加單筆量（重連會歸零）
   bidPrice?: number;      // 第一檔委買價（背景商品的 BidAsk 也會廣播過來，這裡一併擷取）
   askPrice?: number;      // 第一檔委賣價
 }
@@ -436,8 +436,11 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
             const ref = Number(data.data.Reference || 0) || existing.reference;
             const high = Number(data.data.High || 0) || existing.high || tickPrice;
             const low  = Number(data.data.Low || 0)  || existing.low  || tickPrice;
-            // Sprint 34：後端 tick.Volume 是單筆量，累加成「本場累計量」（重連歸零，已於 UI 標註）
+            // 累計量：後端若帶 TotalVolume（交易所累計總量）就直接採用 ——
+            // 單調遞增且自癒（重連 / 漏 tick 都不會歸零或短算）；
+            // 沒帶才 fallback 到前端逐筆累加（Sprint 34 舊行為，重連會歸零）
             const tickVol = Number(data.data.Volume || 0);
+            const totalVol = Number(data.data.TotalVolume || 0);
             watchlistDirtyRef.current[tickSym] = {
               ...existing,
               symbol: tickSym,
@@ -445,7 +448,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
               reference: ref,
               high: Math.max(high, tickPrice),
               low: Math.min(low || tickPrice, tickPrice),
-              volume: (existing.volume || 0) + (tickVol > 0 ? tickVol : 0),
+              volume: totalVol > 0
+                ? totalVol
+                : (existing.volume || 0) + (tickVol > 0 ? tickVol : 0),
               updatedAt: Date.now(),
             };
           }

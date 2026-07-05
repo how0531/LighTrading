@@ -305,6 +305,35 @@ describe('TradingContext WS 訊息路由', () => {
     expect(probe.ctx?.watchlistQuotes['2330']?.price).toBe(600);
   });
 
+  it('Tick 帶 TotalVolume：直接覆蓋累計量；沒帶則沿用前端累加 fallback', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    act(() => { probe.ctx!.watchSymbols(['2330']); });
+
+    // 兩筆不帶 TotalVolume 的 tick → 前端累加 3 + 2 = 5
+    act(() => {
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 600, Volume: 3 } });
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 601, Volume: 2 } });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(probe.ctx?.watchlistQuotes['2330']?.volume).toBe(5);
+
+    // 帶 TotalVolume 的 tick → 直接以交易所累計量覆蓋（自癒，不受先前累加影響）
+    act(() => {
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 602, Volume: 1, TotalVolume: 1234 } });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(probe.ctx?.watchlistQuotes['2330']?.volume).toBe(1234);
+
+    // 之後又出現不帶 TotalVolume 的 tick → 從已覆蓋的值繼續累加
+    act(() => {
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 603, Volume: 4 } });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(probe.ctx?.watchlistQuotes['2330']?.volume).toBe(1238);
+  });
+
   it('斷線重連：指數退避 + jitter 排程', async () => {
     // Math.random = 0.5 → jitter 係數 = 0.8 + 0.5*0.4 = 1.0（確定性延遲）
     vi.spyOn(Math, 'random').mockReturnValue(0.5);

@@ -657,6 +657,44 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                   </button>
                 </section>
                 <section>
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">音效</h3>
+                  <div className="space-y-3">
+                    <ToggleItem
+                      label="操作音效"
+                      description="下單 / 刪單 / 改單 / 成交時播放提示音"
+                      enabled={settings.notifications.sound.enabled}
+                      onToggle={() => handleUpdate({
+                        notifications: {
+                          ...settings.notifications,
+                          sound: { ...settings.notifications.sound, enabled: !settings.notifications.sound.enabled },
+                        },
+                      })}
+                    />
+                    <div className={`p-4 rounded-lg bg-white/5 border border-white/5 ${settings.notifications.sound.enabled ? '' : 'opacity-40 pointer-events-none'}`}>
+                      <div className="flex justify-between items-center mb-3">
+                        <div>
+                          <div className="text-sm font-medium text-white">音量</div>
+                          <div className="text-xs text-slate-500 mt-0.5">套用於所有操作音效</div>
+                        </div>
+                        <span className="text-[#D4AF37] font-mono font-bold">
+                          {Math.round(settings.notifications.sound.volume * 100)}%
+                        </span>
+                      </div>
+                      <input
+                        type="range" min="0" max="1" step="0.05"
+                        value={settings.notifications.sound.volume}
+                        onChange={(e) => handleUpdate({
+                          notifications: {
+                            ...settings.notifications,
+                            sound: { ...settings.notifications.sound, volume: parseFloat(e.target.value) },
+                          },
+                        })}
+                        className="w-full h-1.5 bg-[#29344A] rounded-lg appearance-none cursor-pointer accent-[#D4AF37]"
+                      />
+                    </div>
+                  </div>
+                </section>
+                <section>
                   <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-2">本地價格警報</h3>
                   <p className="text-[11px] text-slate-500 mb-3">
                     當 watchlist / target 商品價格穿越設定線時，立即跳出 Toast + 後景時推系統通知。

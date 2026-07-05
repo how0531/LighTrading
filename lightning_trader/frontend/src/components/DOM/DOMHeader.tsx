@@ -242,7 +242,7 @@ const DOMHeaderInner: React.FC<DOMHeaderProps> = ({
 
         <div className="flex flex-col gap-0.5">
           <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">Price Type</span>
-          <select value={priceType} onChange={(e) => setPriceType(e.target.value)} className="bg-[#101623] border border-slate-700 hover:border-slate-600 rounded text-[11px] font-bold py-1 px-1.5 text-[#D4AF37] outline-none cursor-pointer focus:ring-1 focus:ring-slate-500">
+          <select value={priceType} onChange={(e) => setPriceType(e.target.value)} className={`border rounded text-[11px] font-bold py-1 px-1.5 outline-none cursor-pointer focus:ring-1 ${priceType !== 'LMT' ? 'bg-red-500/15 border-red-500/70 hover:border-red-400 text-red-400 focus:ring-red-500' : 'bg-[#101623] border-slate-700 hover:border-slate-600 text-[#D4AF37] focus:ring-slate-500'}`}>
             <option value="LMT">LMT (限價)</option>
             <option value="MKT">MKT (市價)</option>
             <option value="MKP">MKP (範圍市價)</option>

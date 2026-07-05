@@ -193,10 +193,11 @@ const QuoteBoardPanel: React.FC = () => {
                   <td className="px-2 py-1 text-right font-mono text-slate-400">
                     {r.volume > 0 ? r.volume.toLocaleString() : '—'}
                   </td>
-                  <td className="px-2 py-1 text-right font-mono text-emerald-300/70">
+                  {/* 委買=紅系 / 委賣=綠系（與 DOM ladder、dirColor 的紅漲綠跌一致） */}
+                  <td className="px-2 py-1 text-right font-mono text-red-300/70">
                     {r.bidPrice > 0 ? formatPrice(r.bidPrice, r.symbol) : '—'}
                   </td>
-                  <td className="px-2 py-1 text-right font-mono text-red-300/70">
+                  <td className="px-2 py-1 text-right font-mono text-emerald-300/70">
                     {r.askPrice > 0 ? formatPrice(r.askPrice, r.symbol) : '—'}
                   </td>
                 </tr>

@@ -14,6 +14,7 @@
 import { useEffect, useRef } from 'react';
 import { useTradingCore } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
+import { playSound } from '../utils/sound';
 
 export type SimpleOrder = {
   order_id?: string;
@@ -83,6 +84,7 @@ export function useFillNotification(): void {
 
     const { deltas, nextFilled } = diffFills(workingOrders as SimpleOrder[], lastFilledRef.current);
     for (const { order: o, newFills, key: k } of deltas) {
+      playSound('fill'); // 成交提示音（開關/音量由 settings.notifications.sound 控制）
       const sideZh = o.action === 'Buy' ? '買進' : '賣出';
       const title = `已成交 ${newFills} 口 ${o.symbol}`;
       const body = `${sideZh} @${o.price}  (累計 ${o.filled_qty}/${o.qty})`;

@@ -2,6 +2,8 @@ export interface QuoteData {
   Symbol: string;
   Price: number;
   Volume: number;
+  /** 交易所累計總量（選配）：後端 Tick / snapshot 會帶；單調遞增、可自癒 */
+  TotalVolume?: number;
   Open?: number;
   High?: number;
   Low?: number;

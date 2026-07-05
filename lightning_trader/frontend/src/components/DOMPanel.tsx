@@ -278,7 +278,14 @@ export const DOMPanel: React.FC = () => {
         scrollAnchor={scrollAnchor} setScrollAnchor={setScrollAnchor}
         onScrollToAnchor={handleScrollToAnchor}
       />
-      
+
+      {/* 市價模式常駐警示帶：非 LMT 時點擊任意檔位都會直接以市價送出 */}
+      {priceType !== 'LMT' && (
+        <div className="flex-shrink-0 px-3 py-1 bg-amber-500/15 border-y border-amber-500/40 text-amber-300 text-[11px] font-bold text-center tracking-wide">
+          ⚡ 市價模式：點擊任意價位即以市價送出
+        </div>
+      )}
+
       <div ref={tableRef} className="flex-1 overflow-auto bg-black/10 custom-scrollbar">
         <DOMTable
           fullPrices={fullPrices} isStale={isStale} compactMode={compactMode} qData={qData} currentPrice={currentPrice} refPrice={refPrice}

@@ -215,24 +215,29 @@ export function useDOMLogic() {
 
     try {
       let placedCount = 0;
+      let placedQty = 0; // 實際送出的總口數（拆單時逐批累計）
       if (splitCfg.enabled && orderValue > splitCfg.threshold) {
         const lots = splitOrders(orderValue, splitCfg.minPerLot, splitCfg.maxPerLot);
         for (let i = 0; i < lots.length; i++) {
           const ok = await sendOrder(lots[i]);
           if (!ok) break; // 使用者拒絕確認 → 不再送出剩餘批次
           placedCount += 1;
+          placedQty += lots[i];
           if (i < lots.length - 1) {
             await randomDelay(splitCfg.minDelay, splitCfg.maxDelay);
           }
         }
       } else {
-        if (await sendOrder(orderValue)) placedCount = 1;
+        if (await sendOrder(orderValue)) { placedCount = 1; placedQty = orderValue; }
       }
 
       if (placedCount > 0) {
         setOrderFeedback({ price, action, status: 'success' });
         scheduleOrderRefresh();
         playSound('order_placed');
+        const dirZh = action === 'Buy' ? '買' : '賣';
+        const atLabel = (priceType === 'MKT' || priceType === 'MKP') ? '市價' : price;
+        toast.success(`${dirZh} ${placedQty} @ ${atLabel} ✓`);
       } else {
         setOrderFeedback(null); // 使用者取消：清掉 pending 閃爍即可
       }
@@ -310,6 +315,11 @@ export function useDOMLogic() {
       playSound('order_replaced');
       scheduleOrderRefresh();
     } catch (e) {
+      const err = normalizeApiError(e);
+      if (err.code === 'ORDER_NOT_FOUND') {
+        // 掛單其實已不存在（外部已刪/已成交）→ 立即對帳，清掉 ladder 上的殘留掛單徽章
+        scheduleOrderRefresh();
+      }
       handleApiError(e, '改單失敗');
     }
   }, [targetSymbol, workingBuyMap, workingSellMap, scheduleOrderRefresh, handleApiError]);

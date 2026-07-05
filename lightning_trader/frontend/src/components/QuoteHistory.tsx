@@ -1,5 +1,14 @@
 import React from 'react';
 import { useQuotes } from '../contexts/TradingContext';
+import { formatPrice } from '../utils/instrument';
+
+// ISO 時間字串 → HH:MM:SS（拿不到就原樣回傳；與 TimeSalesPanel 同邏輯）
+function fmtTime(iso: string): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleTimeString('en-GB', { hour12: false });
+}
 
 const QuoteHistory: React.FC = () => {
   const { quoteHistory } = useQuotes();
@@ -22,13 +31,16 @@ const QuoteHistory: React.FC = () => {
           <tbody>
             {quoteHistory.map((q, idx) => {
               const prevPrice = idx < quoteHistory.length - 1 ? quoteHistory[idx + 1].Price : q.Price;
-              const isUp = q.Price >= prevPrice;
+              // 台股慣例：紅漲 / 綠跌 / 平盤灰（與 WatchlistPanel 一致）
+              const up = q.Price > prevPrice;
+              const down = q.Price < prevPrice;
+              const priceColor = up ? 'text-red-400' : down ? 'text-emerald-400' : 'text-slate-300';
 
               return (
                 <tr key={idx} className="border-b border-slate-800/50 hover:bg-slate-800/80 transition-colors">
-                  <td className="px-4 py-2 text-slate-500">{q.TickTime}</td>
-                  <td className={`px-4 py-2 text-right font-bold ${isUp ? 'text-emerald-400' : 'text-red-400'}`}>
-                    {q.Price.toFixed(2)}
+                  <td className="px-4 py-2 text-slate-500">{fmtTime(q.TickTime)}</td>
+                  <td className={`px-4 py-2 text-right font-bold ${priceColor}`}>
+                    {formatPrice(q.Price, q.Symbol)}
                   </td>
                   <td className="px-4 py-2 text-right text-slate-300">{q.Volume}</td>
                 </tr>

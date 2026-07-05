@@ -23,7 +23,19 @@ interface ApiErrorDetail {
 export const normalizeApiError = (err: unknown): LighTradeApiError => {
   if (axios.isAxiosError(err)) {
     const axiosError = err as AxiosError;
-    const errorData = axiosError.response?.data as { detail?: ApiErrorDetail } | undefined;
+    const errorData = axiosError.response?.data as { detail?: ApiErrorDetail | string } | undefined;
+
+    // 部分後端 endpoint 直接 raise HTTPException(detail="訊息字串")：
+    // detail 是純字串而非結構化物件，直接把它當 user_msg 呈現
+    if (typeof errorData?.detail === 'string') {
+      return {
+        status: axiosError.response?.status || 500,
+        code: 'API_ERROR',
+        user_msg: errorData.detail,
+        raw: axiosError,
+      };
+    }
+
     const detail: ApiErrorDetail = errorData?.detail || {};
 
     return {

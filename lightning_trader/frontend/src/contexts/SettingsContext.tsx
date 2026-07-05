@@ -2,6 +2,7 @@
  * Context Provider 與 hook 需同檔共享；改動本檔會整頁 HMR reload，可接受 */
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { apiClient } from '../api/client';
+import { configureSound } from '../utils/sound';
 import type { SizingMode } from '../utils/sizing';
 import type { FeeConfig } from '../utils/fees';
 import { DEFAULT_FEE_CONFIG } from '../utils/fees';
@@ -72,6 +73,11 @@ export interface Settings {
       fill: boolean;
       risk_breach: boolean;
     };
+    /** 操作音效（下單 / 刪單 / 改單 / 成交提示音）開關與音量（0–1） */
+    sound: {
+      enabled: boolean;
+      volume: number;
+    };
   };
   /** Sprint 23：自選清單跨裝置同步 — 從 localStorage 搬進 SettingsContext，
    *  自動透過 /api/user_settings 跨裝置同步。 */
@@ -134,6 +140,7 @@ const DEFAULT_SETTINGS: Settings = {
   notifications: {
     webhookUrl: '',
     events: { fill: false, risk_breach: false },
+    sound: { enabled: true, volume: 0.6 },
   },
   watchlist: ['TXFR1', 'MXFR1', '2330', '2454', '0050'],
   priceAlerts: [],
@@ -180,6 +187,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           notifications: {
             webhookUrl: parsed.notifications?.webhookUrl ?? DEFAULT_SETTINGS.notifications.webhookUrl,
             events: { ...DEFAULT_SETTINGS.notifications.events, ...(parsed.notifications?.events || {}) },
+            sound: { ...DEFAULT_SETTINGS.notifications.sound, ...(parsed.notifications?.sound || {}) },
           },
           watchlist: Array.isArray(parsed.watchlist) ? parsed.watchlist : DEFAULT_SETTINGS.watchlist,
           priceAlerts: Array.isArray(parsed.priceAlerts) ? parsed.priceAlerts : DEFAULT_SETTINGS.priceAlerts,
@@ -212,6 +220,12 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           splitOrder: { ...prev.splitOrder, ...(remote.splitOrder || {}) },
           sizing: { ...prev.sizing, ...(remote.sizing || {}) },
           fees: { ...prev.fees, ...(remote.fees || {}) },
+          notifications: {
+            ...prev.notifications,
+            ...(remote.notifications || {}),
+            events: { ...prev.notifications.events, ...(remote.notifications?.events || {}) },
+            sound: { ...prev.notifications.sound, ...(remote.notifications?.sound || {}) },
+          },
         }));
       }
       hydratedFromServerRef.current = true;
@@ -220,6 +234,11 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     });
     return () => { cancelled = true; };
   }, []);
+
+  // 音效開關/音量 → 注入 utils/sound 的模組層級設定（playSound 免 context 穿透）
+  useEffect(() => {
+    configureSound(settings.notifications.sound);
+  }, [settings.notifications.sound]);
 
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
