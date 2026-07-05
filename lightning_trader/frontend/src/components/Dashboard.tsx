@@ -27,6 +27,8 @@ const MultiChartPanel       = lazy(() => import('./MultiChartPanel'));
 const TimeSalesPanel        = lazy(() => import('./TimeSalesPanel'));
 // Sprint 36：盤勢排行 / 漲跌幅榜 lazy
 const MoversPanel           = lazy(() => import('./MoversPanel'));
+// Sprint D：⚡全開多 DOM 宮格 lazy（只在使用者開啟 overlay 時載入）
+const MultiDOMGrid          = lazy(() => import('./MultiDOMGrid'));
 // Sprint 18：hotkey 速查表（非 lazy；很小、且 ? 觸發要永遠 mounted）
 import { HotkeyCheatSheet } from './HotkeyCheatSheet';
 // UX 批次 4：盤後 / 斷線狀態細橫幅（非 lazy；要在首屏立即反映連線狀態）
@@ -119,6 +121,8 @@ const DashboardContent: React.FC = () => {
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isLayoutLocked, setIsLayoutLocked] = useState(true);
+  // Sprint D：⚡全開多 DOM 宮格 overlay
+  const [isMultiDomOpen, setIsMultiDomOpen] = useState(false);
   // Sprint 31：focus 預設依 preset；custom 維持原本「預設專注模式」
   const [isFocusMode, setIsFocusMode] = useState(presetDef ? presetDef.focusMode : true);
   // Sprint 11 R1：focus mode 內的 DOM / Chart tab 切換
@@ -220,6 +224,7 @@ const DashboardContent: React.FC = () => {
         layoutPreset={activePreset}
         onSelectPreset={applyPreset}
         riskStatus={riskStatus}
+        onOpenMultiDom={() => setIsMultiDomOpen(true)}
       />
 
       {isFocusMode ? (
@@ -334,6 +339,15 @@ const DashboardContent: React.FC = () => {
             </div>
           </ResponsiveGridLayout>
         </div>
+        </Suspense>
+      )}
+
+      {/* Sprint D：⚡全開多 DOM 宮格 — 全螢幕 overlay（Esc 關閉；lazy，開啟才載 chunk） */}
+      {isMultiDomOpen && (
+        <Suspense fallback={null}>
+          <ErrorBoundary label="全開宮格">
+            <MultiDOMGrid onClose={() => setIsMultiDomOpen(false)} />
+          </ErrorBoundary>
         </Suspense>
       )}
 

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { useQuotes, useTradingCore } from '../contexts/TradingContext';
-import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw, ShieldAlert } from 'lucide-react';
+import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw, ShieldAlert, Zap } from 'lucide-react';
 import { apiClient, getAccountBalance } from '../api/client';
 import { SymbolPicker } from './SymbolPicker';
 import { PRESET_ORDER, presetLabel, LAYOUT_PRESETS, type LayoutPresetId } from '../utils/layoutPresets';
@@ -32,9 +32,11 @@ interface HeaderProps {
   onSelectPreset?: (id: LayoutPresetId) => void;
   /** UX 批次 4 Item 3：日虧損儀表（Dashboard 的 useRiskStatus 傳入，避免重複輪詢） */
   riskStatus?: RiskStatus | null;
+  /** Sprint D：⚡全開多 DOM 宮格（自選前 N 檔各開一個 MiniDOM 的全螢幕 overlay） */
+  onOpenMultiDom?: () => void;
 }
 
-const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode, layoutPreset = 'custom', onSelectPreset, riskStatus = null }) => {
+const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode, layoutPreset = 'custom', onSelectPreset, riskStatus = null, onOpenMultiDom }) => {
   const { isConnected, isTickStale, brokerState, targetSymbol, subscribe, forceReconnect } = useTradingCore();
   const { totalRealtimePnl } = useQuotes(); // 即時 PnL 跟著 tick 走 → 高頻 context
   const [symInput, setSymInput] = React.useState(targetSymbol);
@@ -258,6 +260,19 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
             ))}
           </select>
         </div>
+
+        {/* Sprint D：⚡全開 — 自選前 N 檔各開一個 MiniDOM 的全螢幕宮格 */}
+        {onOpenMultiDom && (
+          <button
+            onClick={onOpenMultiDom}
+            className="flex items-center gap-1 px-2.5 py-2 rounded-lg transition-all border bg-slate-800 text-amber-300/90 border-slate-700 hover:border-amber-400/60 hover:text-amber-300 hover:shadow-[0_0_8px_rgba(251,191,36,0.25)] cursor-pointer"
+            title="⚡全開：自選清單前 N 檔各開一個迷你 DOM 宮格（點格下單；Esc 關閉）"
+            data-testid="open-multidom"
+          >
+            <Zap className="w-4 h-4" />
+            <span className="text-[11px] font-black tracking-wider hidden md:inline">全開</span>
+          </button>
+        )}
 
         <button
           onClick={onToggleFocusMode}

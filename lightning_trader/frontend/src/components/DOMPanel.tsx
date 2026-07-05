@@ -4,6 +4,7 @@ import { useLayOrders } from '../hooks/useLayOrders';
 import { DOMHeader } from './DOM/DOMHeader';
 import { DOMTable } from './DOM/DOMTable';
 import { DOMFooter } from './DOM/DOMFooter';
+import { DepthHeatmap } from './DOM/DepthHeatmap';
 import { LayOrdersPanel } from './DOM/LayOrdersPanel';
 import { getTickSize } from '../utils/instrument';
 import { apiClient } from '../api/client';
@@ -44,6 +45,10 @@ export const DOMPanel: React.FC = () => {
   // Sprint C：鋪單（多價位掛單）— 獨立於拆單的送出/中止/撤單邏輯
   const { layProgress, abortLay, submitLay, laidOrders, cancelLaid } = useLayOrders();
   const [showLayPanel, setShowLayPanel] = useState(false);
+
+  // Sprint D：五檔委託牆熱力圖 — ladder 上方緊湊區的可切換視圖（預設關閉，
+  // 一次性 UI 狀態不持久化；ladder 本體是 flex-1 overflow-auto，不會被擠壓變形）
+  const [showDepthWall, setShowDepthWall] = useState(false);
 
   // ladder scroll 狀態（local ref — 不進 hook，避免跨模組改動 ref.current）
   const tableRef = useRef<HTMLDivElement>(null);
@@ -315,6 +320,7 @@ export const DOMPanel: React.FC = () => {
         scrollAnchor={scrollAnchor} setScrollAnchor={setScrollAnchor}
         onScrollToAnchor={handleScrollToAnchor}
         chaseMode={chaseMode} setChaseMode={setChaseMode}
+        showDepthWall={showDepthWall} setShowDepthWall={setShowDepthWall}
       />
 
       {/* 追價模式常駐警示帶：點價 / 追買追賣熱鍵改送 CHASE 智慧單 */}
@@ -330,6 +336,9 @@ export const DOMPanel: React.FC = () => {
           ⚡ 市價模式：點擊任意價位即以市價送出
         </div>
       )}
+
+      {/* Sprint D：五檔委託牆熱力圖（ladder 上方緊湊區；固定高度、不擠壓可捲動的 ladder） */}
+      {showDepthWall && <DepthHeatmap targetSymbol={targetSymbol} />}
 
       <div ref={tableRef} className="flex-1 overflow-auto bg-black/10 custom-scrollbar">
         <DOMTable

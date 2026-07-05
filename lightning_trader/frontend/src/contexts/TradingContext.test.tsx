@@ -334,6 +334,130 @@ describe('TradingContext WS 訊息路由', () => {
     expect(probe.ctx?.watchlistQuotes['2330']?.volume).toBe(1238);
   });
 
+  // ─── Sprint D：bidAskBySymbol — watch 商品的完整五檔 ───
+
+  it('bidAskBySymbol：非主商品的 BidAsk 完整五檔進 map（100ms flush）', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    act(() => { probe.ctx!.watchSymbols(['2454']); });
+    act(() => {
+      ws.message({
+        type: 'BidAsk',
+        data: {
+          Symbol: '2454', // 非 targetSymbol（2330）
+          BidPrice: [999, 998, 997, 996, 995], BidVolume: [10, 20, 30, 40, 50],
+          AskPrice: [1000, 1001, 1002, 1003, 1004], AskVolume: [5, 15, 25, 35, 45],
+          Time: '09:00:00',
+        },
+      });
+    });
+    // flush 前不可見
+    expect(probe.ctx?.bidAskBySymbol['2454']).toBeUndefined();
+
+    await act(async () => { vi.advanceTimersByTime(100); });
+    const book = probe.ctx?.bidAskBySymbol['2454'];
+    expect(book).toBeDefined();
+    expect(book?.BidPrice).toEqual([999, 998, 997, 996, 995]);
+    expect(book?.AskVolume).toEqual([5, 15, 25, 35, 45]);
+    // 非主商品：主 bidAsk（qData 用）不被污染
+    expect(probe.ctx?.bidAsk).toBeNull();
+    // 未 watch 的商品不進 map
+    act(() => {
+      ws.message({
+        type: 'BidAsk',
+        data: { Symbol: '9999', BidPrice: [1], BidVolume: [1], AskPrice: [2], AskVolume: [1], Time: '' },
+      });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(probe.ctx?.bidAskBySymbol['9999']).toBeUndefined();
+  });
+
+  it('bidAskBySymbol：canonical alias 歸一（TSE2330 → 自選 key 2330）', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    act(() => { probe.ctx!.watchSymbols(['2330']); });
+    await act(async () => {
+      ws.message({
+        action: 'watch', status: 'success',
+        symbols: ['2330'], rejected: [], aliases: { '2330': 'TSE2330' },
+      });
+    });
+
+    act(() => {
+      ws.message({
+        type: 'BidAsk',
+        data: {
+          Symbol: 'TSE2330',
+          BidPrice: [599, 598], BidVolume: [7, 8],
+          AskPrice: [600, 601], AskVolume: [9, 10],
+          Time: '09:00:00',
+        },
+      });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    const book = probe.ctx?.bidAskBySymbol['2330'];
+    expect(book).toBeDefined();
+    expect(book?.Symbol).toBe('2330'); // Symbol 覆寫為歸一後的自選 key
+    expect(book?.BidVolume).toEqual([7, 8]);
+    expect(probe.ctx?.bidAskBySymbol['TSE2330']).toBeUndefined();
+  });
+
+  it('bidAskBySymbol：dirty flush 只換有更新的 symbol 的物件參照', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    act(() => { probe.ctx!.watchSymbols(['2330', '2454']); });
+    const mkBook = (sym: string, bid: number) => ({
+      Symbol: sym, BidPrice: [bid], BidVolume: [1], AskPrice: [bid + 1], AskVolume: [1], Time: '',
+    });
+    act(() => {
+      ws.message({ type: 'BidAsk', data: mkBook('2330', 100) });
+      ws.message({ type: 'BidAsk', data: mkBook('2454', 999) });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    const ref2330 = probe.ctx!.bidAskBySymbol['2330'];
+    const ref2454 = probe.ctx!.bidAskBySymbol['2454'];
+    expect(ref2330).toBeDefined();
+    expect(ref2454).toBeDefined();
+
+    // 只更新 2330 → 2454 的參照必須不變（MiniDOM memo 依此跳過重繪）
+    act(() => {
+      ws.message({ type: 'BidAsk', data: mkBook('2330', 101) });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(probe.ctx!.bidAskBySymbol['2330']).not.toBe(ref2330);
+    expect(probe.ctx!.bidAskBySymbol['2330'].BidPrice).toEqual([101]);
+    expect(probe.ctx!.bidAskBySymbol['2454']).toBe(ref2454);
+  });
+
+  it('bidAskBySymbol：自選移除後修剪對應 entry（含 dirty 緩衝）', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    act(() => { probe.ctx!.watchSymbols(['2330', '2454']); });
+    act(() => {
+      ws.message({
+        type: 'BidAsk',
+        data: { Symbol: '2454', BidPrice: [999], BidVolume: [1], AskPrice: [1000], AskVolume: [1], Time: '' },
+      });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(probe.ctx?.bidAskBySymbol['2454']).toBeDefined();
+
+    // 再塞一筆進 dirty 緩衝（未 flush），隨即移除自選 → flush 後不得復活
+    act(() => {
+      ws.message({
+        type: 'BidAsk',
+        data: { Symbol: '2454', BidPrice: [998], BidVolume: [2], AskPrice: [999], AskVolume: [2], Time: '' },
+      });
+      probe.ctx!.watchSymbols(['2330']);
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    expect(probe.ctx?.bidAskBySymbol['2454']).toBeUndefined();
+  });
+
   it('TradeUpdate 成交事件 → recentFills（正規化 + 重複 id 忽略）', async () => {
     const { ws } = await setup();
     await act(async () => { ws.open(); });

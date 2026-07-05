@@ -1,5 +1,5 @@
 import React from 'react';
-import { Lock, Zap, Crosshair } from 'lucide-react';
+import { Lock, Zap, Crosshair, Flame } from 'lucide-react';
 import { formatPrice } from '../../utils/instrument';
 import { computeChange } from '../../utils/quoteBoard';
 import { useSettings } from '../../contexts/SettingsContext';
@@ -41,6 +41,9 @@ interface DOMHeaderProps {
   /** Sprint C：追價模式 — 開啟時 ladder 點價 / 追買追賣熱鍵改送 CHASE 智慧單 */
   chaseMode: boolean;
   setChaseMode: (v: boolean) => void;
+  /** Sprint D：五檔委託牆熱力圖（時間×價格 canvas；顯示於 ladder 上方緊湊區） */
+  showDepthWall: boolean;
+  setShowDepthWall: (v: boolean) => void;
 }
 
 function formatNT(n: number): string {
@@ -64,6 +67,7 @@ const DOMHeaderInner: React.FC<DOMHeaderProps> = ({
   orderValue, setOrderValue,
   accountEquity, scrollAnchor, setScrollAnchor, onScrollToAnchor,
   chaseMode, setChaseMode,
+  showDepthWall, setShowDepthWall,
 }) => {
   const netQty = currentPosition ? (currentPosition.direction === 'Buy' ? currentPosition.qty : -currentPosition.qty) : 0;
   const { settings, updateSetting } = useSettings();
@@ -183,6 +187,22 @@ const DOMHeaderInner: React.FC<DOMHeaderProps> = ({
               </span>
             </div>
           )}
+          {/* Sprint D 委託牆：五檔掛量的時間×價格熱力圖，顯示於 ladder 上方（預設關閉） */}
+          <button
+            onClick={() => setShowDepthWall(!showDepthWall)}
+            className={`px-2 py-1 rounded-md border flex items-center gap-1 text-[10px] font-black transition-colors cursor-pointer ${
+              showDepthWall
+                ? 'border-orange-500/70 bg-orange-900/40 text-orange-300'
+                : 'border-slate-600 bg-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+            title={showDepthWall
+              ? '委託牆熱力圖（開）：五檔掛量的時間×價格熱圖顯示於 ladder 上方。點擊關閉。'
+              : '委託牆熱力圖（關）：點擊開啟，以熱圖觀察大單掛撤與委託牆推移（買紅賣綠、白線為成交價軌跡）。'}
+            data-testid="depth-wall-toggle"
+          >
+            <Flame className="w-3 h-3" />
+            牆
+          </button>
           {/* Sprint C 追價模式：開啟時 ladder 點價 / 追買追賣熱鍵改送 CHASE 智慧單（樣式語彙比照戰鬥鎖） */}
           <button
             onClick={() => setChaseMode(!chaseMode)}

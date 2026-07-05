@@ -6,6 +6,7 @@ import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { useApiErrorToast } from './useApiErrorToast';
 import { splitOrders, randomDelay } from '../utils/splitOrder';
+import { placeOrderWithRiskConfirm } from '../utils/orderExec';
 import { buildChasePayload } from '../utils/chase';
 import { symbolMatches } from '../utils/instrument';
 import { buildWorkingOrderMap } from '../utils/workingOrders';
@@ -270,39 +271,15 @@ export function useDOMLogic() {
         order_type: orderType, price_type: effPriceType, order_cond: orderCond, order_lot: orderLot,
       };
 
-      // 送單，處理後端 409 CONFIRM_REQUIRED（RiskManager WARNING 需 confirm:true 重送）。
-      // 回傳 true=已下單, false=使用者拒絕確認。同一次操作只問一次，
-      // 拆單後續批次沿用已確認結果。其餘錯誤 rethrow 給外層統一處理。
+      // 送單核心抽到 utils/orderExec.placeOrderWithRiskConfirm（Sprint D，與 MiniDOM 宮格共用）：
+      // POST + 後端 409 CONFIRM_REQUIRED 確認重送。回傳 true=已下單, false=使用者拒絕確認。
+      // 同一次操作只問一次，拆單後續批次沿用已確認結果。其餘錯誤 rethrow 給外層統一處理。
       let confirmGranted = preConfirmed;
       const sendOrder = async (qty: number): Promise<boolean> => {
-        const payload = confirmGranted
-          ? { ...basePayload, qty, confirm: true }
-          : { ...basePayload, qty };
-        try {
-          await apiClient.post('/place_order', payload);
-          return true;
-        } catch (e) {
-          const err = normalizeApiError(e);
-          if (err.status === 409 && err.code === 'CONFIRM_REQUIRED') {
-            const message = [err.user_msg, ...(err.warnings ?? [])].filter(Boolean).join('\n');
-            // 風控警告：danger 樣式對話框（promise-based，不阻塞報價更新）
-            const ok = await confirm({
-              title: '風控警告',
-              message,
-              confirmLabel: '確認送單',
-              danger: true,
-            });
-            if (ok) {
-              confirmGranted = true;
-              // 重送「相同 payload + confirm:true」
-              await apiClient.post('/place_order', { ...basePayload, qty, confirm: true });
-              return true;
-            }
-            toast.info('已取消下單');
-            return false;
-          }
-          throw e;
-        }
+        const outcome = await placeOrderWithRiskConfirm({ ...basePayload, qty }, confirm, confirmGranted);
+        if (outcome.confirmGranted) confirmGranted = true;
+        if (!outcome.placed) toast.info('已取消下單');
+        return outcome.placed;
       };
 
       try {

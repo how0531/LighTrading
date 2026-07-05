@@ -79,6 +79,11 @@ export interface QuotesContextType {
   quoteHistory: QuoteData[];
   // Sprint 12：所有 watchlist + position 商品的最新 mini-quote（key = canonical symbol）
   watchlistQuotes: Record<string, MiniQuote>;
+  // Sprint D：watch 商品的完整五檔（背景訂閱已含 BidAsk，之前只擷取第一檔進 MiniQuote）。
+  // key 與 watchlistQuotes 同一套：canonical 廣播 symbol 先經 canonicalAliasRef 歸一回
+  // 使用者輸入的自選 key（TSE2330 → 2330），MultiDOMGrid / MiniDOM 直接用自選清單查表。
+  // flush 沿用 100ms dirty-set：只有有新 BidAsk 的 symbol 才換物件參照。
+  bidAskBySymbol: Record<string, BidAskData>;
   // 即時損益（前端隨 tick 計算 + 後端 PnLUpdate 推播）
   realtimePositions: RealtimePosition[];
   totalRealtimePnl: number;
@@ -192,6 +197,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [watchlistQuotes, setWatchlistQuotes] = useState<Record<string, MiniQuote>>({});
   const watchlistDirtyRef = useRef<Record<string, MiniQuote>>({});
   const watchlistQuotesRef = useRef<Record<string, MiniQuote>>({}); // Sprint 34：mirror state，給 onmessage 跨 flush 讀累計值
+  // Sprint D：watch 商品的完整五檔 — 同一套 dirty-set 100ms flush（key 同 watchlistQuotes）
+  const [bidAskBySymbol, setBidAskBySymbol] = useState<Record<string, BidAskData>>({});
+  const bidAskBySymbolDirtyRef = useRef<Record<string, BidAskData>>({});
   const watchSymbolsRef = useRef<Set<string>>(new Set());  // 聯集（給 onmessage 過濾 + onopen 重發）
   // Sprint 34：watch 訂閱拆成兩個來源，最終送後端的是聯集
   const primaryWatchRef = useRef<Set<string>>(new Set());  // 自選清單（WatchlistPanel / QuoteBoardPanel）
@@ -335,6 +343,14 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           watchlistQuotesRef.current = next; // 同步 mirror，供下一批 tick 累加用
           return next;
         });
+      }
+      // Sprint D：完整五檔 dirty flush — 只有收到新 BidAsk 的 symbol 換新物件參照，
+      // 其餘 key 沿用舊參照（MiniDOM React.memo 據此跳過重繪）
+      const baDirtyKeys = Object.keys(bidAskBySymbolDirtyRef.current);
+      if (baDirtyKeys.length > 0) {
+        const updates = bidAskBySymbolDirtyRef.current;
+        bidAskBySymbolDirtyRef.current = {};
+        setBidAskBySymbol((prev) => ({ ...prev, ...updates }));
       }
     }, 100);
     return () => clearInterval(timer);
@@ -525,6 +541,12 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 bidPrice: bid > 0 ? bid : existing.bidPrice,
                 askPrice: ask > 0 ? ask : existing.askPrice,
                 updatedAt: Date.now(),
+              };
+              // Sprint D：完整五檔進 bidAskBySymbol（MiniDOM 宮格資料源）。
+              // Symbol 覆寫為歸一後的自選 key，消費端不必再管 canonical 前綴
+              bidAskBySymbolDirtyRef.current[baSym] = {
+                ...(data.data as BidAskData),
+                Symbol: baSym,
               };
             }
           }
@@ -765,6 +787,17 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       watchlistQuotesRef.current = next;
       return next;
     });
+    // Sprint D：完整五檔表同步修剪（含 dirty 緩衝，避免下次 flush 又把舊 symbol 塞回來）
+    for (const s of Object.keys(bidAskBySymbolDirtyRef.current)) {
+      if (!union.has(s)) delete bidAskBySymbolDirtyRef.current[s];
+    }
+    setBidAskBySymbol((prev) => {
+      const next: Record<string, BidAskData> = {};
+      for (const s of union) {
+        if (prev[s]) next[s] = prev[s];
+      }
+      return next;
+    });
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN && union.size > 0) {
       ws.send(JSON.stringify({ action: 'watch', symbols: Array.from(union) }));
@@ -849,9 +882,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // ── Context values ──────────────────────────────────────────────
   // 高頻：100ms flush 更新的 tick 資料
   const quotesValue = useMemo<QuotesContextType>(() => ({
-    quote, bidAsk, quoteHistory, watchlistQuotes,
+    quote, bidAsk, quoteHistory, watchlistQuotes, bidAskBySymbol,
     realtimePositions, totalRealtimePnl, totalRealizedPnl,
-  }), [quote, bidAsk, quoteHistory, watchlistQuotes, realtimePositions, totalRealtimePnl, totalRealizedPnl]);
+  }), [quote, bidAsk, quoteHistory, watchlistQuotes, bidAskBySymbol, realtimePositions, totalRealtimePnl, totalRealizedPnl]);
 
   // 低頻：連線 / 帳戶 / 委託 + 全部 action（action 皆 useCallback，value 很少換新）
   const coreValue = useMemo<TradingCoreContextType>(() => ({

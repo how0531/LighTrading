@@ -61,6 +61,7 @@ const quotesValue: QuotesContextType = {
   bidAsk: null,
   quoteHistory: [],
   watchlistQuotes: {},
+  bidAskBySymbol: {},
   realtimePositions: [],
   totalRealtimePnl: 0,
   totalRealizedPnl: 0,
