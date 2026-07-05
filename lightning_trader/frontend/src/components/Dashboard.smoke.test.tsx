@@ -2,6 +2,7 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { ToastProvider } from '../contexts/ToastContext';
+import { ConfirmProvider } from '../contexts/ConfirmContext';
 import { SettingsProvider } from '../contexts/SettingsContext';
 import Dashboard from './Dashboard';
 
@@ -42,9 +43,11 @@ describe('Dashboard smoke', () => {
   it('renders focus-mode dashboard with DOM panel', async () => {
     render(
       <ToastProvider>
-        <SettingsProvider>
-          <Dashboard />
-        </SettingsProvider>
+        <ConfirmProvider>
+          <SettingsProvider>
+            <Dashboard />
+          </SettingsProvider>
+        </ConfirmProvider>
       </ToastProvider>,
     );
     // DOMTable 空狀態文案（尚無報價）

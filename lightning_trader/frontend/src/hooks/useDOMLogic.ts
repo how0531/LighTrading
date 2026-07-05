@@ -3,6 +3,7 @@ import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { apiClient, normalizeApiError } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
 import { useApiErrorToast } from './useApiErrorToast';
 import { splitOrders, randomDelay } from '../utils/splitOrder';
 import { symbolMatches } from '../utils/instrument';
@@ -20,6 +21,13 @@ export interface OrderFeedback {
   status: 'pending' | 'success' | 'error';
 }
 
+/** 拆單進度（大單拆多筆連送時暴露給 UI 顯示 + 中止） */
+export interface SplitProgress {
+  sent: number;
+  total: number;
+  aborted: boolean;
+}
+
 export function useDOMLogic() {
   // 低頻：連線 / 帳戶 / 委託 / actions
   const {
@@ -31,6 +39,7 @@ export function useDOMLogic() {
   // 高頻：tick 資料
   const { quote, bidAsk } = useQuotes();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const handleApiError = useApiErrorToast();
 
   const [orderType, setOrderType] = useState('ROD');
@@ -47,6 +56,13 @@ export function useDOMLogic() {
   const [orderFeedback, setOrderFeedback] = useState<OrderFeedback | null>(null);
   const feedbackTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const isOrderPendingRef = useRef(false);
+  // in-flight 去重被 block 時的輕量回饋（toast 節流：1 秒內不重複跳）
+  const blockedToastAtRef = useRef(0);
+
+  // 拆單進度 + 中止（Sprint UX3）
+  const [splitProgress, setSplitProgress] = useState<SplitProgress | null>(null);
+  const splitAbortRef = useRef(false);
+  const abortSplit = useCallback(() => { splitAbortRef.current = true; }, []);
 
   const syncTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
@@ -165,99 +181,139 @@ export function useDOMLogic() {
 
   // --- 下單邏輯 ---
   const handlePlaceOrder = useCallback(async (price: number, action: 'Buy' | 'Sell') => {
-    if (isOrderPendingRef.current || !targetSymbol) return;
-    // 前端二次確認：戰鬥模式（已解鎖）一鍵直送；否則若開啟下單確認則先問。
-    // 前端確認過就視同「已授權」，送單直接帶 confirm:true —— 避免與後端風控
-    // WARNING 的 409 CONFIRM_REQUIRED 重複，一次下單最多問一次。
-    let preConfirmed = false;
-    if (settings.confirmations.placeOrder && !settings.isCombatMode) {
-      const dir = action === 'Buy' ? '買進' : '賣出';
-      const at = (priceType === 'MKT' || priceType === 'MKP') ? '市價' : price;
-      if (!window.confirm(`確認${dir} ${targetSymbol} ${orderValue} 單位 @ ${at}？`)) return;
-      preConfirmed = true;
+    if (!targetSymbol) return;
+    if (isOrderPendingRef.current) {
+      // in-flight 去重：上一筆還在送 → 輕量回饋（1 秒內不重複跳）
+      const now = Date.now();
+      if (now - blockedToastAtRef.current >= 1000) {
+        blockedToastAtRef.current = now;
+        toast.info('上一筆處理中…');
+      }
+      return;
     }
     isOrderPendingRef.current = true;
-    setOrderFeedback({ price, action, status: 'pending' });
-    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+    try {
+      // 前端二次確認：戰鬥模式（已解鎖）一鍵直送；否則若開啟下單確認則先問。
+      // 前端確認過就視同「已授權」，送單直接帶 confirm:true —— 避免與後端風控
+      // WARNING 的 409 CONFIRM_REQUIRED 重複，一次下單最多問一次。
+      let preConfirmed = false;
+      if (settings.confirmations.placeOrder && !settings.isCombatMode) {
+        const dir = action === 'Buy' ? '買進' : '賣出';
+        const at = (priceType === 'MKT' || priceType === 'MKP') ? '市價' : price;
+        const ok = await confirm({
+          title: '下單確認',
+          message: `確認${dir} ${targetSymbol} ${orderValue} 單位 @ ${at}？`,
+          confirmLabel: `確認${dir}`,
+        });
+        if (!ok) return;
+        preConfirmed = true;
+      }
+      setOrderFeedback({ price, action, status: 'pending' });
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
 
-    const basePayload = {
-      symbol: targetSymbol, price, action,
-      order_type: orderType, price_type: priceType, order_cond: orderCond, order_lot: orderLot,
-    };
+      const basePayload = {
+        symbol: targetSymbol, price, action,
+        order_type: orderType, price_type: priceType, order_cond: orderCond, order_lot: orderLot,
+      };
 
-    // 送單，處理後端 409 CONFIRM_REQUIRED（RiskManager WARNING 需 confirm:true 重送）。
-    // 回傳 true=已下單, false=使用者拒絕確認。同一次操作只問一次，
-    // 拆單後續批次沿用已確認結果。其餘錯誤 rethrow 給外層統一處理。
-    let confirmGranted = preConfirmed;
-    const sendOrder = async (qty: number): Promise<boolean> => {
-      const payload = confirmGranted
-        ? { ...basePayload, qty, confirm: true }
-        : { ...basePayload, qty };
+      // 送單，處理後端 409 CONFIRM_REQUIRED（RiskManager WARNING 需 confirm:true 重送）。
+      // 回傳 true=已下單, false=使用者拒絕確認。同一次操作只問一次，
+      // 拆單後續批次沿用已確認結果。其餘錯誤 rethrow 給外層統一處理。
+      let confirmGranted = preConfirmed;
+      const sendOrder = async (qty: number): Promise<boolean> => {
+        const payload = confirmGranted
+          ? { ...basePayload, qty, confirm: true }
+          : { ...basePayload, qty };
+        try {
+          await apiClient.post('/place_order', payload);
+          return true;
+        } catch (e) {
+          const err = normalizeApiError(e);
+          if (err.status === 409 && err.code === 'CONFIRM_REQUIRED') {
+            const message = [err.user_msg, ...(err.warnings ?? [])].filter(Boolean).join('\n');
+            // 風控警告：danger 樣式對話框（promise-based，不阻塞報價更新）
+            const ok = await confirm({
+              title: '風控警告',
+              message,
+              confirmLabel: '確認送單',
+              danger: true,
+            });
+            if (ok) {
+              confirmGranted = true;
+              // 重送「相同 payload + confirm:true」
+              await apiClient.post('/place_order', { ...basePayload, qty, confirm: true });
+              return true;
+            }
+            toast.info('已取消下單');
+            return false;
+          }
+          throw e;
+        }
+      };
+
       try {
-        await apiClient.post('/place_order', payload);
-        return true;
+        let placedCount = 0;
+        let placedQty = 0; // 實際送出的總口數（拆單時逐批累計）
+        if (splitCfg.enabled && orderValue > splitCfg.threshold) {
+          const lots = splitOrders(orderValue, splitCfg.minPerLot, splitCfg.maxPerLot);
+          splitAbortRef.current = false;
+          setSplitProgress({ sent: 0, total: lots.length, aborted: false });
+          let abortedByUser = false;
+          for (let i = 0; i < lots.length; i++) {
+            // 每筆送出前檢查中止旗標（UI 的「中止」按鈕）
+            if (splitAbortRef.current) { abortedByUser = true; break; }
+            const ok = await sendOrder(lots[i]);
+            if (!ok) break; // 使用者拒絕確認 → 不再送出剩餘批次
+            placedCount += 1;
+            placedQty += lots[i];
+            setSplitProgress({ sent: placedCount, total: lots.length, aborted: false });
+            if (i < lots.length - 1) {
+              await randomDelay(splitCfg.minDelay, splitCfg.maxDelay);
+            }
+          }
+          if (abortedByUser) {
+            setSplitProgress({ sent: placedCount, total: lots.length, aborted: true });
+            toast.info(`已中止，完成 ${placedCount}/${lots.length}`);
+          }
+        } else {
+          if (await sendOrder(orderValue)) { placedCount = 1; placedQty = orderValue; }
+        }
+
+        if (placedCount > 0) {
+          setOrderFeedback({ price, action, status: 'success' });
+          scheduleOrderRefresh();
+          playSound('order_placed');
+          const dirZh = action === 'Buy' ? '買' : '賣';
+          const atLabel = (priceType === 'MKT' || priceType === 'MKP') ? '市價' : price;
+          toast.success(`${dirZh} ${placedQty} @ ${atLabel} ✓`);
+        } else {
+          setOrderFeedback(null); // 使用者取消：清掉 pending 閃爍即可
+        }
       } catch (e) {
         const err = normalizeApiError(e);
-        if (err.status === 409 && err.code === 'CONFIRM_REQUIRED') {
-          const message = [err.user_msg, ...(err.warnings ?? [])].filter(Boolean).join('\n');
-          if (window.confirm(message)) {
-            confirmGranted = true;
-            // 重送「相同 payload + confirm:true」
-            await apiClient.post('/place_order', { ...basePayload, qty, confirm: true });
-            return true;
-          }
-          toast.info('已取消下單');
-          return false;
-        }
-        throw e;
+        setOrderFeedback({ price, action, status: 'error' });
+        // WARNING 級風控已改為 409 CONFIRM_REQUIRED，在 sendOrder 內處理
+        // （確認後帶 confirm=true 重送）；到這裡的都是真正的錯誤
+        toast.error(err.user_msg || '下單失敗');
       }
-    };
-
-    try {
-      let placedCount = 0;
-      let placedQty = 0; // 實際送出的總口數（拆單時逐批累計）
-      if (splitCfg.enabled && orderValue > splitCfg.threshold) {
-        const lots = splitOrders(orderValue, splitCfg.minPerLot, splitCfg.maxPerLot);
-        for (let i = 0; i < lots.length; i++) {
-          const ok = await sendOrder(lots[i]);
-          if (!ok) break; // 使用者拒絕確認 → 不再送出剩餘批次
-          placedCount += 1;
-          placedQty += lots[i];
-          if (i < lots.length - 1) {
-            await randomDelay(splitCfg.minDelay, splitCfg.maxDelay);
-          }
-        }
-      } else {
-        if (await sendOrder(orderValue)) { placedCount = 1; placedQty = orderValue; }
-      }
-
-      if (placedCount > 0) {
-        setOrderFeedback({ price, action, status: 'success' });
-        scheduleOrderRefresh();
-        playSound('order_placed');
-        const dirZh = action === 'Buy' ? '買' : '賣';
-        const atLabel = (priceType === 'MKT' || priceType === 'MKP') ? '市價' : price;
-        toast.success(`${dirZh} ${placedQty} @ ${atLabel} ✓`);
-      } else {
-        setOrderFeedback(null); // 使用者取消：清掉 pending 閃爍即可
-      }
-    } catch (e) {
-      const err = normalizeApiError(e);
-      setOrderFeedback({ price, action, status: 'error' });
-      // WARNING 級風控已改為 409 CONFIRM_REQUIRED，在 sendOrder 內處理
-      // （確認後帶 confirm=true 重送）；到這裡的都是真正的錯誤
-      toast.error(err.user_msg || '下單失敗');
+      feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 800);
+    } finally {
+      isOrderPendingRef.current = false;
+      setSplitProgress(null);
     }
-    isOrderPendingRef.current = false;
-    feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 800);
-  }, [targetSymbol, orderValue, orderType, priceType, orderCond, orderLot, splitCfg, scheduleOrderRefresh, toast, settings.confirmations.placeOrder, settings.isCombatMode]);
+  }, [targetSymbol, orderValue, orderType, priceType, orderCond, orderLot, splitCfg, scheduleOrderRefresh, toast, confirm, settings.confirmations.placeOrder, settings.isCombatMode]);
 
   const handleCancelOrder = useCallback(async (action: 'Buy' | 'Sell', price?: number) => {
     // 刪單確認：戰鬥模式跳過；否則若開啟刪單確認則先問
     if (settings.confirmations.cancelOrder && !settings.isCombatMode) {
       const side = action === 'Buy' ? '買方' : '賣方';
       const at = price != null ? ` @ ${price}` : '（全部）';
-      if (!window.confirm(`確認刪除 ${targetSymbol} ${side}掛單${at}？`)) return;
+      const ok = await confirm({
+        title: '刪單確認',
+        message: `確認刪除 ${targetSymbol} ${side}掛單${at}？`,
+        confirmLabel: '確認刪單',
+      });
+      if (!ok) return;
     }
     try {
       await apiClient.post('/cancel_all', { symbol: targetSymbol, action, price });
@@ -266,7 +322,7 @@ export function useDOMLogic() {
     } catch (e) {
       handleApiError(e, '刪單失敗');
     }
-  }, [targetSymbol, scheduleOrderRefresh, handleApiError, settings.confirmations.cancelOrder, settings.isCombatMode]);
+  }, [targetSymbol, scheduleOrderRefresh, handleApiError, confirm, settings.confirmations.cancelOrder, settings.isCombatMode]);
 
   const handleAddStopOrder = useCallback(async (triggerPrice: number, action: 'Buy' | 'Sell') => {
     if (!targetSymbol) return;
@@ -333,6 +389,7 @@ export function useDOMLogic() {
     workingBuyMap, workingSellMap, currentPosition,
     handlePlaceOrder, handleCancelOrder, handleAddStopOrder, handleDropOrder,
     orderFeedback, smartOrders,
+    splitProgress, abortSplit,
     targetSymbol, accountSummary, accounts, activeAccount, selectAccount,
     hotkeys,
     accountEquity,

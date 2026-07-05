@@ -33,6 +33,7 @@ import {
 import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
 import { apiClient, normalizeApiError } from '../api/client';
 import { symbolMatches } from '../utils/instrument';
 import {
@@ -123,6 +124,7 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
   const { quote, watchlistQuotes } = useQuotes(); // K 線需要 tick 資料
   const { settings } = useSettings();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   // 有 symbol prop → 固定該商品；否則跟隨 targetSymbol
   const effSymbol = (symbol ?? targetSymbol) || '';
   const isPinned = !!symbol;
@@ -138,6 +140,7 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
     interactive,
     confirmNeeded: true,
     toast,
+    confirm,
     scheduleOrderRefresh,
   });
 
@@ -511,6 +514,7 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
       interactive,
       confirmNeeded: settings.confirmations.placeOrder && !settings.isCombatMode,
       toast,
+      confirm,
       scheduleOrderRefresh,
     };
   });
@@ -520,7 +524,7 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
     const candle = candleSeriesRef.current;
     if (!chart || !candle) return;
 
-    const onClick = (param: MouseEventParams<Time>) => {
+    const onClick = async (param: MouseEventParams<Time>) => {
       const st = clickStateRef.current;
       if (!st.interactive || !st.symbol || !param.point) return;
       const raw = candle.coordinateToPrice(param.point.y);
@@ -536,7 +540,12 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
       // 戰鬥模式不預先授權，收到 409 再問一次
       let preConfirmed = false;
       if (st.confirmNeeded) {
-        if (!window.confirm(`確認${dir} ${st.symbol} ${st.qty} 單位 @ ${px}？（圖表下單）`)) return;
+        const ok = await st.confirm({
+          title: '圖表下單',
+          message: `確認${dir} ${st.symbol} ${st.qty} 單位 @ ${px}？（圖表下單）`,
+          confirmLabel: `確認${dir}`,
+        });
+        if (!ok) return;
         preConfirmed = true;
       }
       const payload = {
@@ -553,7 +562,14 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
           const err = normalizeApiError(e);
           if (err.status === 409 && err.code === 'CONFIRM_REQUIRED') {
             const msg = [err.user_msg, ...(err.warnings ?? [])].filter(Boolean).join('\n');
-            if (window.confirm(msg)) {
+            // 風控警告：danger 對話框（promise-based，不阻塞圖表更新）
+            const ok = await st.confirm({
+              title: '風控警告',
+              message: msg,
+              confirmLabel: '確認送單',
+              danger: true,
+            });
+            if (ok) {
               try {
                 await apiClient.post('/place_order', { ...payload, confirm: true });
                 st.toast.success(`圖表下單：${dir} ${st.qty} @ ${px}`);

@@ -3,9 +3,13 @@
  *
  * 重點：
  *  1. 限價單 POST payload 形狀正確
- *  2. 409 CONFIRM_REQUIRED → window.confirm 接受 → 以相同 payload + confirm:true 重送
- *  3. window.confirm 拒絕 → 不會有第二次 POST
+ *  2. 409 CONFIRM_REQUIRED → ConfirmDialog 接受 → 以相同 payload + confirm:true 重送
+ *  3. ConfirmDialog 拒絕 → 不會有第二次 POST
  *  4. 刪單走 /cancel_all 並帶正確參數
+ *
+ * 確認流已改用 useConfirm（promise-based ConfirmDialog，UX 批次 3），
+ * 這裡 mock useConfirm 直接控制 resolve true/false；對話框本身的互動
+ * 行為（Enter/Esc/backdrop/排隊）由 ConfirmContext.test.tsx 覆蓋。
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import React from 'react';
@@ -18,6 +22,7 @@ import {
 } from '../contexts/TradingContext';
 import { SettingsProvider } from '../contexts/SettingsContext';
 import { ToastProvider } from '../contexts/ToastContext';
+import type { ConfirmOptions } from '../contexts/ConfirmContext';
 import type { QuoteData } from '../types';
 
 vi.mock('../api/client', async (importOriginal) => {
@@ -32,6 +37,15 @@ vi.mock('../api/client', async (importOriginal) => {
     },
   };
 });
+
+// mock useConfirm：測試直接控制確認結果（true=確認 / false=取消）
+const { mockConfirm, mockConfirmWithInput } = vi.hoisted(() => ({
+  mockConfirm: vi.fn(),
+  mockConfirmWithInput: vi.fn(),
+}));
+vi.mock('../contexts/ConfirmContext', () => ({
+  useConfirm: () => ({ confirm: mockConfirm, confirmWithInput: mockConfirmWithInput }),
+}));
 
 // 取得 mock 後的 apiClient（vi.mock hoisting 保證這裡拿到的是 mock）
 import { apiClient } from '../api/client';
@@ -117,6 +131,7 @@ describe('useDOMLogic 下單', () => {
     localStorage.setItem('lightrade_settings', JSON.stringify({ isCombatMode: true }));
     coreValue = makeCoreValue();
     vi.clearAllMocks();
+    mockConfirm.mockReset();
     mockedPost.mockResolvedValue({ data: {} });
   });
 
@@ -141,19 +156,20 @@ describe('useDOMLogic 下單', () => {
     mockedPost
       .mockRejectedValueOnce(confirmRequiredError())
       .mockResolvedValueOnce({ data: {} });
-    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true);
+    mockConfirm.mockResolvedValue(true);
 
     const { result } = renderHook(() => useDOMLogic(), { wrapper });
     await act(async () => {
       await result.current.handlePlaceOrder(100, 'Buy');
     });
 
-    // confirm 內容要包含 user_msg 與 warnings
-    expect(confirmSpy).toHaveBeenCalledTimes(1);
-    const confirmMsg = confirmSpy.mock.calls[0][0] as string;
-    expect(confirmMsg).toContain('此單需要確認');
-    expect(confirmMsg).toContain('市價單風險');
-    expect(confirmMsg).toContain('價格偏離參考價 3%');
+    // confirm 內容要包含 user_msg 與 warnings，且用 danger 樣式呈現風控警告
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+    const confirmOpts = mockConfirm.mock.calls[0][0] as ConfirmOptions;
+    expect(confirmOpts.danger).toBe(true);
+    expect(confirmOpts.message).toContain('此單需要確認');
+    expect(confirmOpts.message).toContain('市價單風險');
+    expect(confirmOpts.message).toContain('價格偏離參考價 3%');
 
     expect(mockedPost).toHaveBeenCalledTimes(2);
     // 第一次：原始 payload（無 confirm）
@@ -165,7 +181,7 @@ describe('useDOMLogic 下單', () => {
 
   it('409 CONFIRM_REQUIRED + 使用者拒絕 → 不會有第二次 POST', async () => {
     mockedPost.mockRejectedValueOnce(confirmRequiredError());
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    mockConfirm.mockResolvedValue(false);
 
     const { result } = renderHook(() => useDOMLogic(), { wrapper });
     await act(async () => {
@@ -196,6 +212,7 @@ describe('useDOMLogic 前端確認（非戰鬥模式）', () => {
     // 非戰鬥模式 + 下單確認開啟（皆為預設）
     coreValue = makeCoreValue();
     vi.clearAllMocks();
+    mockConfirm.mockReset();
     mockedPost.mockResolvedValue({ data: {} });
   });
 
@@ -204,14 +221,15 @@ describe('useDOMLogic 前端確認（非戰鬥模式）', () => {
   });
 
   it('確認框拒絕 → 完全不送單', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    mockConfirm.mockResolvedValue(false);
     const { result } = renderHook(() => useDOMLogic(), { wrapper });
     await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
     expect(mockedPost).not.toHaveBeenCalled();
   });
 
   it('確認框接受 → 送單且帶 confirm:true（前端確認一併授權後端 WARNING）', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    mockConfirm.mockResolvedValue(true);
     const { result } = renderHook(() => useDOMLogic(), { wrapper });
     await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
     expect(mockedPost).toHaveBeenCalledTimes(1);
@@ -220,7 +238,7 @@ describe('useDOMLogic 前端確認（非戰鬥模式）', () => {
   });
 
   it('刪單確認拒絕 → 不送 /cancel_all', async () => {
-    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    mockConfirm.mockResolvedValue(false);
     const { result } = renderHook(() => useDOMLogic(), { wrapper });
     await act(async () => { await result.current.handleCancelOrder('Sell', 101.5); });
     expect(mockedPost).not.toHaveBeenCalled();

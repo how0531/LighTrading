@@ -6,6 +6,7 @@ import { DOMFooter } from './DOM/DOMFooter';
 import { getTickSize } from '../utils/instrument';
 import { apiClient } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
 import { useApiErrorToast } from '../hooks/useApiErrorToast';
 import { useSettings } from '../contexts/SettingsContext';
 import type { AccountPosition } from '../contexts/TradingContext';
@@ -18,6 +19,7 @@ const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 export const DOMPanel: React.FC = () => {
   const { toast } = useToast();
+  const { confirm } = useConfirm();
   const handleApiError = useApiErrorToast();
   const { settings, updateSetting } = useSettings();
   const compactMode = settings.visuals.compactMode;
@@ -30,6 +32,7 @@ export const DOMPanel: React.FC = () => {
     workingBuyMap, workingSellMap, currentPosition,
     handlePlaceOrder, handleCancelOrder, handleAddStopOrder, handleDropOrder,
     orderFeedback, smartOrders, bData,
+    splitProgress, abortSplit,
     targetSymbol, accounts, activeAccount, selectAccount,
     hotkeys, accountEquity,
   } = useDOMLogic();
@@ -177,7 +180,13 @@ export const DOMPanel: React.FC = () => {
   const handleFlatten = React.useCallback(async () => {
     // 平倉確認：戰鬥模式跳過；否則若開啟平倉確認則先問
     if (settings.confirmations.flatten && !settings.isCombatMode) {
-      if (!window.confirm(`確認一鍵平倉 ${targetSymbol}？`)) return;
+      const ok = await confirm({
+        title: '一鍵平倉',
+        message: `確認一鍵平倉 ${targetSymbol}？\n將以市價清空當前商品所有部位。`,
+        confirmLabel: '確認平倉',
+        danger: true,
+      });
+      if (!ok) return;
     }
     try {
       await apiClient.post('/flatten', { symbol: targetSymbol });
@@ -185,12 +194,18 @@ export const DOMPanel: React.FC = () => {
     } catch (e) {
       handleApiError(e, '平倉失敗');
     }
-  }, [targetSymbol, toast, handleApiError, settings.confirmations.flatten, settings.isCombatMode]);
+  }, [targetSymbol, toast, confirm, handleApiError, settings.confirmations.flatten, settings.isCombatMode]);
 
   const handleReverse = React.useCallback(async () => {
     // 反手是「開新倉」，比平倉更該確認；戰鬥模式跳過
     if (settings.confirmations.flatten && !settings.isCombatMode) {
-      if (!window.confirm(`確認一鍵反手 ${targetSymbol}？（平倉後反向開倉）`)) return;
+      const ok = await confirm({
+        title: '一鍵反手',
+        message: `確認一鍵反手 ${targetSymbol}？（平倉後反向開倉）`,
+        confirmLabel: '確認反手',
+        danger: true,
+      });
+      if (!ok) return;
     }
     try {
       await apiClient.post('/reverse', { symbol: targetSymbol });
@@ -198,7 +213,7 @@ export const DOMPanel: React.FC = () => {
     } catch (e) {
       handleApiError(e, '反手失敗');
     }
-  }, [targetSymbol, toast, handleApiError, settings.confirmations.flatten, settings.isCombatMode]);
+  }, [targetSymbol, toast, confirm, handleApiError, settings.confirmations.flatten, settings.isCombatMode]);
 
   // ★ 全域快捷鍵監聽
   useEffect(() => {
@@ -297,7 +312,31 @@ export const DOMPanel: React.FC = () => {
         />
       </div>
 
-      <DOMFooter 
+      {/* 拆單進度列：大單連送時顯示進度 + 中止按鈕 */}
+      {splitProgress && !splitProgress.aborted && (
+        <div className="flex-shrink-0 px-3 py-1.5 bg-sky-500/10 border-t border-sky-500/40 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-[11px] font-black text-sky-300 tabular-nums whitespace-nowrap">
+              拆單 {splitProgress.sent}/{splitProgress.total}
+            </span>
+            <div className="w-32 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+              <div
+                className="h-full bg-sky-400 transition-all duration-200"
+                style={{ width: `${(splitProgress.sent / Math.max(1, splitProgress.total)) * 100}%` }}
+              />
+            </div>
+          </div>
+          <button
+            onClick={abortSplit}
+            className="px-2.5 py-0.5 rounded text-[10px] font-black bg-red-900/40 hover:bg-red-800/60 text-red-300 border border-red-800/60 transition-colors cursor-pointer"
+            title="停止送出剩餘批次（已送出的不受影響）"
+          >
+            中止
+          </button>
+        </div>
+      )}
+
+      <DOMFooter
         isSyncing={isSyncing} handleManualSync={handleManualSync} handleCancelOrder={handleCancelOrder}
         handleFlatten={handleFlatten} handleReverse={handleReverse}
       />

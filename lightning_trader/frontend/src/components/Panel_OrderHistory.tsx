@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { getOrderHistory, apiClient } from '../api/client';
 import { useTradingCore } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
 import { useApiErrorToast } from '../hooks/useApiErrorToast';
 import { isActiveOrderStatus } from '../utils/orderStatus';
 
@@ -50,6 +51,7 @@ const formatStatusText = (status: string, failedMsg?: string): string => {
 const Panel_OrderHistory: React.FC = () => {
   const { accountSummary, cancelOrder, isConnected } = useTradingCore();
   const { toast } = useToast();
+  const { confirmWithInput } = useConfirm();
   const handleApiError = useApiErrorToast();
   const [trades, setTrades] = useState<Trade[]>([]);
   const [isLoading, setIsLoading] = useState(true);
@@ -123,11 +125,23 @@ const Panel_OrderHistory: React.FC = () => {
   };
 
   const handleUpdateQty = async (t: Trade) => {
-    // 減量 prompt 改用瀏覽器原生 prompt 仍可接受（單行數字輸入，後面想做美化再升級為 Modal）
+    // 減量改用 ConfirmDialog 的輸入模式（UX 批次 3，取代 window.prompt）
     const remainingQty = t.qty - t.filled_qty;
-    const msg = `輸入新的總委託數量\n原委託 ${t.qty}，已成交 ${t.filled_qty}，最多可減至 ${t.filled_qty}（最少）`;
-    const input = window.prompt(msg, remainingQty.toString());
-    if (!input) return;
+    const input = await confirmWithInput({
+      title: '委託減量',
+      message: `輸入新的總委託數量\n原委託 ${t.qty}，已成交 ${t.filled_qty}，最多可減至 ${t.filled_qty}（最少）`,
+      defaultValue: remainingQty.toString(),
+      confirmLabel: '確認減量',
+      validate: (v) => {
+        const trimmed = v.trim();
+        const n = /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : NaN;
+        if (isNaN(n) || n >= t.qty || n < t.filled_qty) {
+          return `輸入無效：必須 ≥ ${t.filled_qty} 且 < ${t.qty}`;
+        }
+        return null;
+      },
+    });
+    if (input == null) return;
 
     const newQty = parseInt(input, 10);
     if (isNaN(newQty) || newQty >= t.qty || newQty < t.filled_qty) {

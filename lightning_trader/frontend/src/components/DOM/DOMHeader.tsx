@@ -1,6 +1,7 @@
 import React from 'react';
 import { Lock, Zap } from 'lucide-react';
 import { formatPrice } from '../../utils/instrument';
+import { computeChange } from '../../utils/quoteBoard';
 import { useSettings } from '../../contexts/SettingsContext';
 import type { SizingMode } from '../../utils/sizing';
 import { lotsToAmount } from '../../utils/sizing';
@@ -86,6 +87,16 @@ const DOMHeaderInner: React.FC<DOMHeaderProps> = ({
   const showNet = settings.showNetPnL;
   const primaryPnL = showNet ? netRealtimePnL : realtimePnL;
   const secondaryPnL = showNet ? realtimePnL : netRealtimePnL;
+
+  // 報價讀出列（UX 批次 3）：漲跌用共用 computeChange，口徑與報價看板一致。
+  // 台股慣例：紅漲、綠跌、平盤灰。
+  const change = computeChange(currentPrice, refPrice);
+  const changeCls = !change || change.change === 0
+    ? 'text-slate-400'
+    : change.change > 0 ? 'text-red-400' : 'text-emerald-400';
+  const changeSign = change && change.change > 0 ? '+' : '';
+  const fmtOrDash = (v: number | undefined) =>
+    v && v > 0 ? formatPrice(v, targetSymbol) : '—';
 
   return (
     <div className="flex flex-col shrink-0 shadow-lg z-20 bg-[#1c2331]">
@@ -226,6 +237,42 @@ const DOMHeaderInner: React.FC<DOMHeaderProps> = ({
               </button>
             </div>
           )}
+        </div>
+      </div>
+
+      {/* Row 1.5: 報價讀出列 — 現價 / 漲跌（絕對值 + %）/ 開高低（緊湊、tick 高頻更新） */}
+      <div className="px-4 py-1 border-b border-slate-800 bg-[#161d2b] flex flex-wrap items-center gap-x-4 gap-y-0.5 font-mono tabular-nums leading-none">
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">現價</span>
+          <span className={`text-[15px] font-black ${changeCls}`}>{fmtOrDash(currentPrice)}</span>
+        </div>
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">漲跌</span>
+          {change ? (
+            <span className={`text-[12px] font-bold ${changeCls}`}>
+              {/* 同「點/口」顯示口徑：最多兩位小數、去尾零 */}
+              {changeSign}{parseFloat(change.change.toFixed(2))}
+              <span className="ml-1">({changeSign}{change.pct.toFixed(2)}%)</span>
+            </span>
+          ) : (
+            <span className="text-[12px] text-slate-500">—</span>
+          )}
+        </div>
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">開</span>
+          <span className="text-[11px] text-slate-300">{fmtOrDash(qData.Open)}</span>
+        </div>
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">高</span>
+          <span className="text-[11px] text-red-400/90">{fmtOrDash(qData.High)}</span>
+        </div>
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">低</span>
+          <span className="text-[11px] text-emerald-400/90">{fmtOrDash(qData.Low)}</span>
+        </div>
+        <div className="flex items-baseline gap-1.5 ml-auto">
+          <span className="text-[8px] font-sans font-bold text-slate-600 uppercase tracking-wider">參考</span>
+          <span className="text-[11px] text-slate-500">{fmtOrDash(refPrice)}</span>
         </div>
       </div>
 
