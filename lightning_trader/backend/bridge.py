@@ -50,6 +50,13 @@ def on_shioaji_quote(quote_data: dict):
             if any(bidask_data["AskPrice"]) or any(bidask_data["BidPrice"]):
                 items_to_send.append({"type": "BidAsk", "data": bidask_data})
 
+                # 發送給 EventBus 供 CHASE 追價引擎追蹤最佳對手價
+                # （與 on_tick 同模式：這裡是 on_bidask 唯一的發射點）
+                try:
+                    shared.engine.event_bus.on_bidask.emit(symbol, bidask_data)
+                except Exception as e:
+                    logger.error(f"EventBus emit on_bidask error: {e}")
+
         if has_tick:
             p_val = float(_val(q.get('Close', q.get('close', q.get('Price', 0)))))
             v_val = int(_val(q.get('Volume', q.get('volume', 0))))
@@ -234,6 +241,8 @@ def wire_callbacks():
     client.signal_trade_update.connect(on_shioaji_trade_update)
     eng.event_bus.on_smart_order_added.connect(on_smart_order_update)
     eng.event_bus.on_smart_order_triggered.connect(on_smart_order_update)
+    # ★ Sprint C：CHASE 追價進度（目前掛價/改價次數/剩量）也走 SmartOrderUpdate
+    eng.event_bus.on_smart_order_updated.connect(on_smart_order_update)
     # ★ event-driven PnL：tick 一進來就喚醒重算
     eng.event_bus.on_tick.connect(on_shioaji_tick_for_pnl)
     # ★ Sprint 22：risk_breach → webhook 通知

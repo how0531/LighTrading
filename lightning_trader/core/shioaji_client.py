@@ -904,6 +904,43 @@ class ShioajiClient:
             logger.error(f"update_order 失敗: {e}")
             return False
 
+    def cancel_order_by_ids(self, order_ids) -> bool:
+        """
+        依委託單號（id / seqno / ordno 任一）撤掉「一張」活躍委託。
+        CHASE 追價單 cancel-replace 專用：比 cancel_orders_by_action_price
+        精準（不會誤殺同價位的其他委託）。
+
+        回傳 True = 已送出撤單；False = 找不到活躍的對應委託
+        （可能已全成 / 已被撤 —— 呼叫端交給成交/對帳路徑收尾）。
+        """
+        ids = {str(i) for i in (order_ids or []) if i}
+        if not ids:
+            return False
+        try:
+            trades = self.api.list_trades()
+            for trade in trades:
+                order = getattr(trade, "order", None)
+                candidates = {str(getattr(order, a, "") or "")
+                              for a in ("id", "seqno", "ordno")}
+                candidates.discard("")
+                if not (candidates & ids):
+                    continue
+                status_name = (trade.status.status.name if hasattr(trade.status, "status")
+                               else getattr(trade.status, "name", ""))
+                if status_name in ("PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"):
+                    self.api.cancel_order(trade)
+                    logger.info(f"cancel_order_by_ids: 已撤單 {sorted(candidates & ids)}")
+                    threading.Timer(0.5, self.trigger_account_update).start()
+                    return True
+                logger.info(f"cancel_order_by_ids: 委託 {sorted(candidates & ids)} "
+                            f"已非活躍狀態（{status_name}），不撤")
+                return False
+            logger.warning(f"cancel_order_by_ids: 找不到委託 {sorted(ids)}")
+            return False
+        except Exception as e:
+            logger.error(f"cancel_order_by_ids 失敗: {e}")
+            return False
+
     def cancel_all(self, symbol: str, action: Action) -> int:
         """批次刪單：取消指定標的與方向的所有未完成委託"""
         cancel_count = 0

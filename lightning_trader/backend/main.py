@@ -100,8 +100,14 @@ wire_callbacks()
 #   （之前觸發時直接在行情執行緒上同步下單，且完全繞過 RiskManager；
 #    專用通道避免停損出場排在 kbars/搜尋等慢查詢後面）
 from backend.services.order_guard import smart_place_order
+from backend.services.contract_specs import get_tick_size
 engine.smart_order_engine._place_order = smart_place_order
 engine.smart_order_engine.set_dispatch(shared.submit_order_task)
+# ★ Sprint C：CHASE 追價單需要「精準撤單」（cancel-replace）與 tick 級距
+engine.smart_order_engine.set_chase_helpers(
+    cancel_order_fn=engine.client.cancel_order_by_ids,
+    tick_size_fn=get_tick_size,
+)
 
 
 # ─── Lifespan ──────────────────────────────────────────────

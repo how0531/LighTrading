@@ -185,8 +185,9 @@ class FakeShioaji:
         self.Contracts.Stocks.add(make_stock_contract("1101", "台泥", symbol="TSE1101"))
 
         self.placed_orders: list[dict] = []
+        self.cancelled_orders: list[str] = []      # cancel_order 撤掉的 ordno
         self.positions: list[FakePosition] = []   # 測試自行注入
-        self.trades: list = []                     # 測試自行注入（make_trade）
+        self.trades: list = []                     # 測試自行注入（make_trade）+ place_order 自動加入
         self._order_seq = 0
         self._order_callback = None
 
@@ -224,14 +225,27 @@ class FakeShioaji:
             "order_cond": str(getattr(order, "order_cond", "")),
         }
         self.placed_orders.append(record)
-        return SimpleNamespace(
+        trade = SimpleNamespace(
             order=SimpleNamespace(id=f"ORD{self._order_seq:04d}", seqno=f"{self._order_seq:06d}",
+                                  ordno=f"ORD{self._order_seq:04d}",
                                   action=getattr(order, "action", None),
                                   price=getattr(order, "price", 0),
                                   quantity=getattr(order, "quantity", 0)),
-            status=SimpleNamespace(status=SimpleNamespace(name="Submitted")),
+            status=SimpleNamespace(status=SimpleNamespace(name="Submitted"),
+                                   deal_quantity=0, deals=[], modified_at=None),
             contract=contract,
         )
+        # 本 session 下的單也要出現在 list_trades()（真實 SDK 行為）——
+        # CHASE cancel-replace / order_sync 對帳都靠 list_trades 找委託
+        self.trades.append(trade)
+        return trade
+
+    def cancel_order(self, trade):
+        """撤單：把該 trade 標成 Cancelled（真實 SDK 是非同步，這裡直接生效）。"""
+        trade.status.status = SimpleNamespace(name="Cancelled")
+        self.cancelled_orders.append(getattr(trade.order, "ordno",
+                                             getattr(trade.order, "id", "")))
+        return trade
 
     # ── 查詢 ──
     def update_status(self, *args, **kwargs):

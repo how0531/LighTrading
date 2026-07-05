@@ -58,6 +58,7 @@ def _reset_state():
     _fake_api().positions = []
     _fake_api().trades = []
     _fake_api().placed_orders.clear()
+    _fake_api().cancelled_orders.clear()
     eng = getattr(shared.engine, "smart_order_engine", None)
     if eng is not None:
         eng.cancel_all()
@@ -722,6 +723,169 @@ def test_in_quote_session_handles_cross_midnight_and_security_type():
         assert sj._in_quote_session(now=at(3, 0)) is False     # 凌晨
     finally:
         sj.current_contract = old_contract
+
+
+# ─── 14. Sprint C：CHASE 追價智慧單 ─────────────────────────
+
+def _emit_bidask(symbol, bid, ask):
+    """餵一筆五檔（最佳一檔）給引擎 —— 走 EventBus，與 bridge 的發射點同格式。"""
+    shared.engine.event_bus.on_bidask.emit(symbol, {
+        "Symbol": symbol, "BidPrice": [bid], "AskPrice": [ask],
+        "BidVolume": [10], "AskVolume": [10],
+    })
+
+
+def test_create_chase_via_rest_with_defaults():
+    """CHASE 契約欄位 + 預設值：quantity 別名、立即以限價掛在最佳對手價。"""
+    _emit_bidask("2330", 500.0, 501.0)
+    r = client.post("/api/smart_orders", json={
+        "order_type": "CHASE", "symbol": "2330", "action": "Buy", "quantity": 2,
+    })
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["status"] == "success" and body["id"]
+    assert body["chase_price"] == 501.0
+    # 進場單走 order_guard 統一路徑 → 真的送到券商（Buy → 掛賣一 501）
+    assert len(_fake_api().placed_orders) == 1
+    sent = _fake_api().placed_orders[0]
+    assert sent["code"] == "2330" and sent["qty"] == 2 and sent["price"] == 501.0
+    # 預設值與狀態欄位（前端顯示「追價中 n/max」所需）
+    active = client.get("/api/smart_orders").json()
+    chase = next(o for o in active if o["order_type"] == "CHASE")
+    assert chase["max_chase_ticks"] == 10
+    assert chase["reprice_ticks"] == 1
+    assert chase["reprice_interval_ms"] == 1500
+    assert chase["final_action"] == "GIVE_UP"
+    assert chase["chase_status"] == "CHASING"
+    assert chase["chase_price"] == 501.0
+    assert chase["reprice_count"] == 0
+    assert chase["remaining_qty"] == 2
+
+
+def test_create_chase_invalid_values_structured_error():
+    """非法值 → 結構化 {code, user_msg} 錯誤（比照現有 router 慣例）。"""
+    base = {"order_type": "CHASE", "symbol": "2330", "action": "Buy", "quantity": 1}
+
+    r1 = client.post("/api/smart_orders", json={**base, "reprice_interval_ms": 100})
+    assert r1.status_code == 422
+    d1 = r1.json()["detail"]
+    assert d1["code"] == "INVALID_CHASE" and "500" in d1["user_msg"]
+
+    r2 = client.post("/api/smart_orders", json={**base, "final_action": "HOLD"})
+    assert r2.status_code == 422
+    assert r2.json()["detail"]["code"] == "INVALID_CHASE"
+
+    r3 = client.post("/api/smart_orders", json={**base, "max_chase_ticks": 0})
+    assert r3.status_code == 422
+    assert r3.json()["detail"]["code"] == "INVALID_CHASE"
+
+    r4 = client.post("/api/smart_orders", json={**base, "reprice_ticks": 0})
+    assert r4.status_code == 422
+    assert r4.json()["detail"]["code"] == "INVALID_CHASE"
+
+    r5 = client.post("/api/smart_orders", json={
+        "order_type": "CHASE", "symbol": "2330", "action": "Buy",  # 缺 quantity/qty
+    })
+    assert r5.status_code == 422
+    assert r5.json()["detail"]["code"] == "INVALID_QTY"
+
+    assert not _fake_api().placed_orders  # 驗證失敗不得送單
+
+
+def test_create_chase_without_quote_rejected():
+    """取不到五檔也沒有最新成交價 → 結構化 NO_QUOTE，不建單。"""
+    eng = shared.engine.smart_order_engine
+    eng._best_quotes.pop("6488", None)
+    eng._last_prices.pop("6488", None)
+    r = client.post("/api/smart_orders", json={
+        "order_type": "CHASE", "symbol": "6488", "action": "Buy", "quantity": 1,
+    })
+    assert r.status_code == 422
+    assert r.json()["detail"]["code"] == "NO_QUOTE"
+    assert not _fake_api().placed_orders
+    assert client.get("/api/smart_orders").json() == []
+
+
+def test_chase_reprices_via_quote_flow():
+    """賣一不利移動 ≥ 1 tick → order executor 上 cancel-replace 到新對手價。"""
+    _emit_bidask("2330", 500.0, 501.0)
+    r = client.post("/api/smart_orders", json={
+        "order_type": "CHASE", "symbol": "2330", "action": "Buy", "quantity": 1,
+    })
+    assert r.status_code == 200, r.text
+    # 賣一 501 → 502（tick=1.0）：觸發改價（第一次改價不受 interval 限制）
+    _emit_bidask("2330", 501.0, 502.0)
+    assert _wait_for(lambda: len(_fake_api().placed_orders) == 2), "改價單未送出"
+    assert _fake_api().placed_orders[1]["price"] == 502.0
+    assert _wait_for(lambda: _fake_api().cancelled_orders), "舊掛單未撤"
+    chase = next(o for o in client.get("/api/smart_orders").json()
+                 if o["order_type"] == "CHASE")
+    assert chase["reprice_count"] == 1
+    assert chase["chase_price"] == 502.0
+
+
+def test_cancel_chase_via_rest_cancels_working_order():
+    """DELETE 智慧單端點對 CHASE 生效 = 撤掛單 + 標 CANCELLED。"""
+    _emit_bidask("2330", 500.0, 501.0)
+    r = client.post("/api/smart_orders", json={
+        "order_type": "CHASE", "symbol": "2330", "action": "Sell", "quantity": 1,
+    })
+    assert r.status_code == 200, r.text
+    oid = r.json()["id"]
+    r2 = client.delete(f"/api/smart_orders/{oid}")
+    assert r2.status_code == 200
+    assert client.get("/api/smart_orders").json() == []
+    # 掛單真的被撤（order executor 上非同步執行）
+    assert _wait_for(lambda: _fake_api().cancelled_orders), "working order 未被撤"
+    eng = shared.engine.smart_order_engine
+    d = next(o for o in eng.get_all_orders() if o["id"] == oid)
+    assert d["chase_status"] == "CANCELLED"
+
+
+def test_chase_filled_via_deal_callback():
+    """券商 Deal callback → on_fill → CHASE 全成標 FILLED。"""
+    _emit_bidask("2330", 500.0, 501.0)
+    r = client.post("/api/smart_orders", json={
+        "order_type": "CHASE", "symbol": "2330", "action": "Buy", "quantity": 1,
+    })
+    assert r.status_code == 200, r.text
+    oid = r.json()["id"]
+    ordno = _fake_api().trades[-1].order.ordno  # 進場單的 ordno
+    cb = _fake_api()._order_callback
+    cb("OrderState.StockDeal", {"code": "2330", "action": "Buy", "price": 501.0,
+                                "quantity": 1, "ordno": ordno, "exchange_seq": "CH1"})
+    eng = shared.engine.smart_order_engine
+    assert _wait_for(lambda: not eng.get_active_orders("2330")), "全成後未離開活躍清單"
+    d = next(o for o in eng.get_all_orders() if o["id"] == oid)
+    assert d["chase_status"] == "FILLED"
+    assert d["filled_qty"] == 1 and d["remaining_qty"] == 0
+
+
+def test_chase_external_cancel_detected_by_order_sync():
+    """外部管道把掛單撤了 → 對帳迴圈偵測 → CANCELLED_EXTERNAL 終態。"""
+    import asyncio
+    from backend.services import order_sync
+
+    _emit_bidask("2330", 500.0, 501.0)
+    r = client.post("/api/smart_orders", json={
+        "order_type": "CHASE", "symbol": "2330", "action": "Buy", "quantity": 1,
+    })
+    assert r.status_code == 200, r.text
+    oid = r.json()["id"]
+    eng = shared.engine.smart_order_engine
+    old_grace = eng._external_cancel_grace_ms
+    try:
+        eng._external_cancel_grace_ms = 0.0
+        # 模擬外部撤單：list_trades 回報該委託 Cancelled
+        _fake_api().cancel_order(_fake_api().trades[-1])
+        order_sync._last_fingerprint = ""
+        asyncio.run(order_sync.sync_once())
+        d = next(o for o in eng.get_all_orders() if o["id"] == oid)
+        assert d["chase_status"] == "CANCELLED_EXTERNAL"
+        assert d["is_active"] is False
+        assert client.get("/api/smart_orders").json() == []  # 不留殭屍
+    finally:
+        eng._external_cancel_grace_ms = old_grace
 
 
 # ─── 12. API Token 認證（最後執行：會 reload main） ──────────

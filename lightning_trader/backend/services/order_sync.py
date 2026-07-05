@@ -69,6 +69,38 @@ def build_working_orders(trades) -> list[dict]:
     return working
 
 
+def build_broker_order_index(trades) -> list[dict]:
+    """
+    從 list_trades() 建「全部委託」（含已成交/已取消）的對帳索引，
+    給 SmartOrderEngine.sync_broker_orders 用：
+      - CHASE 掛單消失/被外部撤 → CANCELLED_EXTERNAL
+      - 重啟後 re-attach（ordno 對上活躍掛單 → 續追）
+      - 成交量補償（callback 漏接時以券商 deal_quantity 為準）
+    """
+    out = []
+    for t in trades or []:
+        try:
+            status_name = (t.status.status.name if hasattr(t.status, "status")
+                           else getattr(t.status, "name", "Unknown"))
+            order = getattr(t, "order", None)
+            ids = []
+            for attr in ("id", "seqno", "ordno"):
+                v = getattr(order, attr, None)
+                if v:
+                    ids.append(str(v))
+            if not ids:
+                continue
+            out.append({
+                "ids": ids,
+                "status": status_name,
+                "filled_qty": int(getattr(t.status, "deal_quantity",
+                                          getattr(t.status, "filled_quantity", 0)) or 0),
+            })
+        except Exception as e:
+            logger.debug(f"order_sync 略過異常 trade（index）: {e}")
+    return out
+
+
 def _ts_to_ms(ts) -> int:
     """shioaji Deal.ts 可能是 秒 / 毫秒 / 奈秒，統一轉毫秒。"""
     try:
@@ -187,6 +219,15 @@ async def sync_once() -> dict:
         }})
         # 共用副作用：on_fill（bracket 補償）/ PnL 快取作廢 / 已實現重算排程
         fill_side_effects(fill)
+
+    # 3. CHASE 智慧單對帳：外部撤單偵測 / 重啟 re-attach / 成交量補償
+    #    （放在 fills 之後：同一輪看到的成交先入帳，再判斷掛單是否消失）
+    try:
+        smart_eng = getattr(shared.engine, "smart_order_engine", None) if shared.engine else None
+        if smart_eng is not None and hasattr(smart_eng, "sync_broker_orders"):
+            smart_eng.sync_broker_orders(build_broker_order_index(trades))
+    except Exception as e:
+        logger.warning(f"order_sync 智慧單對帳失敗: {e}")
 
     return {"changed": changed, "new_fills": new_fills}
 
