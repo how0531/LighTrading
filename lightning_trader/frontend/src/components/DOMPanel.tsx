@@ -175,22 +175,30 @@ export const DOMPanel: React.FC = () => {
 
 
   const handleFlatten = React.useCallback(async () => {
+    // 平倉確認：戰鬥模式跳過；否則若開啟平倉確認則先問
+    if (settings.confirmations.flatten && !settings.isCombatMode) {
+      if (!window.confirm(`確認一鍵平倉 ${targetSymbol}？`)) return;
+    }
     try {
       await apiClient.post('/flatten', { symbol: targetSymbol });
       toast.success(`${targetSymbol} 平倉指令已送出`);
     } catch (e) {
       handleApiError(e, '平倉失敗');
     }
-  }, [targetSymbol, toast, handleApiError]);
+  }, [targetSymbol, toast, handleApiError, settings.confirmations.flatten, settings.isCombatMode]);
 
   const handleReverse = React.useCallback(async () => {
+    // 反手是「開新倉」，比平倉更該確認；戰鬥模式跳過
+    if (settings.confirmations.flatten && !settings.isCombatMode) {
+      if (!window.confirm(`確認一鍵反手 ${targetSymbol}？（平倉後反向開倉）`)) return;
+    }
     try {
       await apiClient.post('/reverse', { symbol: targetSymbol });
       toast.success(`${targetSymbol} 反手指令已送出`);
     } catch (e) {
       handleApiError(e, '反手失敗');
     }
-  }, [targetSymbol, toast, handleApiError]);
+  }, [targetSymbol, toast, handleApiError, settings.confirmations.flatten, settings.isCombatMode]);
 
   // ★ 全域快捷鍵監聽
   useEffect(() => {

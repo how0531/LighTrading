@@ -11,6 +11,8 @@ REST：
   STOP       → SmartOrderEngine.add_mit   （觸價單 / 停損）
   MIT        → 同 STOP（語意不同但實作同）
   TRAILING   → SmartOrderEngine.add_trailing_stop
+  OCO        → SmartOrderEngine.add_oco    （停利停損二擇一，需 take_profit_price + stop_loss_price）
+  BRACKET    → SmartOrderEngine.add_bracket（限價進場 + 成交後自動掛 OCO，需 entry_price + TP + SL）
 """
 import logging
 from typing import Optional, Literal
@@ -33,14 +35,15 @@ class SmartOrderRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=12)
     action: Literal["Buy", "Sell", "buy", "sell"]
     qty: int = Field(gt=0, le=10000)
-    order_type: Optional[str] = None        # STOP / MIT / TRAILING（不給就推斷）
+    order_type: Optional[str] = None        # STOP / MIT / TRAILING / OCO / BRACKET（不給就推斷）
     trigger_price: Optional[float] = None
     stop_price: Optional[float] = None      # alias of trigger_price
     trigger_condition: Optional[str] = None
     trailing_offset: float = 0
-    # 預留欄位（暫不使用，但接受不報錯）
+    # OCO / Bracket 用
     take_profit_price: float = 0
     stop_loss_price: float = 0
+    entry_price: float = 0                   # Bracket 進場限價
 
 
 # ─── 路由端點 ──────────────────────────────────────────────
@@ -67,6 +70,34 @@ def _create_smart_order(req: SmartOrderRequest):
 
     # 決定 order_type
     ot = (req.order_type or "").strip().upper()
+
+    # OCO：停利停損二擇一
+    if ot == "OCO":
+        if req.take_profit_price <= 0 or req.stop_loss_price <= 0:
+            raise HTTPException(status_code=422, detail={
+                "code": "INVALID_OCO",
+                "user_msg": "OCO 需要 take_profit_price 與 stop_loss_price 都 > 0",
+            })
+        oco_id = engine.add_oco(
+            symbol=req.symbol, action=action_val, qty=req.qty,
+            take_profit=req.take_profit_price, stop_loss=req.stop_loss_price,
+        )
+        return {"status": "success", "message": "OCO 停利停損已設定", "id": oco_id}
+
+    # Bracket：限價進場 + 成交後自動掛 OCO
+    if ot == "BRACKET":
+        if req.entry_price <= 0 or req.take_profit_price <= 0 or req.stop_loss_price <= 0:
+            raise HTTPException(status_code=422, detail={
+                "code": "INVALID_BRACKET",
+                "user_msg": "Bracket 需要 entry_price / take_profit_price / stop_loss_price 都 > 0",
+            })
+        bracket_id = engine.add_bracket(
+            symbol=req.symbol, action=action_val, qty=req.qty,
+            entry_price=req.entry_price,
+            take_profit=req.take_profit_price, stop_loss=req.stop_loss_price,
+        )
+        return {"status": "success", "message": "Bracket 單已送出進場", "id": bracket_id}
+
     is_trailing = ot == "TRAILING" or req.trailing_offset > 0
     if is_trailing:
         if req.trailing_offset <= 0:

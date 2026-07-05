@@ -21,31 +21,42 @@ const SmartOrdersPanel: React.FC = () => {
   const { smartOrders, refreshSmartOrders, subscribe, targetSymbol } = useTradingCore();
   const { toast } = useToast();
   const handleApiError = useApiErrorToast();
-  // R3：trailing-stop 新增表單
+  // 新增智慧單表單（移停 / OCO / Bracket）
   const [showAdd, setShowAdd] = useState(false);
+  const [addType, setAddType] = useState<'TRAILING' | 'OCO' | 'BRACKET'>('TRAILING');
   const [addAction, setAddAction] = useState<'Buy' | 'Sell'>('Sell');
   const [addQty, setAddQty] = useState(1);
   const [addOffset, setAddOffset] = useState(10);
+  const [addTP, setAddTP] = useState(0);
+  const [addSL, setAddSL] = useState(0);
+  const [addEntry, setAddEntry] = useState(0);
 
   // mount 拉一次；之後靠 WS SmartOrderUpdate 增量同步（TradingContext 已接好）
   useEffect(() => { refreshSmartOrders(); }, [refreshSmartOrders]);
 
-  const submitTrailing = async () => {
+  const submitSmart = async () => {
     if (!targetSymbol) { toast.error('請先選定商品'); return; }
-    if (addQty <= 0 || addOffset <= 0) { toast.error('口數與 offset 都要 > 0'); return; }
+    if (addQty <= 0) { toast.error('口數要 > 0'); return; }
+
+    const base = { symbol: targetSymbol, action: addAction, qty: addQty };
     try {
-      await apiClient.post('/smart_orders', {
-        symbol: targetSymbol,
-        action: addAction,
-        qty: addQty,
-        order_type: 'TRAILING',
-        trailing_offset: addOffset,
-      });
-      toast.success(`已掛移動停損：${addAction === 'Sell' ? '多頭平倉' : '空頭平倉'} ${addQty} 口 / ±${addOffset}`);
+      if (addType === 'TRAILING') {
+        if (addOffset <= 0) { toast.error('offset 要 > 0'); return; }
+        await apiClient.post('/smart_orders', { ...base, order_type: 'TRAILING', trailing_offset: addOffset });
+        toast.success(`已掛移動停損：${addAction === 'Sell' ? '多頭平倉' : '空頭平倉'} ${addQty} 口 / ±${addOffset}`);
+      } else if (addType === 'OCO') {
+        if (addTP <= 0 || addSL <= 0) { toast.error('停利價與停損價都要 > 0'); return; }
+        await apiClient.post('/smart_orders', { ...base, order_type: 'OCO', take_profit_price: addTP, stop_loss_price: addSL });
+        toast.success(`已掛 OCO：停利 ${addTP} / 停損 ${addSL}`);
+      } else {
+        if (addEntry <= 0 || addTP <= 0 || addSL <= 0) { toast.error('進場/停利/停損價都要 > 0'); return; }
+        await apiClient.post('/smart_orders', { ...base, order_type: 'BRACKET', entry_price: addEntry, take_profit_price: addTP, stop_loss_price: addSL });
+        toast.success(`已送 Bracket：進場 ${addEntry} / 停利 ${addTP} / 停損 ${addSL}`);
+      }
       setShowAdd(false);
       setTimeout(() => refreshSmartOrders(), 200);
     } catch (e) {
-      handleApiError(e, '新增移動停損失敗');
+      handleApiError(e, '新增智慧單失敗');
     }
   };
 
@@ -89,9 +100,9 @@ const SmartOrdersPanel: React.FC = () => {
           <button
             onClick={() => setShowAdd((v) => !v)}
             className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border transition-colors cursor-pointer ${showAdd ? 'bg-[#D4AF37]/20 text-[#D4AF37] border-[#D4AF37]' : 'bg-amber-700/30 hover:bg-amber-700/50 text-amber-200 border-amber-700/50'}`}
-            title="新增移動停損（trailing stop）"
+            title="新增智慧單（移停 / OCO / Bracket）"
           >
-            <Plus className="w-3 h-3" /> 移停
+            <Plus className="w-3 h-3" /> 新增
           </button>
           {active.length > 0 && (
             <button
@@ -105,15 +116,25 @@ const SmartOrdersPanel: React.FC = () => {
       </div>
       {showAdd && (
         <div className="px-3 py-2 border-b border-slate-700/50 bg-amber-950/20 text-[11px] flex flex-wrap items-center gap-2">
-          <span className="text-slate-400 font-bold">移動停損 ({targetSymbol || '請選商品'})</span>
+          <select
+            value={addType}
+            onChange={(e) => setAddType(e.target.value as 'TRAILING' | 'OCO' | 'BRACKET')}
+            className="bg-[#101623] border border-amber-700/60 rounded text-amber-200 font-bold px-1.5 py-0.5"
+            title="智慧單類型"
+          >
+            <option value="TRAILING">移動停損</option>
+            <option value="OCO">OCO 停利停損</option>
+            <option value="BRACKET">Bracket 進場+停利停損</option>
+          </select>
+          <span className="text-slate-500 text-[10px]">{targetSymbol || '請選商品'}</span>
           <select
             value={addAction}
             onChange={(e) => setAddAction(e.target.value as 'Buy' | 'Sell')}
             className="bg-[#101623] border border-slate-700 rounded text-slate-200 px-1.5 py-0.5"
-            title="多頭平倉=賣出，空頭平倉=買進"
+            title={addType === 'BRACKET' ? '進場方向' : '平倉方向（多頭出場=賣，空頭出場=買）'}
           >
-            <option value="Sell">賣 (多頭出場)</option>
-            <option value="Buy">買 (空頭出場)</option>
+            <option value="Sell">{addType === 'BRACKET' ? '賣出進場' : '賣 (多頭出場)'}</option>
+            <option value="Buy">{addType === 'BRACKET' ? '買進進場' : '買 (空頭出場)'}</option>
           </select>
           <label className="flex items-center gap-1">
             <span className="text-slate-500 text-[10px]">口數</span>
@@ -123,16 +144,48 @@ const SmartOrdersPanel: React.FC = () => {
               className="w-12 bg-[#101623] border border-slate-700 rounded text-right text-slate-200 px-1 py-0.5"
             />
           </label>
-          <label className="flex items-center gap-1">
-            <span className="text-slate-500 text-[10px]">offset</span>
-            <input
-              type="number" min={0.01} step={0.01} value={addOffset}
-              onChange={(e) => setAddOffset(Math.max(0.01, parseFloat(e.target.value || '0') || 0))}
-              className="w-16 bg-[#101623] border border-slate-700 rounded text-right text-slate-200 px-1 py-0.5"
-            />
-          </label>
+          {addType === 'TRAILING' && (
+            <label className="flex items-center gap-1">
+              <span className="text-slate-500 text-[10px]">offset</span>
+              <input
+                type="number" min={0.01} step={0.01} value={addOffset}
+                onChange={(e) => setAddOffset(Math.max(0.01, parseFloat(e.target.value || '0') || 0))}
+                className="w-16 bg-[#101623] border border-slate-700 rounded text-right text-slate-200 px-1 py-0.5"
+              />
+            </label>
+          )}
+          {addType === 'BRACKET' && (
+            <label className="flex items-center gap-1">
+              <span className="text-slate-500 text-[10px]">進場</span>
+              <input
+                type="number" min={0} step={0.01} value={addEntry || ''}
+                onChange={(e) => setAddEntry(parseFloat(e.target.value || '0') || 0)}
+                className="w-16 bg-[#101623] border border-slate-700 rounded text-right text-slate-200 px-1 py-0.5"
+              />
+            </label>
+          )}
+          {(addType === 'OCO' || addType === 'BRACKET') && (
+            <>
+              <label className="flex items-center gap-1">
+                <span className="text-red-400/70 text-[10px]">停利</span>
+                <input
+                  type="number" min={0} step={0.01} value={addTP || ''}
+                  onChange={(e) => setAddTP(parseFloat(e.target.value || '0') || 0)}
+                  className="w-16 bg-[#101623] border border-slate-700 rounded text-right text-slate-200 px-1 py-0.5"
+                />
+              </label>
+              <label className="flex items-center gap-1">
+                <span className="text-emerald-400/70 text-[10px]">停損</span>
+                <input
+                  type="number" min={0} step={0.01} value={addSL || ''}
+                  onChange={(e) => setAddSL(parseFloat(e.target.value || '0') || 0)}
+                  className="w-16 bg-[#101623] border border-slate-700 rounded text-right text-slate-200 px-1 py-0.5"
+                />
+              </label>
+            </>
+          )}
           <button
-            onClick={submitTrailing}
+            onClick={submitSmart}
             className="px-3 py-0.5 bg-amber-600 hover:bg-amber-500 text-white rounded text-[11px] font-bold transition-colors cursor-pointer"
           >
             送出

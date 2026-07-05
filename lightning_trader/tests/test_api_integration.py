@@ -58,6 +58,9 @@ def _reset_state():
     _fake_api().positions = []
     _fake_api().trades = []
     _fake_api().placed_orders.clear()
+    eng = getattr(shared.engine, "smart_order_engine", None)
+    if eng is not None:
+        eng.cancel_all()
     rm = _rm()
     rm.reset_daily()
     rm.update_config(max_position_per_symbol=10, max_daily_loss=-50000.0)
@@ -333,6 +336,47 @@ def test_callback_and_sync_fill_ids_dedupe():
     after = len(trade_journal.fetch_fills(symbol="2330", limit=50))
     assert result["new_fills"] == 0, "同一筆成交被重複入帳（id 分歧，去重失效）"
     assert after == before
+
+
+def test_create_oco_via_rest():
+    """OCO REST 路由 → 引擎掛出配對的停利/停損兩腿。"""
+    eng = shared.engine.smart_order_engine
+    r = client.post("/api/smart_orders", json={
+        "symbol": "2330", "action": "Sell", "qty": 1,
+        "order_type": "OCO", "take_profit_price": 550, "stop_loss_price": 500,
+    })
+    assert r.status_code == 200, r.text
+    active = eng.get_active_orders("2330")
+    oco = [o for o in active if o["order_type"] == "OCO"]
+    assert len(oco) == 2
+    # 一腿觸發（價 >= 550）→ 另一腿被連帶取消
+    shared.engine.event_bus.on_tick.emit("2330", {"Price": 551})
+    assert _wait_for(lambda: len(eng.get_active_orders("2330")) == 0)
+
+
+def test_create_bracket_via_rest():
+    """Bracket REST 路由 → 立即送出進場限價單。"""
+    r = client.post("/api/smart_orders", json={
+        "symbol": "2330", "action": "Buy", "qty": 1,
+        "order_type": "BRACKET", "entry_price": 520,
+        "take_profit_price": 550, "stop_loss_price": 500,
+    })
+    assert r.status_code == 200, r.text
+    assert len(_fake_api().placed_orders) == 1  # 進場單已送
+    assert _fake_api().placed_orders[0]["price"] == 520
+
+
+def test_oco_bracket_reject_missing_prices():
+    r1 = client.post("/api/smart_orders", json={
+        "symbol": "2330", "action": "Sell", "qty": 1,
+        "order_type": "OCO", "take_profit_price": 550,  # 缺 stop_loss
+    })
+    assert r1.status_code == 422 and r1.json()["detail"]["code"] == "INVALID_OCO"
+    r2 = client.post("/api/smart_orders", json={
+        "symbol": "2330", "action": "Buy", "qty": 1,
+        "order_type": "BRACKET", "take_profit_price": 550, "stop_loss_price": 500,  # 缺 entry
+    })
+    assert r2.status_code == 422 and r2.json()["detail"]["code"] == "INVALID_BRACKET"
 
 
 # ─── 9. 委託對帳迴圈（外部管道下單即時同步） ────────────────

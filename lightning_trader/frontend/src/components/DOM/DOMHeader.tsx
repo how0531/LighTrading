@@ -1,4 +1,5 @@
 import React from 'react';
+import { Lock, Zap } from 'lucide-react';
 import { formatPrice } from '../../utils/instrument';
 import { useSettings } from '../../contexts/SettingsContext';
 import type { SizingMode } from '../../utils/sizing';
@@ -167,6 +168,21 @@ const DOMHeaderInner: React.FC<DOMHeaderProps> = ({
               </span>
             </div>
           )}
+          {/* 戰鬥鎖：預設上鎖（防呆，下單/刪單需確認）；解鎖後一鍵直送 */}
+          <button
+            onClick={() => updateSetting({ isCombatMode: !settings.isCombatMode })}
+            className={`px-2 py-1 rounded-md border flex items-center gap-1 text-[10px] font-black transition-colors cursor-pointer ${
+              settings.isCombatMode
+                ? 'border-red-600/60 bg-red-900/30 text-red-400 animate-pulse'
+                : 'border-slate-600 bg-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+            title={settings.isCombatMode
+              ? '戰鬥模式：單擊即送單。點擊上鎖以恢復下單確認。'
+              : '防呆鎖：下單/刪單需二次確認。點擊解鎖進入戰鬥模式（一鍵直送）。'}
+          >
+            {settings.isCombatMode ? <Zap className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
+            {settings.isCombatMode ? '戰鬥' : '防呆'}
+          </button>
           <div className={`px-2 py-1 rounded-md border ${isSimulation ? 'border-yellow-600/50 bg-yellow-900/20' : 'border-emerald-600/50 bg-emerald-900/20'}`}>
             <p className={`text-[10px] font-black ${isSimulation ? 'text-yellow-500' : 'text-emerald-500'}`}>{isSimulation ? 'SIM' : 'LIVE'}</p>
           </div>

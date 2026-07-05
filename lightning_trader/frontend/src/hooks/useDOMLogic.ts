@@ -166,6 +166,16 @@ export function useDOMLogic() {
   // --- 下單邏輯 ---
   const handlePlaceOrder = useCallback(async (price: number, action: 'Buy' | 'Sell') => {
     if (isOrderPendingRef.current || !targetSymbol) return;
+    // 前端二次確認：戰鬥模式（已解鎖）一鍵直送；否則若開啟下單確認則先問。
+    // 前端確認過就視同「已授權」，送單直接帶 confirm:true —— 避免與後端風控
+    // WARNING 的 409 CONFIRM_REQUIRED 重複，一次下單最多問一次。
+    let preConfirmed = false;
+    if (settings.confirmations.placeOrder && !settings.isCombatMode) {
+      const dir = action === 'Buy' ? '買進' : '賣出';
+      const at = (priceType === 'MKT' || priceType === 'MKP') ? '市價' : price;
+      if (!window.confirm(`確認${dir} ${targetSymbol} ${orderValue} 單位 @ ${at}？`)) return;
+      preConfirmed = true;
+    }
     isOrderPendingRef.current = true;
     setOrderFeedback({ price, action, status: 'pending' });
     if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
@@ -178,7 +188,7 @@ export function useDOMLogic() {
     // 送單，處理後端 409 CONFIRM_REQUIRED（RiskManager WARNING 需 confirm:true 重送）。
     // 回傳 true=已下單, false=使用者拒絕確認。同一次操作只問一次，
     // 拆單後續批次沿用已確認結果。其餘錯誤 rethrow 給外層統一處理。
-    let confirmGranted = false;
+    let confirmGranted = preConfirmed;
     const sendOrder = async (qty: number): Promise<boolean> => {
       const payload = confirmGranted
         ? { ...basePayload, qty, confirm: true }
@@ -235,9 +245,15 @@ export function useDOMLogic() {
     }
     isOrderPendingRef.current = false;
     feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 800);
-  }, [targetSymbol, orderValue, orderType, priceType, orderCond, orderLot, splitCfg, scheduleOrderRefresh, toast]);
+  }, [targetSymbol, orderValue, orderType, priceType, orderCond, orderLot, splitCfg, scheduleOrderRefresh, toast, settings.confirmations.placeOrder, settings.isCombatMode]);
 
   const handleCancelOrder = useCallback(async (action: 'Buy' | 'Sell', price?: number) => {
+    // 刪單確認：戰鬥模式跳過；否則若開啟刪單確認則先問
+    if (settings.confirmations.cancelOrder && !settings.isCombatMode) {
+      const side = action === 'Buy' ? '買方' : '賣方';
+      const at = price != null ? ` @ ${price}` : '（全部）';
+      if (!window.confirm(`確認刪除 ${targetSymbol} ${side}掛單${at}？`)) return;
+    }
     try {
       await apiClient.post('/cancel_all', { symbol: targetSymbol, action, price });
       scheduleOrderRefresh();
@@ -245,7 +261,7 @@ export function useDOMLogic() {
     } catch (e) {
       handleApiError(e, '刪單失敗');
     }
-  }, [targetSymbol, scheduleOrderRefresh, handleApiError]);
+  }, [targetSymbol, scheduleOrderRefresh, handleApiError, settings.confirmations.cancelOrder, settings.isCombatMode]);
 
   const handleAddStopOrder = useCallback(async (triggerPrice: number, action: 'Buy' | 'Sell') => {
     if (!targetSymbol) return;

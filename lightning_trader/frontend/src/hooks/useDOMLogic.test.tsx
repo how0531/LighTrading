@@ -112,6 +112,8 @@ const EXPECTED_LIMIT_PAYLOAD = {
 describe('useDOMLogic 下單', () => {
   beforeEach(() => {
     localStorage.clear();
+    // 戰鬥模式：跳過前端二次確認，專注測 API 層行為（payload / 409 / 刪單）
+    localStorage.setItem('lightrade_settings', JSON.stringify({ isCombatMode: true }));
     coreValue = makeCoreValue();
     vi.clearAllMocks();
     mockedPost.mockResolvedValue({ data: {} });
@@ -184,5 +186,42 @@ describe('useDOMLogic 下單', () => {
 
     expect(mockedPost).toHaveBeenCalledWith('/cancel_all', { symbol: '2330', action: 'Sell', price: 101.5 });
     expect(coreValue.scheduleOrderRefresh).toHaveBeenCalled();
+  });
+});
+
+describe('useDOMLogic 前端確認（非戰鬥模式）', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    // 非戰鬥模式 + 下單確認開啟（皆為預設）
+    coreValue = makeCoreValue();
+    vi.clearAllMocks();
+    mockedPost.mockResolvedValue({ data: {} });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('確認框拒絕 → 完全不送單', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
+    expect(mockedPost).not.toHaveBeenCalled();
+  });
+
+  it('確認框接受 → 送單且帶 confirm:true（前端確認一併授權後端 WARNING）', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true);
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
+    expect(mockedPost).toHaveBeenCalledTimes(1);
+    expect(mockedPost).toHaveBeenCalledWith('/place_order',
+      expect.objectContaining({ symbol: '2330', price: 100, action: 'Buy', confirm: true }));
+  });
+
+  it('刪單確認拒絕 → 不送 /cancel_all', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false);
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    await act(async () => { await result.current.handleCancelOrder('Sell', 101.5); });
+    expect(mockedPost).not.toHaveBeenCalled();
   });
 });
