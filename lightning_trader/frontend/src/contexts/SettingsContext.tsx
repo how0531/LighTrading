@@ -6,6 +6,7 @@ import { configureSound } from '../utils/sound';
 import type { SizingMode } from '../utils/sizing';
 import type { FeeConfig } from '../utils/fees';
 import { DEFAULT_FEE_CONFIG } from '../utils/fees';
+import type { ChaseFinalAction } from '../utils/chase';
 
 /** Sprint 28：智慧下單尺寸。
  *  mode 決定按下下單時最終口數的來源：
@@ -33,6 +34,14 @@ export interface HotkeyItem {
   action: 'Buy' | 'Sell' | 'CancelAll' | 'Flatten' | 'ScrollCenter'
         | 'ChaseBuy' | 'ChaseSell' | 'MarketBuy' | 'MarketSell';
   label: string;
+}
+
+/** Sprint C：追價（CHASE）智慧單預設參數。
+ *  maxChaseTicks → max_chase_ticks；finalAction → final_action。
+ *  reprice_ticks / reprice_interval_ms 用 utils/chase.ts 的預設值，不開放設定。 */
+export interface ChaseSettings {
+  maxChaseTicks: number;
+  finalAction: ChaseFinalAction;
 }
 
 // 拆單設定
@@ -95,6 +104,8 @@ export interface Settings {
   showNetPnL: boolean;
   /** Sprint 31 / 34：版面 preset。custom = 沿用使用者拖曳儲存的版面（向後相容預設）。 */
   layoutPreset: 'momentum' | 'daytrade' | 'swing' | 'marketwatch' | 'custom';
+  /** Sprint C：DOM 追價模式送出 CHASE 智慧單時的預設參數 */
+  chase: ChaseSettings;
 }
 
 /** 單一價格警報。symbol 是 canonical symbol。op above = 價格 >= price；below = <=。 */
@@ -164,6 +175,10 @@ const DEFAULT_SETTINGS: Settings = {
   fees: DEFAULT_FEE_CONFIG,
   showNetPnL: false,
   layoutPreset: 'custom',
+  chase: {
+    maxChaseTicks: 10,
+    finalAction: 'GIVE_UP',
+  },
 };
 
 /** 舊版（localStorage / 後端）存的 hotkeys 沒有新 action（追買/追賣/市價）
@@ -218,6 +233,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           fees: { ...DEFAULT_SETTINGS.fees, ...(parsed.fees || {}) },
           showNetPnL: typeof parsed.showNetPnL === 'boolean' ? parsed.showNetPnL : DEFAULT_SETTINGS.showNetPnL,
           layoutPreset: parsed.layoutPreset || DEFAULT_SETTINGS.layoutPreset,
+          chase: { ...DEFAULT_SETTINGS.chase, ...(parsed.chase || {}) },
         };
       } catch (e) {
         console.error("Failed to parse settings from localStorage", e);
@@ -243,6 +259,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           splitOrder: { ...prev.splitOrder, ...(remote.splitOrder || {}) },
           sizing: { ...prev.sizing, ...(remote.sizing || {}) },
           fees: { ...prev.fees, ...(remote.fees || {}) },
+          chase: { ...prev.chase, ...(remote.chase || {}) },
           notifications: {
             ...prev.notifications,
             ...(remote.notifications || {}),
@@ -290,6 +307,7 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (updates.splitOrder) next.splitOrder = { ...prev.splitOrder, ...updates.splitOrder };
       if (updates.sizing) next.sizing = { ...prev.sizing, ...updates.sizing };
       if (updates.fees) next.fees = { ...prev.fees, ...updates.fees };
+      if (updates.chase) next.chase = { ...prev.chase, ...updates.chase };
       return next;
     });
   };

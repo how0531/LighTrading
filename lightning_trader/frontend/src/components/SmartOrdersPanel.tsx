@@ -1,8 +1,9 @@
 /**
  * SmartOrdersPanel — 本地監控的智慧單清單
  *
- * 顯示 SmartOrderEngine 內所有 active 的 MIT / TRAILING / OCO / BRACKET 訂單。
+ * 顯示 SmartOrderEngine 內所有 active 的 MIT / TRAILING / OCO / BRACKET / CHASE 訂單。
  * 每列：類型 + 商品 + 方向 + 數量 + 觸發條件（價或 trailing offset）+ 建立時間 + X 取消按鈕。
+ * CHASE（追價）列顯示目前掛價 / 已改價次數 / 剩量（SmartOrderUpdate 有帶才顯示，防禦性取值）。
  *
  * 互動：
  *   - X 按鈕：DELETE /api/smart_orders/{id}（toast 回饋）
@@ -10,15 +11,43 @@
  *   - 點商品名 → setTargetSymbol（與 WatchlistPanel 一致行為）
  */
 import React, { useEffect, useState } from 'react';
-import { X, Zap, TrendingDown, Plus } from 'lucide-react';
+import { X, Zap, TrendingDown, Plus, Crosshair } from 'lucide-react';
 import { apiClient } from '../api/client';
 import { useQuotes, useTradingCore } from '../contexts/TradingContext';
+import type { SmartOrderData } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
 import { useApiErrorToast } from '../hooks/useApiErrorToast';
 import { formatPrice, getTickSize } from '../utils/instrument';
+import { buildChasePayload, type ChaseFinalAction } from '../utils/chase';
 
 // UX 批次 4 Item 7：OCO / BRACKET 表單預填 — 現價 ∓ N tick 的建議值
 const PREFILL_TICKS = 10;
+
+/** 防禦性數值取值：後端 CHASE 欄位名並行實作中，依候選鍵序取第一個合法數字 */
+function pickNum(rec: Record<string, unknown>, keys: string[]): number | null {
+  for (const k of keys) {
+    const v = rec[k];
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '' && Number.isFinite(Number(v))) return Number(v);
+  }
+  return null;
+}
+
+/** CHASE 列的「目前掛價 / 已改價 n 次 / 剩量 m」摘要；欄位都沒有就退回狀態文字 */
+function chaseSummary(o: SmartOrderData): string {
+  const rec = o as unknown as Record<string, unknown>;
+  const curPx = pickNum(rec, ['current_price', 'chase_price', 'order_price']);
+  const reprices = pickNum(rec, ['reprice_count', 'repriced_count', 'reprice_times']);
+  const remain = pickNum(rec, ['remaining_qty', 'remaining', 'qty_remaining', 'leaves_qty']);
+  const parts: string[] = [];
+  if (curPx != null && curPx > 0) parts.push(`@${formatPrice(curPx, o.symbol)}`);
+  if (reprices != null && reprices >= 0) parts.push(`已改價 ${reprices} 次`);
+  if (remain != null && remain >= 0) parts.push(`剩量 ${remain}`);
+  if (parts.length > 0) return parts.join(' · ');
+  const status = [rec.chase_status, rec.status]
+    .find((v): v is string => typeof v === 'string' && v.trim() !== '');
+  return status || '追價中';
+}
 
 /** 價格貼齊該商品的 tick 級距（避免 ±1% 算出不合法檔位） */
 function roundToTick(price: number, symbol: string): number {
@@ -31,15 +60,18 @@ const SmartOrdersPanel: React.FC = () => {
   const { quote } = useQuotes(); // Item 7：預填建議值需要現價
   const { toast } = useToast();
   const handleApiError = useApiErrorToast();
-  // 新增智慧單表單（移停 / OCO / Bracket）
+  // 新增智慧單表單（移停 / OCO / Bracket / 追價）
   const [showAdd, setShowAdd] = useState(false);
-  const [addType, setAddType] = useState<'TRAILING' | 'OCO' | 'BRACKET'>('TRAILING');
+  const [addType, setAddType] = useState<'TRAILING' | 'OCO' | 'BRACKET' | 'CHASE'>('TRAILING');
   const [addAction, setAddAction] = useState<'Buy' | 'Sell'>('Sell');
   const [addQty, setAddQty] = useState(1);
   const [addOffset, setAddOffset] = useState(10);
   const [addTP, setAddTP] = useState(0);
   const [addSL, setAddSL] = useState(0);
   const [addEntry, setAddEntry] = useState(0);
+  // Sprint C：CHASE 專屬欄位（預設 10 / GIVE_UP，與後端契約一致）
+  const [addMaxChase, setAddMaxChase] = useState(10);
+  const [addFinal, setAddFinal] = useState<ChaseFinalAction>('GIVE_UP');
 
   // mount 拉一次；之後靠 WS SmartOrderUpdate 增量同步（TradingContext 已接好）
   useEffect(() => { refreshSmartOrders(); }, [refreshSmartOrders]);
@@ -80,7 +112,15 @@ const SmartOrdersPanel: React.FC = () => {
 
     const base = { symbol: targetSymbol, action: addAction, qty: addQty };
     try {
-      if (addType === 'TRAILING') {
+      if (addType === 'CHASE') {
+        // Sprint C：追價單（契約欄位見 utils/chase.ts；數量欄位是 quantity）
+        if (addMaxChase <= 0) { toast.error('追價檔數要 > 0'); return; }
+        await apiClient.post('/smart_orders', buildChasePayload({
+          symbol: targetSymbol, action: addAction, quantity: addQty,
+          maxChaseTicks: addMaxChase, finalAction: addFinal,
+        }));
+        toast.success(`已送追價單：${addAction === 'Buy' ? '買' : '賣'} ${addQty}（最多追 ${addMaxChase} tick，追不到${addFinal === 'MARKET' ? '轉市價' : '放棄'}）`);
+      } else if (addType === 'TRAILING') {
         if (addOffset <= 0) { toast.error('offset 要 > 0'); return; }
         await apiClient.post('/smart_orders', { ...base, order_type: 'TRAILING', trailing_offset: addOffset });
         toast.success(`已掛移動停損：${addAction === 'Sell' ? '多頭平倉' : '空頭平倉'} ${addQty} 口 / ±${addOffset}`);
@@ -140,7 +180,7 @@ const SmartOrdersPanel: React.FC = () => {
           <button
             onClick={() => setShowAdd((v) => !v)}
             className={`flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border transition-colors cursor-pointer ${showAdd ? 'bg-[#D4AF37]/20 text-[#D4AF37] border-[#D4AF37]' : 'bg-amber-700/30 hover:bg-amber-700/50 text-amber-200 border-amber-700/50'}`}
-            title="新增智慧單（移停 / OCO / Bracket）"
+            title="新增智慧單（移停 / OCO / Bracket / 追價）"
           >
             <Plus className="w-3 h-3" /> 新增
           </button>
@@ -158,23 +198,24 @@ const SmartOrdersPanel: React.FC = () => {
         <div className="px-3 py-2 border-b border-slate-700/50 bg-amber-950/20 text-[11px] flex flex-wrap items-center gap-2">
           <select
             value={addType}
-            onChange={(e) => setAddType(e.target.value as 'TRAILING' | 'OCO' | 'BRACKET')}
+            onChange={(e) => setAddType(e.target.value as 'TRAILING' | 'OCO' | 'BRACKET' | 'CHASE')}
             className="bg-[#101623] border border-amber-700/60 rounded text-amber-200 font-bold px-1.5 py-0.5"
             title="智慧單類型"
           >
             <option value="TRAILING">移動停損</option>
             <option value="OCO">OCO 停利停損</option>
             <option value="BRACKET">Bracket 進場+停利停損</option>
+            <option value="CHASE">追價（自動跟盤口改價）</option>
           </select>
           <span className="text-slate-500 text-[10px]">{targetSymbol || '請選商品'}</span>
           <select
             value={addAction}
             onChange={(e) => setAddAction(e.target.value as 'Buy' | 'Sell')}
             className="bg-[#101623] border border-slate-700 rounded text-slate-200 px-1.5 py-0.5"
-            title={addType === 'BRACKET' ? '進場方向' : '平倉方向（多頭出場=賣，空頭出場=買）'}
+            title={addType === 'BRACKET' || addType === 'CHASE' ? '進場方向' : '平倉方向（多頭出場=賣，空頭出場=買）'}
           >
-            <option value="Sell">{addType === 'BRACKET' ? '賣出進場' : '賣 (多頭出場)'}</option>
-            <option value="Buy">{addType === 'BRACKET' ? '買進進場' : '買 (空頭出場)'}</option>
+            <option value="Sell">{addType === 'BRACKET' ? '賣出進場' : addType === 'CHASE' ? '賣出' : '賣 (多頭出場)'}</option>
+            <option value="Buy">{addType === 'BRACKET' ? '買進進場' : addType === 'CHASE' ? '買進' : '買 (空頭出場)'}</option>
           </select>
           <label className="flex items-center gap-1">
             <span className="text-slate-500 text-[10px]">口數</span>
@@ -184,6 +225,29 @@ const SmartOrdersPanel: React.FC = () => {
               className="w-12 bg-[#101623] border border-slate-700 rounded text-right text-slate-200 px-1 py-0.5"
             />
           </label>
+          {addType === 'CHASE' && (
+            <>
+              <label className="flex items-center gap-1" title="最多跟著盤口改價幾個 tick（max_chase_ticks）">
+                <span className="text-sky-400/80 text-[10px]">追價檔數</span>
+                <input
+                  type="number" min={1} max={100} value={addMaxChase}
+                  onChange={(e) => setAddMaxChase(Math.min(100, Math.max(1, parseInt(e.target.value || '1', 10) || 1)))}
+                  className="w-12 bg-[#101623] border border-slate-700 rounded text-right text-slate-200 px-1 py-0.5"
+                />
+              </label>
+              <label className="flex items-center gap-1" title="追滿檔數仍未成交時的收尾動作（final_action）">
+                <span className="text-sky-400/80 text-[10px]">追不到</span>
+                <select
+                  value={addFinal}
+                  onChange={(e) => setAddFinal(e.target.value as ChaseFinalAction)}
+                  className="bg-[#101623] border border-slate-700 rounded text-slate-200 px-1 py-0.5"
+                >
+                  <option value="GIVE_UP">放棄</option>
+                  <option value="MARKET">轉市價</option>
+                </select>
+              </label>
+            </>
+          )}
           {addType === 'TRAILING' && (
             <label className="flex items-center gap-1">
               <span className="text-slate-500 text-[10px]">offset</span>
@@ -265,12 +329,17 @@ const SmartOrdersPanel: React.FC = () => {
             </thead>
             <tbody>
               {active.map((o) => {
-                const isTrailing = o.order_type === 'TRAILING' || o.trailing_offset > 0;
+                const isChase = o.order_type === 'CHASE';
+                const isTrailing = !isChase && (o.order_type === 'TRAILING' || o.trailing_offset > 0);
                 const isCurrent = o.symbol === targetSymbol;
                 return (
                   <tr key={o.id} className="hover:bg-slate-700/40 border-b border-slate-800/60">
                     <td className="px-2 py-1 font-mono font-bold">
-                      {isTrailing ? (
+                      {isChase ? (
+                        <span className="text-sky-400 flex items-center gap-1">
+                          <Crosshair className="w-3 h-3" /> 追價
+                        </span>
+                      ) : isTrailing ? (
                         <span className="text-amber-400 flex items-center gap-1">
                           <TrendingDown className="w-3 h-3" /> 移停
                         </span>
@@ -290,9 +359,15 @@ const SmartOrdersPanel: React.FC = () => {
                     <td className={`px-2 py-1 font-bold ${o.action === 'Buy' ? 'text-red-400' : 'text-emerald-400'}`}>
                       {o.action === 'Buy' ? '買' : '賣'}
                     </td>
-                    <td className="px-2 py-1 text-right text-slate-200">{o.qty}</td>
+                    {/* CHASE 契約的數量欄位是 quantity；qty 缺時防禦性退回 quantity */}
+                    <td className="px-2 py-1 text-right text-slate-200">
+                      {o.qty ?? pickNum(o as unknown as Record<string, unknown>, ['quantity']) ?? '—'}
+                    </td>
                     <td className="px-2 py-1 text-right font-mono">
-                      {isTrailing ? (
+                      {isChase ? (
+                        // 目前掛價 / 已改價 n 次 / 剩量 m（SmartOrderUpdate 有帶才顯示）
+                        <span className="text-sky-300 whitespace-nowrap">{chaseSummary(o)}</span>
+                      ) : isTrailing ? (
                         <span className="text-amber-300">±{o.trailing_offset}</span>
                       ) : (
                         <span className="text-slate-200">

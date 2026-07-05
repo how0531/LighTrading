@@ -1,4 +1,5 @@
 import React from 'react';
+import { Layers } from 'lucide-react';
 import { useSettings } from '../../contexts/SettingsContext';
 
 interface DOMFooterProps {
@@ -7,6 +8,11 @@ interface DOMFooterProps {
   handleCancelOrder: (action: 'Buy' | 'Sell') => void;
   handleFlatten: () => void;
   handleReverse: () => void;
+  /** Sprint C：鋪單面板開關（面板本體在 DOMPanel 內、footer 上方） */
+  layPanelOpen: boolean;
+  onToggleLayPanel: () => void;
+  /** 本次已鋪出且尚未撤的委託數（>0 時按鈕帶徽章提示） */
+  laidCount: number;
 }
 
 const displayKey = (key: string) => (key === ' ' ? 'Space' : key);
@@ -20,7 +26,8 @@ const ACTION_LABEL: Record<string, string> = {
 };
 
 const DOMFooterInner: React.FC<DOMFooterProps> = ({
-  isSyncing, handleManualSync, handleCancelOrder, handleFlatten, handleReverse
+  isSyncing, handleManualSync, handleCancelOrder, handleFlatten, handleReverse,
+  layPanelOpen, onToggleLayPanel, laidCount,
 }) => {
   const { settings } = useSettings();
 
@@ -56,6 +63,19 @@ const DOMFooterInner: React.FC<DOMFooterProps> = ({
             title="強制同步委託與持倉（包含外部平台送出的單）"
           >
             SYNC
+          </button>
+          {/* Sprint C：鋪單面板開關 */}
+          <button
+            onClick={onToggleLayPanel}
+            className={`flex items-center gap-1 px-2.5 py-1.5 rounded text-[10px] font-bold border transition-all active:scale-95 cursor-pointer ${
+              layPanelOpen
+                ? 'bg-indigo-600/80 text-white border-indigo-500'
+                : 'bg-indigo-900/40 hover:bg-indigo-800/60 text-indigo-300 border-indigo-800/60'
+            }`}
+            title="鋪單：一次在多個價位掛出限價單（可選追價智慧單），支援一鍵撤鋪單"
+          >
+            <Layers className="w-3 h-3" />
+            鋪單{laidCount > 0 ? ` (${laidCount})` : ''}
           </button>
         </div>
         <div className="flex items-center gap-1.5">

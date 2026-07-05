@@ -6,6 +6,7 @@ import { useToast } from '../contexts/ToastContext';
 import { useConfirm } from '../contexts/ConfirmContext';
 import { useApiErrorToast } from './useApiErrorToast';
 import { splitOrders, randomDelay } from '../utils/splitOrder';
+import { buildChasePayload } from '../utils/chase';
 import { symbolMatches } from '../utils/instrument';
 import { buildWorkingOrderMap } from '../utils/workingOrders';
 import { playSound } from '../utils/sound';
@@ -50,6 +51,9 @@ export function useDOMLogic() {
 
   const [orderType, setOrderType] = useState('ROD');
   const [priceType, setPriceType] = useState('LMT');
+  // Sprint C：DOM 追價模式 — 開啟時 ladder 點價 / 追買追賣熱鍵改送 CHASE 智慧單。
+  // 一次性 UI 狀態（不持久化）：追價是高風險的「動態掛單」，不該跨 session 殘留。
+  const [chaseMode, setChaseMode] = useState(false);
   const [orderCond, setOrderCond] = useState('Cash');
   const [orderLot, setOrderLot] = useState('Common');
   const [isSyncing, setIsSyncing] = useState(false);
@@ -204,6 +208,45 @@ export function useDOMLogic() {
     }
     isOrderPendingRef.current = true;
     try {
+      // ── Sprint C：追價模式 ─────────────────────────────
+      // 開啟時 ladder 點價與追買/追賣熱鍵改送 CHASE 智慧單（後端動態追價）；
+      // 市價熱鍵（overridePriceType=MKT/MKP）與刪單不受影響。
+      // 沿用 in-flight 去重（上方）與確認流（確認文案標明「追價單」）。
+      if (chaseMode && effPriceType !== 'MKT' && effPriceType !== 'MKP') {
+        if (settings.confirmations.placeOrder && !settings.isCombatMode) {
+          const dir = action === 'Buy' ? '買進' : '賣出';
+          const finalZh = settings.chase.finalAction === 'MARKET' ? '轉市價' : '放棄';
+          const ok = await confirm({
+            title: '追價單確認',
+            message: `確認送出追價單：${dir} ${targetSymbol} ${orderValue} 單位？\n（最多追 ${settings.chase.maxChaseTicks} tick，追不到則${finalZh}）`,
+            confirmLabel: `確認${dir}（追價）`,
+          });
+          if (!ok) return;
+        }
+        setOrderFeedback({ price, action, status: 'pending' });
+        if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+        try {
+          await apiClient.post('/smart_orders', buildChasePayload({
+            symbol: targetSymbol,
+            action,
+            quantity: orderValue,
+            maxChaseTicks: settings.chase.maxChaseTicks,
+            finalAction: settings.chase.finalAction,
+          }));
+          setOrderFeedback({ price, action, status: 'success' });
+          playSound('order_placed');
+          toast.success(`追價${action === 'Buy' ? '買' : '賣'} ${orderValue} 已送出 ⚡`);
+          scheduleOrderRefresh();
+          setTimeout(() => refreshSmartOrders(targetSymbol), 200);
+        } catch (e) {
+          const err = normalizeApiError(e);
+          setOrderFeedback({ price, action, status: 'error' });
+          toast.error(err.user_msg || '追價單送出失敗');
+        }
+        feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 800);
+        return;
+      }
+
       // 前端二次確認：戰鬥模式（已解鎖）一鍵直送；否則若開啟下單確認則先問。
       // 前端確認過就視同「已授權」，送單直接帶 confirm:true —— 避免與後端風控
       // WARNING 的 409 CONFIRM_REQUIRED 重複，一次下單最多問一次。
@@ -312,7 +355,7 @@ export function useDOMLogic() {
       isOrderPendingRef.current = false;
       setSplitProgress(null);
     }
-  }, [targetSymbol, orderValue, orderType, priceType, orderCond, orderLot, splitCfg, scheduleOrderRefresh, toast, confirm, settings.confirmations.placeOrder, settings.isCombatMode]);
+  }, [targetSymbol, orderValue, orderType, priceType, orderCond, orderLot, splitCfg, scheduleOrderRefresh, toast, confirm, settings.confirmations.placeOrder, settings.isCombatMode, chaseMode, settings.chase, refreshSmartOrders]);
 
   const handleCancelOrder = useCallback(async (action: 'Buy' | 'Sell', price?: number) => {
     // 刪單確認：戰鬥模式跳過；否則若開啟刪單確認則先問
@@ -427,6 +470,7 @@ export function useDOMLogic() {
     workingBuyMap, workingSellMap, currentPosition,
     handlePlaceOrder, handleCancelOrder, handleAddStopOrder, handleDropOrder,
     handleChaseOrder, handleMarketOrder,
+    chaseMode, setChaseMode,
     orderFeedback, replacingOrder, smartOrders,
     splitProgress, abortSplit,
     targetSymbol, accountSummary, accounts, activeAccount, selectAccount,

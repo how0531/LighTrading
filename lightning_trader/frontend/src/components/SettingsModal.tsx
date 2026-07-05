@@ -336,6 +336,46 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                   </div>
                 </section>
                 <section>
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">追價單（CHASE）</h3>
+                  <p className="text-[11px] text-slate-500 mb-3">
+                    DOM「追價」模式與追價鋪單送出 CHASE 智慧單時套用的預設參數。
+                    改價步幅（reprice_ticks=1）與改價間隔（1500ms）目前用系統預設。
+                  </p>
+                  <div className="mb-4">
+                    <NumInput
+                      label="最大追價檔數"
+                      description="最多跟著盤口改價幾個 tick（max_chase_ticks）"
+                      value={settings.chase.maxChaseTicks}
+                      min={1} max={100}
+                      onChange={(v) => handleUpdate({ chase: { ...settings.chase, maxChaseTicks: Math.min(100, Math.max(1, Math.floor(v) || 1)) } })}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between p-3 rounded-lg bg-white/5 border border-white/5">
+                    <div>
+                      <div className="text-sm font-medium text-white">追不到時（final_action）</div>
+                      <div className="text-xs text-slate-500">追滿檔數仍未成交：放棄撤單，或轉市價強制成交</div>
+                    </div>
+                    <div className="flex bg-[#101623] rounded border border-[#29344A] overflow-hidden">
+                      {([
+                        { id: 'GIVE_UP' as const, label: '放棄' },
+                        { id: 'MARKET'  as const, label: '轉市價' },
+                      ]).map((opt) => (
+                        <button
+                          key={opt.id}
+                          onClick={() => handleUpdate({ chase: { ...settings.chase, finalAction: opt.id } })}
+                          className={`px-3 py-1 text-xs font-bold transition-colors cursor-pointer ${
+                            settings.chase.finalAction === opt.id
+                              ? opt.id === 'MARKET' ? 'bg-red-500/80 text-white' : 'bg-[#D4AF37] text-[#101623]'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+                <section>
                   <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">商品預設口數</h3>
                   <p className="text-[11px] text-slate-500 mb-3">切換到該商品時自動套用此預設口數；股票單位是「張」，期權單位是「口」。</p>
                   <QtyBySymbolEditor settings={settings} updateSetting={updateSetting} />

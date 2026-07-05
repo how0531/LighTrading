@@ -1,8 +1,10 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { useDOMLogic } from '../hooks/useDOMLogic';
+import { useLayOrders } from '../hooks/useLayOrders';
 import { DOMHeader } from './DOM/DOMHeader';
 import { DOMTable } from './DOM/DOMTable';
 import { DOMFooter } from './DOM/DOMFooter';
+import { LayOrdersPanel } from './DOM/LayOrdersPanel';
 import { getTickSize } from '../utils/instrument';
 import { apiClient } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
@@ -32,11 +34,16 @@ export const DOMPanel: React.FC = () => {
     workingBuyMap, workingSellMap, currentPosition,
     handlePlaceOrder, handleCancelOrder, handleAddStopOrder, handleDropOrder,
     handleChaseOrder, handleMarketOrder,
+    chaseMode, setChaseMode,
     orderFeedback, replacingOrder, smartOrders, bData,
     splitProgress, abortSplit,
     targetSymbol, accounts, activeAccount, selectAccount,
     hotkeys, accountEquity,
   } = useDOMLogic();
+
+  // Sprint C：鋪單（多價位掛單）— 獨立於拆單的送出/中止/撤單邏輯
+  const { layProgress, abortLay, submitLay, laidOrders, cancelLaid } = useLayOrders();
+  const [showLayPanel, setShowLayPanel] = useState(false);
 
   // ladder scroll 狀態（local ref — 不進 hook，避免跨模組改動 ref.current）
   const tableRef = useRef<HTMLDivElement>(null);
@@ -307,7 +314,15 @@ export const DOMPanel: React.FC = () => {
         accountEquity={accountEquity}
         scrollAnchor={scrollAnchor} setScrollAnchor={setScrollAnchor}
         onScrollToAnchor={handleScrollToAnchor}
+        chaseMode={chaseMode} setChaseMode={setChaseMode}
       />
+
+      {/* 追價模式常駐警示帶：點價 / 追買追賣熱鍵改送 CHASE 智慧單 */}
+      {chaseMode && (
+        <div className="flex-shrink-0 px-3 py-1 bg-sky-500/15 border-y border-sky-500/40 text-sky-300 text-[11px] font-bold text-center tracking-wide">
+          ⛨ 追價模式：點價／追買追賣熱鍵送出 CHASE 追價智慧單（市價熱鍵與刪單不受影響）
+        </div>
+      )}
 
       {/* 市價模式常駐警示帶：非 LMT 時點擊任意檔位都會直接以市價送出 */}
       {priceType !== 'LMT' && (
@@ -327,6 +342,17 @@ export const DOMPanel: React.FC = () => {
           handlePlaceOrder={handlePlaceOrder} handleDropOrder={handleDropOrder}
         />
       </div>
+
+      {/* Sprint C：鋪單面板（緊湊 section；進度/中止/撤鋪單都在面板內） */}
+      {showLayPanel && (
+        <LayOrdersPanel
+          targetSymbol={targetSymbol} currentPrice={currentPrice} bData={bData}
+          orderCond={orderCond} orderLot={orderLot}
+          layProgress={layProgress} abortLay={abortLay} submitLay={submitLay}
+          laidOrders={laidOrders} cancelLaid={cancelLaid}
+          onClose={() => setShowLayPanel(false)}
+        />
+      )}
 
       {/* 拆單進度列：大單連送時顯示進度 + 中止按鈕 */}
       {splitProgress && !splitProgress.aborted && (
@@ -355,6 +381,8 @@ export const DOMPanel: React.FC = () => {
       <DOMFooter
         isSyncing={isSyncing} handleManualSync={handleManualSync} handleCancelOrder={handleCancelOrder}
         handleFlatten={handleFlatten} handleReverse={handleReverse}
+        layPanelOpen={showLayPanel} onToggleLayPanel={() => setShowLayPanel((v) => !v)}
+        laidCount={laidOrders.length}
       />
     </div>
   );

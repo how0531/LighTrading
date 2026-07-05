@@ -1,5 +1,5 @@
 import React from 'react';
-import { Lock, Zap } from 'lucide-react';
+import { Lock, Zap, Crosshair } from 'lucide-react';
 import { formatPrice } from '../../utils/instrument';
 import { computeChange } from '../../utils/quoteBoard';
 import { useSettings } from '../../contexts/SettingsContext';
@@ -38,6 +38,9 @@ interface DOMHeaderProps {
   scrollAnchor: 'price' | 'cost';
   setScrollAnchor: (a: 'price' | 'cost') => void;
   onScrollToAnchor: () => void;
+  /** Sprint C：追價模式 — 開啟時 ladder 點價 / 追買追賣熱鍵改送 CHASE 智慧單 */
+  chaseMode: boolean;
+  setChaseMode: (v: boolean) => void;
 }
 
 function formatNT(n: number): string {
@@ -60,6 +63,7 @@ const DOMHeaderInner: React.FC<DOMHeaderProps> = ({
   orderCond, setOrderCond, orderLot, setOrderLot,
   orderValue, setOrderValue,
   accountEquity, scrollAnchor, setScrollAnchor, onScrollToAnchor,
+  chaseMode, setChaseMode,
 }) => {
   const netQty = currentPosition ? (currentPosition.direction === 'Buy' ? currentPosition.qty : -currentPosition.qty) : 0;
   const { settings, updateSetting } = useSettings();
@@ -179,6 +183,21 @@ const DOMHeaderInner: React.FC<DOMHeaderProps> = ({
               </span>
             </div>
           )}
+          {/* Sprint C 追價模式：開啟時 ladder 點價 / 追買追賣熱鍵改送 CHASE 智慧單（樣式語彙比照戰鬥鎖） */}
+          <button
+            onClick={() => setChaseMode(!chaseMode)}
+            className={`px-2 py-1 rounded-md border flex items-center gap-1 text-[10px] font-black transition-colors cursor-pointer ${
+              chaseMode
+                ? 'border-sky-500/70 bg-sky-900/40 text-sky-300 animate-pulse'
+                : 'border-slate-600 bg-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+            title={chaseMode
+              ? '追價模式：點價 / 追買追賣熱鍵改送 CHASE 智慧單（後端依盤口自動改價追進）。點擊關閉，恢復普通限價單。'
+              : '追價模式（關）：點擊開啟後，點價與追買/追賣熱鍵會送出 CHASE 追價智慧單，由後端依盤口自動改價追進；市價熱鍵與刪單不受影響。'}
+          >
+            <Crosshair className="w-3 h-3" />
+            追價
+          </button>
           {/* 戰鬥鎖：預設上鎖（防呆，下單/刪單需確認）；解鎖後一鍵直送 */}
           <button
             onClick={() => updateSetting({ isCombatMode: !settings.isCombatMode })}

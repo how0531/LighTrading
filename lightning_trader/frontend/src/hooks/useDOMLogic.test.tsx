@@ -322,3 +322,111 @@ describe('useDOMLogic 追價 / 市價熱鍵', () => {
     expect(mockedPost).not.toHaveBeenCalled();
   });
 });
+
+// ─── Sprint C：DOM 追價模式（CHASE 智慧單） ────────────────
+// toggle 開啟後 ladder 點價 / 追買追賣熱鍵改送 CHASE；市價熱鍵與刪單不受影響。
+
+/** 後端 CHASE 契約 payload（欄位名不可改） */
+const EXPECTED_CHASE_PAYLOAD = {
+  order_type: 'CHASE',
+  symbol: '2330',
+  action: 'Buy',
+  quantity: 1,
+  max_chase_ticks: 10,
+  reprice_ticks: 1,
+  reprice_interval_ms: 1500,
+  final_action: 'GIVE_UP',
+};
+
+describe('useDOMLogic 追價模式（CHASE 智慧單）', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    // 戰鬥模式：跳過前端確認，聚焦驗證 payload 路由
+    localStorage.setItem('lightrade_settings', JSON.stringify({ isCombatMode: true }));
+    coreValue = makeCoreValue();
+    vi.clearAllMocks();
+    mockConfirm.mockReset();
+    mockedPost.mockResolvedValue({ data: {} });
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('追價模式開啟：ladder 點價改送 CHASE 智慧單（契約欄位完整斷言）', async () => {
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    act(() => { result.current.setChaseMode(true); });
+    await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
+
+    expect(mockedPost).toHaveBeenCalledTimes(1);
+    expect(mockedPost).toHaveBeenCalledWith('/smart_orders', EXPECTED_CHASE_PAYLOAD);
+    expect(coreValue.scheduleOrderRefresh).toHaveBeenCalled();
+  });
+
+  it('追價參數取自 settings.chase：max_chase_ticks / final_action 反映設定值', async () => {
+    localStorage.setItem('lightrade_settings', JSON.stringify({
+      isCombatMode: true,
+      chase: { maxChaseTicks: 5, finalAction: 'MARKET' },
+    }));
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    act(() => { result.current.setChaseMode(true); });
+    await act(async () => { await result.current.handlePlaceOrder(100, 'Sell'); });
+
+    expect(mockedPost).toHaveBeenCalledWith('/smart_orders', {
+      ...EXPECTED_CHASE_PAYLOAD, action: 'Sell', max_chase_ticks: 5, final_action: 'MARKET',
+    });
+  });
+
+  it('追價模式關閉（預設）：照送普通 /place_order，payload 不變', async () => {
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    expect(result.current.chaseMode).toBe(false);
+    await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
+
+    expect(mockedPost).toHaveBeenCalledTimes(1);
+    expect(mockedPost).toHaveBeenCalledWith('/place_order', EXPECTED_LIMIT_PAYLOAD);
+  });
+
+  it('追價模式開啟：ChaseBuy 熱鍵（handleChaseOrder）也改送 CHASE', async () => {
+    const { result } = renderHook(() => useDOMLogic(), { wrapper: wrapperWithBook });
+    act(() => { result.current.setChaseMode(true); });
+    await act(async () => { await result.current.handleChaseOrder('Buy'); });
+
+    expect(mockedPost).toHaveBeenCalledTimes(1);
+    expect(mockedPost.mock.calls[0][0]).toBe('/smart_orders');
+    expect(mockedPost.mock.calls[0][1]).toMatchObject({
+      order_type: 'CHASE', action: 'Buy', quantity: 1,
+    });
+  });
+
+  it('追價模式開啟：市價熱鍵不受影響（照送 /place_order + MKT）', async () => {
+    const { result } = renderHook(() => useDOMLogic(), { wrapper: wrapperWithBook });
+    act(() => { result.current.setChaseMode(true); });
+    await act(async () => { await result.current.handleMarketOrder('Sell'); });
+
+    expect(mockedPost).toHaveBeenCalledTimes(1);
+    expect(mockedPost).toHaveBeenCalledWith('/place_order',
+      expect.objectContaining({ price: 0, action: 'Sell', price_type: 'MKT' }));
+  });
+
+  it('追價模式開啟：刪單不受影響（照走 /cancel_all）', async () => {
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    act(() => { result.current.setChaseMode(true); });
+    await act(async () => { await result.current.handleCancelOrder('Buy', 99.5); });
+
+    expect(mockedPost).toHaveBeenCalledWith('/cancel_all',
+      { symbol: '2330', action: 'Buy', price: 99.5 });
+  });
+
+  it('非戰鬥模式：追價單走確認流且文案標明「追價」；拒絕 → 不送單', async () => {
+    localStorage.clear(); // 預設：confirmations.placeOrder=true、非戰鬥
+    mockConfirm.mockResolvedValue(false);
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    act(() => { result.current.setChaseMode(true); });
+    await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
+
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+    const opts = mockConfirm.mock.calls[0][0] as ConfirmOptions;
+    expect(`${opts.title ?? ''} ${opts.message}`).toContain('追價');
+    expect(mockedPost).not.toHaveBeenCalled();
+  });
+});

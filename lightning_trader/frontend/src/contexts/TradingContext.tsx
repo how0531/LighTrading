@@ -35,6 +35,14 @@ export interface SmartOrderData {
   trigger_price: number; trigger_condition: string; trailing_offset: number;
   take_profit_price: number; stop_loss_price: number;
   is_active: boolean; is_triggered: boolean; created_at: string; triggered_at?: string;
+  // Sprint C：CHASE 追價單的 SmartOrderUpdate 延伸欄位（後端並行實作中，
+  // 一律 optional + 前端防禦性取值：目前掛價 / 已改價次數 / 剩量 / 狀態文字）
+  current_price?: number;
+  reprice_count?: number;
+  remaining_qty?: number;
+  max_chase_ticks?: number;
+  final_action?: string;
+  status?: string;
 }
 // Item 11：券商端連線狀態（後端 ConnectionState 推播；WS 斷線時重設為 unknown）
 export type BrokerState = 'connected' | 'disconnected' | 'reconnecting' | 'unknown';
