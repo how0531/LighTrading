@@ -7,4 +7,4 @@ python-multipart>=0.0.9,<1.0    # reports.py 的 CSV 匯入 (UploadFile) 需要
 shioaji>=1.2.5,<2.0
 
 # Test
-pytest>=8.0,<9.0
+pytest>=9.1.1,<10.0
