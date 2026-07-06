@@ -11,14 +11,14 @@
  */
 import { useEffect, useRef } from 'react';
 import { useSettings } from '../contexts/SettingsContext';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useQuotes } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
 import { findTriggered } from '../utils/priceAlerts';
 import { formatPrice } from '../utils/instrument';
 
 export function usePriceAlerts(): void {
   const { settings, updateSetting } = useSettings();
-  const { quote, watchlistQuotes } = useTradingContext();
+  const { quote, watchlistQuotes } = useQuotes(); // 價格警報要即時穿越判定 → 高頻 context
   const { toast } = useToast();
   const lastPriceRef = useRef<Map<string, number>>(new Map());
 

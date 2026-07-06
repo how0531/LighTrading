@@ -24,12 +24,14 @@ async def quote_broadcaster():
                 
                 async def _send_to_conn(conn):
                     try:
-                        # 加上 0.1 秒的 Timeout 防呆，避免單一慢客戶端卡死整個廣播迴圈
-                        await asyncio.wait_for(conn.send_text(message), timeout=0.1)
+                        # Timeout 防呆，避免單一慢客戶端卡死整個廣播迴圈。
+                        # 注意不能太短：瀏覽器分頁切背景（timer throttling）/ GC /
+                        # 網路抖動都常超過 100ms —— 之前設 0.1s 導致正常客戶端
+                        # 被誤踢成殭屍連線（見 shared.drop_connection 說明）
+                        await asyncio.wait_for(conn.send_text(message), timeout=1.0)
                     except Exception as e:
-                        # TimeoutError 或 WebSocketConnectionClosedException
-                        shared.active_connections.discard(conn)
-                        logger.info(f"WebSocket 斷開或超時，已移除連線: {e}")
+                        logger.info(f"WebSocket 斷開或送出逾時，移除並關閉連線: {e}")
+                        await shared.drop_connection(conn)
 
                 if shared.active_connections:
                     tasks = [_send_to_conn(c) for c in list(shared.active_connections)]

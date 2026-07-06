@@ -117,3 +117,53 @@ def test_reset_daily_clears_counters():
     rm.reset_daily()
     assert rm._daily_realized_pnl == 0
     assert rm._daily_unrealized_pnl == 0
+
+
+# ── signed_position_qty / net_position_of（正負號唯一定義） ──
+
+def test_signed_position_qty_unknown_direction_is_zero():
+    f = risk_mod.signed_position_qty
+    assert f("Buy", 3) == 3
+    assert f("Sell", 3) == -3
+    # 未知 / 缺漏方向一律 0（fail-safe）——之前三處複製的預設正負相反
+    assert f("Flat", 3) == 0
+    assert f(None, 3) == 0
+    assert f("", 3) == 0
+    assert f("Long", 3) == 0
+    assert f("Buy", None) == 0
+    assert f("Buy", "bad") == 0
+
+
+def test_net_position_of_aggregates_multiple_rows():
+    f = risk_mod.net_position_of
+    positions = [
+        {"symbol": "2330", "qty": 3, "direction": "Buy"},
+        {"symbol": "2330", "qty": 1, "direction": "Sell"},
+        {"symbol": "2317", "qty": 9, "direction": "Buy"},
+    ]
+    assert f(positions, "2330") == 2
+    assert f(positions, "2317") == 9
+    assert f(positions, "9999") == 0
+    assert f(None, "2330") == 0
+
+
+# ── reduce-only 熔斷豁免 ──
+
+def test_reduce_only_exempt_from_halt():
+    rm = _rm()
+    rm.config.trading_enabled = False
+    # 平倉方向、不超過部位 → 放行（skip_warnings 模擬 confirm）
+    r = rm.pre_order_check("2330", "Sell", qty=2, price=100,
+                           position_qty=2, position_direction="Buy",
+                           skip_warnings=True)
+    assert r.passed, r.reason
+    # 開倉方向 → 仍被擋
+    r2 = rm.pre_order_check("2330", "Buy", qty=1, price=100,
+                            position_qty=2, position_direction="Buy",
+                            skip_warnings=True)
+    assert r2.level == CheckLevel.BLOCK
+    # 超過部位的反向 → 也是開倉，擋
+    r3 = rm.pre_order_check("2330", "Sell", qty=5, price=100,
+                            position_qty=2, position_direction="Buy",
+                            skip_warnings=True)
+    assert r3.level == CheckLevel.BLOCK

@@ -1,6 +1,8 @@
 # LighTrade (LighTrading) — 戰鬥級閃電下單與桌面交易系統
 
-LighTrade 是一款專為高頻交易與極速下單設計的「戰鬥級閃電下單 (DOM)」桌面交易系統。系統採用前後端分離架構，結合了永豐金證券 Shioaji API，致力於提供低延遲、高可用性且視覺直覺的交易環境。
+LighTrade 是一款專為高頻交易與極速下單設計的「戰鬥級閃電下單 (DOM)」交易系統。系統採用前後端分離架構，結合永豐金證券 Shioaji API，致力於提供低延遲、高可用性且視覺直覺的交易環境。
+
+> 完整安裝 / Docker / 桌面打包 / 安全說明請見 **repo 根目錄的 [README.md](../README.md)**，此檔僅摘要本目錄結構與開發指令。
 
 ---
 
@@ -10,24 +12,25 @@ LighTrade 是一款專為高頻交易與極速下單設計的「戰鬥級閃電�
    * 經典五欄式無縫佈局：`[刪買 / 買進 / 委買量] | 價格中樞 | [委賣量 / 賣出 / 刪賣]`。
    * 內建委託量柱狀圖 (Volume Histogram) 與當前成交價亮黃高亮顯示。
    * 支援 `Space` 一鍵置中、`Esc` 緊急全刪單等鍵盤快捷操作。
+   * 拖曳改價、IOC/FOK、盤中零股、期貨帳戶支援。
 
-2. **精緻的專業視覺（Navy & Gold 主題）**
-   * 靈感源自大戶投 (Dawho) 的深邃海軍藍（#161C2D, #1D263B）與奢華黃金配色（#E2B25A）。
-   * 數字字型全面強制等寬（Fira Code / Tabular Numbers），避免價格跳動時版面抖動。
-   * 持倉部位與歷史委託採用「上方中文大、下方代碼小」的直覺排版。
+2. **本地智慧單引擎（含持久化）**
+   * MIT 觸價 / 移動停損 / OCO / Bracket，全部落地 SQLite，backend 重啟自動 re-arm。
+   * 觸發下單走風控閘門：開倉性觸發受日虧損熔斷約束、保護性停損永遠放行。
 
-3. **高可用性防禦設計 (High Availability & HA Fallback)**
-   * **離線常用股票資料庫**：為防止 Shioaji API 遭遇連線限制（例如 `Too Many Connections` 451 錯誤）或網路瞬斷，後端接口整合了常用標的 fallback，保證在未成功連線時畫面仍能正常顯示商品中文名稱。
+3. **高可用性防禦設計 (HA Fallback)**
+   * **離線常用股票資料庫**：Shioaji 連線受限（451 等）時仍能顯示商品中文名稱。
    * **一鍵下單防連點 (Debounce)**：UI 送單後鎖定 0.5 秒，避免手震重複送單。
+   * **斷線重連**：watchdog 偵測靜默斷線，重連後自動補回主商品與所有背景訂閱。
 
 ---
 
 ## 🛠️ 技術堆疊
 
-* **前端 (Frontend)**: React, TypeScript, Tailwind CSS, Vite, Lightweight Charts (K 線圖表)
-* **後端 (Backend)**: Python, FastAPI, asyncio, PyQt5 (執行緒隔離與主事件循環)
-* **桌面端外殼 (Desktop Shell)**: Electron, Node.js
-* **交易 API**: Shioaji API (永豐金證券 API，支援台股與期權)
+* **前端**: React 19, TypeScript, Tailwind CSS 4, Vite, Lightweight Charts
+* **後端**: Python 3.11+, FastAPI, asyncio（券商阻塞呼叫隔離在單 worker broker thread）
+* **桌面外殼**: Electron（位於 repo 根目錄 `/electron`）
+* **交易 API**: Shioaji API（永豐金證券，支援台股與期權）
 
 ---
 
@@ -36,67 +39,36 @@ LighTrade 是一款專為高頻交易與極速下單設計的「戰鬥級閃電�
 ```text
 lightning_trader/
 ├── backend/            # FastAPI 後端路由與 API 服務
-│   ├── routers/        # 包含 accounts, orders, smart, journal 等路由
-│   └── services/       # 包含廣播器 (quote, pnl)、統計與日誌模組
-├── core/               # 交易引擎與 Shioaji API 連線核心
-├── electron/           # Electron 桌面外殼啟動腳本與設定
-├── frontend/           # React 前端單頁應用程式 (SPA)
+│   ├── routers/        # accounts, orders, smart, journal, risk, reports...
+│   └── services/       # 廣播器 (quote, pnl)、order_guard、journal、統計
+├── core/               # ShioajiClient / RiskManager / SmartOrderEngine(+SQLite store)
+├── frontend/           # React 前端 SPA
 │   ├── src/
-│   │   ├── components/ # UI 元件 (如 DOMTable, Panel_Positions, Panel_OrderHistory)
-│   │   └── contexts/   # 全域 Trading 與 Toast Contexts
+│   │   ├── components/ # UI 元件 (DOMTable, Panel_Positions, ...)
+│   │   └── contexts/   # TradingContext / SettingsContext / ToastContext
 │   └── dist/           # 前端打包輸出目錄
-└── build.ps1           # 專案整合建置與啟動指令檔 (PowerShell)
+└── tests/              # pytest 單元 + TestClient 整合測試（fake shioaji）
 ```
 
 ---
 
-## 🚀 快速啟動指南
+## 🚀 開發指令
 
-系統需要同時啟動 **前端 Dev Server**、**後端 FastAPI 服務** 與 **Electron 外殼**：
+```bash
+# 後端（repo 根目錄放 .env，格式見 ../.env.example）
+cd backend && pip install -r requirements_backend.txt
+python main.py            # 127.0.0.1:8000
 
-### 前置需求
-* Node.js v16+
-* Python 3.8~3.10 (建議使用虛擬環境 `.venv`)
+# 前端
+cd frontend && npm install
+npm run dev               # 127.0.0.1:5173
 
-### 1. 後端設定與啟動
-1. 在 `lightning_trader` 根目錄或 `backend` 中建立 `.env` 檔案並填入帳密憑證：
-   ```env
-   SHIOAJI_API_KEY=您的API金鑰
-   SHIOAJI_SECRET_KEY=您的密鑰
-   SHIOAJI_SIMULATION=True
-   ```
-2. 啟動後端伺服器 (預設運行於 `127.0.0.1:8000`)：
-   ```bash
-   cd backend
-   ..\.venv\Scripts\python.exe main.py
-   ```
+# 測試
+cd .. && python -m pytest tests/ -q      # 後端
+cd frontend && npx vitest run            # 前端
+```
 
-### 2. 前端開發與打包
-1. 安裝套件：
-   ```bash
-   cd frontend
-   npm install
-   ```
-2. 啟動前端開發伺服器 (預設 `127.0.0.1:5173`)：
-   ```bash
-   npm run dev
-   ```
-3. 生產環境打包：
-   ```bash
-   npm run build
-   ```
-
-### 3. 啟動 Electron
-1. 在 `electron` 目錄安裝 Node 依賴：
-   ```bash
-   cd electron
-   npm install
-   ```
-2. 在 `lightning_trader` 根目錄啟動 Electron (開發模式)：
-   ```powershell
-   $env:ELECTRON_DEV="1"
-   npx electron .
-   ```
+Electron 桌面版的開發與打包流程見根目錄 README「桌面應用程式」章節。
 
 ---
 

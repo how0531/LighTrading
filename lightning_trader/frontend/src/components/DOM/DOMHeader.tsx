@@ -1,13 +1,17 @@
 import React from 'react';
+import { Lock, Zap, Crosshair, Flame } from 'lucide-react';
 import { formatPrice } from '../../utils/instrument';
+import { computeChange } from '../../utils/quoteBoard';
 import { useSettings } from '../../contexts/SettingsContext';
 import type { SizingMode } from '../../utils/sizing';
 import { lotsToAmount } from '../../utils/sizing';
 import { netPnL as computeNetPnL } from '../../utils/fees';
+import type { QuoteData } from '../../types';
+import type { AccountInfo, AccountPosition } from '../../contexts/TradingContext';
 import { getMultiplier } from '../../types';
 
 interface DOMHeaderProps {
-  qData: any;
+  qData: Partial<QuoteData>;
   targetSymbol: string;
   currentPrice: number;
   refPrice: number;
@@ -15,10 +19,10 @@ interface DOMHeaderProps {
   limitDown: number;
   isSimulation: boolean;
   fullPrices: number[];
-  accounts: any[];
+  accounts: AccountInfo[];
   activeAccount: string | null;
   selectAccount: (acc: string) => void;
-  currentPosition: any;
+  currentPosition: AccountPosition | null;
   realtimePnL: number;
   orderType: string;
   setOrderType: (v: string) => void;
@@ -34,6 +38,12 @@ interface DOMHeaderProps {
   scrollAnchor: 'price' | 'cost';
   setScrollAnchor: (a: 'price' | 'cost') => void;
   onScrollToAnchor: () => void;
+  /** Sprint C：追價模式 — 開啟時 ladder 點價 / 追買追賣熱鍵改送 CHASE 智慧單 */
+  chaseMode: boolean;
+  setChaseMode: (v: boolean) => void;
+  /** Sprint D：五檔委託牆熱力圖（時間×價格 canvas；顯示於 ladder 上方緊湊區） */
+  showDepthWall: boolean;
+  setShowDepthWall: (v: boolean) => void;
 }
 
 function formatNT(n: number): string {
@@ -49,13 +59,15 @@ const MODE_LABEL: Record<SizingMode, string> = {
   equity_pct: '%權益',
 };
 
-export const DOMHeader: React.FC<DOMHeaderProps> = ({
+const DOMHeaderInner: React.FC<DOMHeaderProps> = ({
   qData, targetSymbol, currentPrice, refPrice, limitUp, limitDown, isSimulation, fullPrices,
   accounts, activeAccount, selectAccount, currentPosition, realtimePnL,
   orderType, setOrderType, priceType, setPriceType,
   orderCond, setOrderCond, orderLot, setOrderLot,
   orderValue, setOrderValue,
   accountEquity, scrollAnchor, setScrollAnchor, onScrollToAnchor,
+  chaseMode, setChaseMode,
+  showDepthWall, setShowDepthWall,
 }) => {
   const netQty = currentPosition ? (currentPosition.direction === 'Buy' ? currentPosition.qty : -currentPosition.qty) : 0;
   const { settings, updateSetting } = useSettings();
@@ -83,6 +95,16 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
   const showNet = settings.showNetPnL;
   const primaryPnL = showNet ? netRealtimePnL : realtimePnL;
   const secondaryPnL = showNet ? realtimePnL : netRealtimePnL;
+
+  // 報價讀出列（UX 批次 3）：漲跌用共用 computeChange，口徑與報價看板一致。
+  // 台股慣例：紅漲、綠跌、平盤灰。
+  const change = computeChange(currentPrice, refPrice);
+  const changeCls = !change || change.change === 0
+    ? 'text-slate-400'
+    : change.change > 0 ? 'text-red-400' : 'text-emerald-400';
+  const changeSign = change && change.change > 0 ? '+' : '';
+  const fmtOrDash = (v: number | undefined) =>
+    v && v > 0 ? formatPrice(v, targetSymbol) : '—';
 
   return (
     <div className="flex flex-col shrink-0 shadow-lg z-20 bg-[#1c2331]">
@@ -165,6 +187,52 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
               </span>
             </div>
           )}
+          {/* Sprint D 委託牆：五檔掛量的時間×價格熱力圖，顯示於 ladder 上方（預設關閉） */}
+          <button
+            onClick={() => setShowDepthWall(!showDepthWall)}
+            className={`px-2 py-1 rounded-md border flex items-center gap-1 text-[10px] font-black transition-colors cursor-pointer ${
+              showDepthWall
+                ? 'border-orange-500/70 bg-orange-900/40 text-orange-300'
+                : 'border-slate-600 bg-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+            title={showDepthWall
+              ? '委託牆熱力圖（開）：五檔掛量的時間×價格熱圖顯示於 ladder 上方。點擊關閉。'
+              : '委託牆熱力圖（關）：點擊開啟，以熱圖觀察大單掛撤與委託牆推移（買紅賣綠、白線為成交價軌跡）。'}
+            data-testid="depth-wall-toggle"
+          >
+            <Flame className="w-3 h-3" />
+            牆
+          </button>
+          {/* Sprint C 追價模式：開啟時 ladder 點價 / 追買追賣熱鍵改送 CHASE 智慧單（樣式語彙比照戰鬥鎖） */}
+          <button
+            onClick={() => setChaseMode(!chaseMode)}
+            className={`px-2 py-1 rounded-md border flex items-center gap-1 text-[10px] font-black transition-colors cursor-pointer ${
+              chaseMode
+                ? 'border-sky-500/70 bg-sky-900/40 text-sky-300 animate-pulse'
+                : 'border-slate-600 bg-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+            title={chaseMode
+              ? '追價模式：點價 / 追買追賣熱鍵改送 CHASE 智慧單（後端依盤口自動改價追進）。點擊關閉，恢復普通限價單。'
+              : '追價模式（關）：點擊開啟後，點價與追買/追賣熱鍵會送出 CHASE 追價智慧單，由後端依盤口自動改價追進；市價熱鍵與刪單不受影響。'}
+          >
+            <Crosshair className="w-3 h-3" />
+            追價
+          </button>
+          {/* 戰鬥鎖：預設上鎖（防呆，下單/刪單需確認）；解鎖後一鍵直送 */}
+          <button
+            onClick={() => updateSetting({ isCombatMode: !settings.isCombatMode })}
+            className={`px-2 py-1 rounded-md border flex items-center gap-1 text-[10px] font-black transition-colors cursor-pointer ${
+              settings.isCombatMode
+                ? 'border-red-600/60 bg-red-900/30 text-red-400 animate-pulse'
+                : 'border-slate-600 bg-slate-800 text-slate-400 hover:text-slate-200'
+            }`}
+            title={settings.isCombatMode
+              ? '戰鬥模式：單擊即送單。點擊上鎖以恢復下單確認。'
+              : '防呆鎖：下單/刪單需二次確認。點擊解鎖進入戰鬥模式（一鍵直送）。'}
+          >
+            {settings.isCombatMode ? <Zap className="w-3 h-3" /> : <Lock className="w-3 h-3" />}
+            {settings.isCombatMode ? '戰鬥' : '防呆'}
+          </button>
           <div className={`px-2 py-1 rounded-md border ${isSimulation ? 'border-yellow-600/50 bg-yellow-900/20' : 'border-emerald-600/50 bg-emerald-900/20'}`}>
             <p className={`text-[10px] font-black ${isSimulation ? 'text-yellow-500' : 'text-emerald-500'}`}>{isSimulation ? 'SIM' : 'LIVE'}</p>
           </div>
@@ -211,6 +279,47 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
         </div>
       </div>
 
+      {/* Row 1.5: 報價讀出列 — 現價 / 漲跌（絕對值 + %）/ 開高低（緊湊、tick 高頻更新） */}
+      <div className="px-4 py-1 border-b border-slate-800 bg-[#161d2b] flex flex-wrap items-center gap-x-4 gap-y-0.5 font-mono tabular-nums leading-none">
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">現價</span>
+          {/* Item 11：切換商品後、首筆報價/快照抵達前顯示「訂閱中」而非殘留舊值 */}
+          {currentPrice <= 0 && refPrice <= 0 && targetSymbol ? (
+            <span className="text-[11px] font-bold text-slate-500 animate-pulse">訂閱中…</span>
+          ) : (
+            <span className={`text-[15px] font-black ${changeCls}`}>{fmtOrDash(currentPrice)}</span>
+          )}
+        </div>
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">漲跌</span>
+          {change ? (
+            <span className={`text-[12px] font-bold ${changeCls}`}>
+              {/* 同「點/口」顯示口徑：最多兩位小數、去尾零 */}
+              {changeSign}{parseFloat(change.change.toFixed(2))}
+              <span className="ml-1">({changeSign}{change.pct.toFixed(2)}%)</span>
+            </span>
+          ) : (
+            <span className="text-[12px] text-slate-500">—</span>
+          )}
+        </div>
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">開</span>
+          <span className="text-[11px] text-slate-300">{fmtOrDash(qData.Open)}</span>
+        </div>
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">高</span>
+          <span className="text-[11px] text-red-400/90">{fmtOrDash(qData.High)}</span>
+        </div>
+        <div className="flex items-baseline gap-1.5">
+          <span className="text-[8px] font-sans font-bold text-slate-500 uppercase tracking-wider">低</span>
+          <span className="text-[11px] text-emerald-400/90">{fmtOrDash(qData.Low)}</span>
+        </div>
+        <div className="flex items-baseline gap-1.5 ml-auto">
+          <span className="text-[8px] font-sans font-bold text-slate-600 uppercase tracking-wider">參考</span>
+          <span className="text-[11px] text-slate-500">{fmtOrDash(refPrice)}</span>
+        </div>
+      </div>
+
       {/* Row 2: Order Settings */}
       <div className="px-4 py-2 border-b border-slate-800 bg-[#151b26] flex flex-wrap items-center gap-4">
         <div className="flex flex-col gap-0.5">
@@ -224,7 +333,7 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
 
         <div className="flex flex-col gap-0.5">
           <span className="text-[8px] font-bold text-slate-500 uppercase tracking-widest hidden md:block">Price Type</span>
-          <select value={priceType} onChange={(e) => setPriceType(e.target.value)} className="bg-[#101623] border border-slate-700 hover:border-slate-600 rounded text-[11px] font-bold py-1 px-1.5 text-[#D4AF37] outline-none cursor-pointer focus:ring-1 focus:ring-slate-500">
+          <select value={priceType} onChange={(e) => setPriceType(e.target.value)} className={`border rounded text-[11px] font-bold py-1 px-1.5 outline-none cursor-pointer focus:ring-1 ${priceType !== 'LMT' ? 'bg-red-500/15 border-red-500/70 hover:border-red-400 text-red-400 focus:ring-red-500' : 'bg-[#101623] border-slate-700 hover:border-slate-600 text-[#D4AF37] focus:ring-slate-500'}`}>
             <option value="LMT">LMT (限價)</option>
             <option value="MKT">MKT (市價)</option>
             <option value="MKP">MKP (範圍市價)</option>
@@ -373,3 +482,7 @@ export const DOMHeader: React.FC<DOMHeaderProps> = ({
     </div>
   );
 };
+
+// props 幾乎都是 scalar / 已 memo 的物件，React.memo 可擋掉非相關重繪
+export const DOMHeader = React.memo(DOMHeaderInner);
+DOMHeader.displayName = 'DOMHeader';

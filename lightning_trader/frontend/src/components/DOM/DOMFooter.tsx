@@ -1,5 +1,5 @@
 import React from 'react';
-import { useToast } from '../../contexts/ToastContext';
+import { Layers } from 'lucide-react';
 import { useSettings } from '../../contexts/SettingsContext';
 
 interface DOMFooterProps {
@@ -8,6 +8,11 @@ interface DOMFooterProps {
   handleCancelOrder: (action: 'Buy' | 'Sell') => void;
   handleFlatten: () => void;
   handleReverse: () => void;
+  /** Sprint C：鋪單面板開關（面板本體在 DOMPanel 內、footer 上方） */
+  layPanelOpen: boolean;
+  onToggleLayPanel: () => void;
+  /** 本次已鋪出且尚未撤的委託數（>0 時按鈕帶徽章提示） */
+  laidCount: number;
 }
 
 const displayKey = (key: string) => (key === ' ' ? 'Space' : key);
@@ -20,26 +25,15 @@ const ACTION_LABEL: Record<string, string> = {
   ScrollCenter: '置中',
 };
 
-export const DOMFooter: React.FC<DOMFooterProps> = ({
-  isSyncing, handleManualSync, handleCancelOrder, handleFlatten, handleReverse
+const DOMFooterInner: React.FC<DOMFooterProps> = ({
+  isSyncing, handleManualSync, handleCancelOrder, handleFlatten, handleReverse,
+  layPanelOpen, onToggleLayPanel, laidCount,
 }) => {
-  const { toast } = useToast();
   const { settings } = useSettings();
 
-  const confirmFlatten = () => {
-    toast.warn('將以市價清空當前商品所有部位', {
-      actionLabel: '確認平倉',
-      durationMs: 8000,
-      onAction: () => { handleFlatten(); },
-    });
-  };
-  const confirmReverse = () => {
-    toast.warn('將市價平倉後立即反向建倉', {
-      actionLabel: '確認反手',
-      durationMs: 8000,
-      onAction: () => { handleReverse(); },
-    });
-  };
+  // 確認流統一（UX 批次 3）：確認只做一層，由 DOMPanel 的 handleFlatten /
+  // handleReverse 用 ConfirmDialog 問（它才知道 targetSymbol，且尊重戰鬥模式）。
+  // 原本這裡再包一層 toast.warn 確認會造成「toast 確認 + confirm 對話框」跳兩次。
 
   return (
     <div className="border-t border-slate-800 bg-[#1c2331]">
@@ -70,14 +64,31 @@ export const DOMFooter: React.FC<DOMFooterProps> = ({
           >
             SYNC
           </button>
+          {/* Sprint C：鋪單面板開關 */}
+          <button
+            onClick={onToggleLayPanel}
+            className={`flex items-center gap-1 px-2.5 py-1.5 rounded text-[10px] font-bold border transition-all active:scale-95 cursor-pointer ${
+              layPanelOpen
+                ? 'bg-indigo-600/80 text-white border-indigo-500'
+                : 'bg-indigo-900/40 hover:bg-indigo-800/60 text-indigo-300 border-indigo-800/60'
+            }`}
+            title="鋪單：一次在多個價位掛出限價單（可選追價智慧單），支援一鍵撤鋪單"
+          >
+            <Layers className="w-3 h-3" />
+            鋪單{laidCount > 0 ? ` (${laidCount})` : ''}
+          </button>
         </div>
         <div className="flex items-center gap-1.5">
           <button onClick={() => handleCancelOrder('Buy')} className="px-2.5 py-1.5 bg-red-900/40 hover:bg-red-800/60 text-red-400 hover:text-red-300 rounded text-[10px] font-bold border border-red-800/50 transition-all active:scale-95 cursor-pointer">全刪買</button>
-          <button onClick={confirmFlatten} className="px-3 py-1.5 bg-amber-900/40 hover:bg-amber-800/60 text-amber-400 hover:text-amber-300 rounded text-[10px] font-black border border-amber-700/50 transition-all active:scale-95 cursor-pointer">平倉</button>
-          <button onClick={confirmReverse} className="px-3 py-1.5 bg-purple-900/40 hover:bg-purple-800/60 text-purple-400 hover:text-purple-300 rounded text-[10px] font-black border border-purple-700/50 transition-all active:scale-95 cursor-pointer">反手</button>
+          <button onClick={handleFlatten} className="px-3 py-1.5 bg-amber-900/40 hover:bg-amber-800/60 text-amber-400 hover:text-amber-300 rounded text-[10px] font-black border border-amber-700/50 transition-all active:scale-95 cursor-pointer">平倉</button>
+          <button onClick={handleReverse} className="px-3 py-1.5 bg-purple-900/40 hover:bg-purple-800/60 text-purple-400 hover:text-purple-300 rounded text-[10px] font-black border border-purple-700/50 transition-all active:scale-95 cursor-pointer">反手</button>
           <button onClick={() => handleCancelOrder('Sell')} className="px-2.5 py-1.5 bg-emerald-900/40 hover:bg-emerald-800/60 text-emerald-400 hover:text-emerald-300 rounded text-[10px] font-bold border border-emerald-800/50 transition-all active:scale-95 cursor-pointer">全刪賣</button>
         </div>
       </div>
     </div>
   );
 };
+
+// handler props 皆為 useCallback，memo 可擋掉 tick 造成的重繪
+export const DOMFooter = React.memo(DOMFooterInner);
+DOMFooter.displayName = 'DOMFooter';

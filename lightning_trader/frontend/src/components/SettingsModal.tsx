@@ -1,16 +1,19 @@
 import React, { useEffect, useState } from 'react';
-import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors, ShieldAlert, RotateCcw, FileDown, Bell } from 'lucide-react';
+import { X, Settings as SettingsIcon, MousePointer2, Keyboard, Palette, Check, Monitor, Scissors, ShieldAlert, RotateCcw, FileDown, Bell, KeyRound } from 'lucide-react';
 import { useSettings } from '../contexts/SettingsContext';
 import type { Settings, HotkeyItem } from '../contexts/SettingsContext';
-import { apiClient, normalizeApiError } from '../api/client';
+import { apiClient } from '../api/client';
 import { useToast } from './../contexts/ToastContext';
+import { useApiErrorToast } from '../hooks/useApiErrorToast';
+import { useTradingCore } from '../contexts/TradingContext';
+import { getApiToken, setApiToken } from '../utils/backendUrl';
 
 interface SettingsModalProps {
   isOpen: boolean;
   onClose: () => void;
 }
 
-type TabType = 'transaction' | 'dom' | 'risk' | 'notifications' | 'hotkeys' | 'splitOrder' | 'appearance';
+type TabType = 'transaction' | 'dom' | 'risk' | 'connection' | 'notifications' | 'hotkeys' | 'splitOrder' | 'appearance';
 
 interface RiskConfigShape {
   max_position_per_symbol: number;
@@ -31,14 +34,31 @@ const ACTION_OPTIONS: { value: HotkeyItem['action']; label: string }[] = [
   { value: 'CancelAll',   label: '全刪掛單' },
   { value: 'Flatten',     label: '全部平倉' },
   { value: 'ScrollCenter',label: '置中 (捲到現價)' },
+  // UX 批次 4 Item 8
+  { value: 'ChaseBuy',    label: '追買 (賣一價掛買)' },
+  { value: 'ChaseSell',   label: '追賣 (買一價掛賣)' },
+  { value: 'MarketBuy',   label: '市價買進' },
+  { value: 'MarketSell',  label: '市價賣出' },
 ];
 
 const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
   const { settings, updateSetting, resetSettings } = useSettings();
   const { toast } = useToast();
+  const handleApiError = useApiErrorToast();
+  const { forceReconnect } = useTradingCore();
   const [activeTab, setActiveTab] = useState<TabType>('transaction');
   const [capturingIdx, setCapturingIdx] = useState<number | null>(null);
   const [riskCfg, setRiskCfg] = useState<RiskConfigShape | null>(null);
+  // 連線/安全：API Token（localStorage: lightrade_api_token）
+  const [apiTokenDraft, setApiTokenDraft] = useState<string>(() => getApiToken());
+
+  const saveApiToken = (value: string) => {
+    setApiToken(value);
+    setApiTokenDraft(getApiToken());
+    // REST 靠 interceptor 每次讀取即可；WebSocket URL 帶 token → 強制重連套用
+    forceReconnect();
+    toast.success(value.trim() ? 'API Token 已儲存，連線已重建' : 'API Token 已清除，連線已重建');
+  };
 
   // 開啟對話框時拉一次最新風控設定
   useEffect(() => {
@@ -55,8 +75,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     try {
       await apiClient.put('/risk_config', patch);
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '更新風控失敗');
+      handleApiError(e, '更新風控失敗');
     }
   };
 
@@ -103,8 +122,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
       const pnl = r.summary?.realized_pnl_estimate ?? 0;
       toast.success(`日報已下載：${r.by_symbol.length} 商品 / 估算 PnL ${pnl.toLocaleString()}`);
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '取得日報失敗');
+      handleApiError(e, '取得日報失敗');
     }
   };
 
@@ -130,8 +148,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
         toast.info(`系統診斷：\n${text}`, { durationMs: 30000 });
       }
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '取得診斷失敗');
+      handleApiError(e, '取得診斷失敗');
     }
   };
 
@@ -142,8 +159,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
       const res = await apiClient.get('/risk_config');
       setRiskCfg(res.data as RiskConfigShape);
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '重置失敗');
+      handleApiError(e, '重置失敗');
     }
   };
 
@@ -153,6 +169,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     { id: 'transaction' as TabType, label: '交易設定',  icon: MousePointer2 },
     { id: 'dom'         as TabType, label: '閃電下單',  icon: Monitor },
     { id: 'risk'        as TabType, label: '風險控管',  icon: ShieldAlert },
+    { id: 'connection'  as TabType, label: '連線/安全', icon: KeyRound },
     { id: 'notifications' as TabType, label: '通知',    icon: Bell },
     { id: 'hotkeys'     as TabType, label: '快捷鍵',    icon: Keyboard },
     { id: 'splitOrder'  as TabType, label: '拆單設定',  icon: Scissors },
@@ -160,7 +177,7 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
   ];
 
   const handleToggle = (category: keyof Settings, field: string) => {
-    const currentCategory = settings[category] as any;
+    const currentCategory = settings[category] as Record<string, unknown>;
     updateSetting({
       [category]: { ...currentCategory, [field]: !currentCategory[field] }
     });
@@ -319,6 +336,46 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                   </div>
                 </section>
                 <section>
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">追價單（CHASE）</h3>
+                  <p className="text-[11px] text-slate-500 mb-3">
+                    DOM「追價」模式與追價鋪單送出 CHASE 智慧單時套用的預設參數。
+                    改價步幅（reprice_ticks=1）與改價間隔（1500ms）目前用系統預設。
+                  </p>
+                  <div className="mb-4">
+                    <NumInput
+                      label="最大追價檔數"
+                      description="最多跟著盤口改價幾個 tick（max_chase_ticks）"
+                      value={settings.chase.maxChaseTicks}
+                      min={1} max={100}
+                      onChange={(v) => handleUpdate({ chase: { ...settings.chase, maxChaseTicks: Math.min(100, Math.max(1, Math.floor(v) || 1)) } })}
+                    />
+                  </div>
+                  <div className="flex items-center justify-between p-3 rounded-lg bg-white/5 border border-white/5">
+                    <div>
+                      <div className="text-sm font-medium text-white">追不到時（final_action）</div>
+                      <div className="text-xs text-slate-500">追滿檔數仍未成交：放棄撤單，或轉市價強制成交</div>
+                    </div>
+                    <div className="flex bg-[#101623] rounded border border-[#29344A] overflow-hidden">
+                      {([
+                        { id: 'GIVE_UP' as const, label: '放棄' },
+                        { id: 'MARKET'  as const, label: '轉市價' },
+                      ]).map((opt) => (
+                        <button
+                          key={opt.id}
+                          onClick={() => handleUpdate({ chase: { ...settings.chase, finalAction: opt.id } })}
+                          className={`px-3 py-1 text-xs font-bold transition-colors cursor-pointer ${
+                            settings.chase.finalAction === opt.id
+                              ? opt.id === 'MARKET' ? 'bg-red-500/80 text-white' : 'bg-[#D4AF37] text-[#101623]'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          {opt.label}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </section>
+                <section>
                   <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">商品預設口數</h3>
                   <p className="text-[11px] text-slate-500 mb-3">切換到該商品時自動套用此預設口數；股票單位是「張」，期權單位是「口」。</p>
                   <QtyBySymbolEditor settings={settings} updateSetting={updateSetting} />
@@ -401,7 +458,6 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                     <ToggleItem label="緊湊模式" description="DOM 列高 32px → 24px，多顯示約 33% 檔位" enabled={settings.visuals.compactMode} onToggle={() => handleToggle('visuals', 'compactMode')} />
                     <ToggleItem label="顯示 VWAP" description="在閃電下單列顯示成交均價線" enabled={settings.visuals.showVWAP} onToggle={() => handleToggle('visuals', 'showVWAP')} />
                     <ToggleItem label="顯示 今日高低點" description="標記今日最高價與最低價" enabled={settings.visuals.showHL} onToggle={() => handleToggle('visuals', 'showHL')} />
-                    <ToggleItem label="顯示 成交量分布 (Volume Profile)" description="顯示各價位成交量分布圖" enabled={settings.visuals.showVolumeProfile} onToggle={() => handleToggle('visuals', 'showVolumeProfile')} />
                   </div>
                 </section>
               </div>
@@ -533,6 +589,47 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
               </div>
             )}
 
+            {/* ── 連線 / 安全 ── */}
+            {activeTab === 'connection' && (
+              <div className="space-y-6">
+                <section>
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-2">API Token</h3>
+                  <p className="text-[11px] text-slate-500 mb-3">
+                    只有在後端有設定環境變數 <code className="text-slate-300">LIGHTRADE_API_TOKEN</code> 時才需要填。
+                    填入後所有 API 請求會帶 <code className="text-slate-300">X-API-Token</code> header、
+                    WebSocket 連線會帶 <code className="text-slate-300">?token=</code>。後端沒設定就留空即可。
+                  </p>
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="password"
+                      autoComplete="off"
+                      placeholder="貼上與後端 LIGHTRADE_API_TOKEN 相同的值"
+                      value={apiTokenDraft}
+                      onChange={(e) => setApiTokenDraft(e.target.value)}
+                      onKeyDown={(e) => { if (e.key === 'Enter') saveApiToken(apiTokenDraft); }}
+                      className="flex-1 bg-[#101623] border border-[#29344A] rounded text-slate-200 px-3 py-2 text-sm font-mono outline-none focus:border-[#D4AF37]/50"
+                    />
+                    <button
+                      onClick={() => saveApiToken(apiTokenDraft)}
+                      className="px-3 py-2 bg-[#D4AF37] hover:bg-[#E5A344] text-[#101623] rounded text-xs font-bold transition-colors"
+                    >
+                      儲存
+                    </button>
+                    <button
+                      onClick={() => { setApiTokenDraft(''); saveApiToken(''); }}
+                      disabled={!apiTokenDraft && !getApiToken()}
+                      className="px-3 py-2 bg-slate-700/60 hover:bg-slate-700 text-slate-200 rounded text-xs font-bold transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      清除
+                    </button>
+                  </div>
+                  <p className="text-[10px] text-slate-600 italic mt-2">
+                    Token 儲存於本機瀏覽器（localStorage），不會隨設定同步到後端。儲存後會自動重建 WebSocket 連線。
+                  </p>
+                </section>
+              </div>
+            )}
+
             {/* ── 通知 webhook ── */}
             {activeTab === 'notifications' && (
               <div className="space-y-6">
@@ -603,6 +700,44 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
                   >
                     送一則測試訊息
                   </button>
+                </section>
+                <section>
+                  <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-4">音效</h3>
+                  <div className="space-y-3">
+                    <ToggleItem
+                      label="操作音效"
+                      description="下單 / 刪單 / 改單 / 成交時播放提示音"
+                      enabled={settings.notifications.sound.enabled}
+                      onToggle={() => handleUpdate({
+                        notifications: {
+                          ...settings.notifications,
+                          sound: { ...settings.notifications.sound, enabled: !settings.notifications.sound.enabled },
+                        },
+                      })}
+                    />
+                    <div className={`p-4 rounded-lg bg-white/5 border border-white/5 ${settings.notifications.sound.enabled ? '' : 'opacity-40 pointer-events-none'}`}>
+                      <div className="flex justify-between items-center mb-3">
+                        <div>
+                          <div className="text-sm font-medium text-white">音量</div>
+                          <div className="text-xs text-slate-500 mt-0.5">套用於所有操作音效</div>
+                        </div>
+                        <span className="text-[#D4AF37] font-mono font-bold">
+                          {Math.round(settings.notifications.sound.volume * 100)}%
+                        </span>
+                      </div>
+                      <input
+                        type="range" min="0" max="1" step="0.05"
+                        value={settings.notifications.sound.volume}
+                        onChange={(e) => handleUpdate({
+                          notifications: {
+                            ...settings.notifications,
+                            sound: { ...settings.notifications.sound, volume: parseFloat(e.target.value) },
+                          },
+                        })}
+                        className="w-full h-1.5 bg-[#29344A] rounded-lg appearance-none cursor-pointer accent-[#D4AF37]"
+                      />
+                    </div>
+                  </div>
                 </section>
                 <section>
                   <h3 className="text-xs font-bold text-[#D4AF37] uppercase tracking-wider mb-2">本地價格警報</h3>
@@ -918,7 +1053,9 @@ const QtyBySymbolEditor: React.FC<{ settings: Settings; updateSetting: (u: Parti
   );
 };
 
-const ToggleItem = ({ label, description, enabled, onToggle }: any) => (
+const ToggleItem = ({ label, description, enabled, onToggle }: {
+  label: string; description?: string; enabled: boolean; onToggle: () => void;
+}) => (
   <div className="flex items-center justify-between p-4 rounded-lg bg-white/5 border border-white/5 hover:border-white/10 transition-all">
     <div>
       <div className="text-sm font-medium text-white">{label}</div>
@@ -950,7 +1087,9 @@ const NumInput = ({ label, description, value, min, max, onChange }: {
   </div>
 );
 
-const ThemeCard = ({ theme, label, isActive, onClick }: any) => (
+const ThemeCard = ({ theme, label, isActive, onClick }: {
+  theme: 'dark' | 'light'; label: string; isActive: boolean; onClick: () => void;
+}) => (
   <button
     onClick={onClick}
     className={`flex-1 group relative p-4 rounded-xl border-2 transition-all duration-300 overflow-hidden ${

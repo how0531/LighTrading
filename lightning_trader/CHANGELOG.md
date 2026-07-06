@@ -4,6 +4,160 @@
 
 ---
 
+## [2.3.0] - 2026-07-05
+
+### 🚀 交易功能大版本：智慧單全型別 + 追價 + 鋪單 + 多 DOM 宮格 + 指標系統
+
+**智慧單與下單（Sprint A / C）**
+* **OCO / Bracket 前端接線**：SmartOrdersPanel 可直接建立 MIT / 移動停損 / OCO / Bracket（先前引擎有但 UI 沒入口）；表單以現價 ∓10 tick 預填 + 「現價±1%」快捷。
+* **CHASE 追價智慧單（伺服器端 auto-reprice）**：進場掛最佳對手價，行情不利移動自動 cancel-replace 追價（可調追價門檻 / 節流間隔 / 最大追價檔數），追到上限後「放棄」或「剩量轉市價」；部分成交續追剩量；SQLite 持久化、重啟 re-attach 續追、外部撤單偵測（10s 寬限）、按單號精準撤單。DOM「追價模式」toggle：ladder 點價與追買/追賣熱鍵直接改送追價單。
+* **鋪單面板**：2–10 檔多價位一鍵鋪單（買往下/賣往上、tick 對齊、價位預覽、送出前總確認、進度可中止）、「追價鋪單」= 每檔改送 CHASE、一鍵撤鋪單。
+* **拆單進度可中止**：大單自動拆單顯示「拆單 3/10」進度與中止按鈕。
+* **新熱鍵**：追買 q / 追賣 w / 市價買 a / 市價賣 s（市價刻意拆買賣兩鍵防誤觸），全部尊重確認流與戰鬥模式。
+
+**多商品交易（Sprint D）**
+* **⚡全開多 DOM 宮格**：自選前 4/6/9 檔各開迷你 ladder（2×2 / 2×3 / 3×3），左點掛買、右點掛賣，共用口數、每商品獨立 in-flight 去重、未成交徽章、一鍵設為主商品；Esc 關閉並攔截主 DOM 熱鍵。
+* **五檔委託牆熱力圖**：canvas 時間×價格熱圖（90 秒滾動窗、中價 ±12 tick 平移、對數強度、買紅賣綠、成交價白色軌跡），DOM「牆」鈕切換。
+* 背景商品五檔進前端（`bidAskBySymbol`，canonical 歸一 + 100ms dirty flush）。
+
+**圖表與指標（Sprint B / E）**
+* **K 線點擊下單**：圖上點價直接掛限價單（one-shot 模式、409 風控確認）、可調口數；委託顯示為可視價格線、成交打點標記。
+* **21 種內建技術指標**：主圖 10 種（SMA/EMA/WMA/布林/唐奇安/肯特納/SAR/SuperTrend/日內錨定 VWAP/Envelope）+ 副圖 11 種（MACD/RSI/KD/ATR/CCI/OBV/威廉%R/MFI/ROC/DMI-ADX/量+量均），lightweight-charts v5 多 pane、逐點翻色、暖身期正確。
+* **TradingView 式指標選擇器**：搜尋 / 主副圖分類 / 收藏 / 多實例 / 參數動態表單 / 每線色彩線寬實虛 / pane 排序 / 設定持久化。
+* **自訂 JS 指標編輯器**：`ta.*` 函式庫 + `plot()` / `hline()` + `//@param` 參數註解；Web Worker 沙箱（網路/儲存 API 雙層封鎖、2 秒無窮迴圈熔斷、絕不主執行緒 eval）；驗證通過才可儲存、輸出線自動偵測。
+
+### 🧭 使用體驗工程（UX 批次 1–4，27 項）
+
+**下單回饋與確認流**
+* promise 式 ConfirmDialog 全面取代 `window.confirm` / `window.prompt`（8 處）：併發排隊、Enter/Esc、backdrop 取消、開啟時攔截下單熱鍵；409 風控警告改 danger 對話框。修掉 DOMFooter 平倉/反手「要確認兩次」的 bug。
+* 下單成功 toast（買 N @ 價 ✓）+ 五種情境音效（下單/刪單/改單/成交/熔斷，設定可關可調音量）；in-flight 重複點擊給「上一筆處理中…」回饋；DOM 拖曳改價「改價中」半透明 + 成功/失敗回饋。
+* 市價模式琥珀警示帶；一鍵平倉/反手 danger 確認；委託列部分成交徽章 3/10。
+
+**串接可靠性**
+* Header 四級連線燈：OFFLINE > 券商重連中/斷線 > 無TICK/盤後 > ONLINE（後端 ConnectionState 廣播 + WS hello frame）；盤後/斷線頂部橫幅。
+* 盤後看門狗修復：`_in_quote_session` 依交易時段（TSE 09:00–13:30、期貨 08:45–13:45 / 15:00–翌日 05:00 跨午夜）判斷「本來就該沒行情」，盤後不再無謂重連迴圈。
+* 全成即時通知改 TradeUpdate 驅動（fill id 去重、精確一次）；風控熔斷即時 toast + 音效 + 桌面通知 + Dashboard 顯示實際原因（RiskStatusUpdate 廣播）；Header 日虧損進度儀表（綠→黃→紅、鎖定顯示盾牌）。
+* **修掉背景訂閱洩漏**：移除自選即自動退訂（`unsubscribe_background` + `POST /api/unwatch`，持倉與當前主商品受保護）。
+* 切換商品顯示「訂閱中…」骨架；報價中斷 >12 秒自癒重連（沿用既有機制）。
+
+**呈現正確性與效能**
+* 報價歷史紅漲綠跌修正（台股慣例）、報價看板買紅賣綠、成交量欄優先 TotalVolume（總量）；DOMHeader 報價讀出列（現價/漲跌%/開高低/參考價）。
+* Tape 保留 50→500 筆（渲染上限 200、力道統計吃全量）；tape/自選列閃爍修正（單調 Seq key + React.memo 列元件）。
+* 結構化 API 錯誤（`{code, user_msg}` 中文訊息）全面取代字串比對。
+
+* 測試：後端 112 → **162**、前端 206 → **406**，全綠。（詳細驗證：tsc / eslint --max-warnings 0 / vitest / vite build / pytest 五 gate 每批全過才入庫）
+
+---
+
+## [2.2.2] - 2026-07-04
+
+### 🔍 完整 Code Review 修復（8 視角掃描 → 10 項確認缺陷 + 清理）
+
+**資金安全（正確性）**
+* **成交去重失效修復**：Shioaji Deal 回報實際欄位是 `exchange_seq`（無 `dealseq`/`seq`，見 repo 內 shioaji 型別文件），callback 路徑之前落到 wall-clock 時間戳，與對帳迴圈的 `Deal.seq` 對不上 → 同筆成交重複入帳、日已實現損益翻倍、熔斷誤觸。改為優先取 `exchange_seq`。
+* **熔斷期間手動平倉被鎖死**：reduce-only 豁免之前只做在智慧單觸發與 flatten 按鈕，手動下單面板在熔斷後連平倉單都送不出去。改為在 `pre_order_check` 內統一判定 reduce-only（方向與淨部位相反且不超量），所有下單路徑一致豁免。
+* **OCO 觸發失敗變單邊保護**：一腿觸發但市價單送出失敗 re-arm 時，已被連帶取消的配對腿不會復活 → 部位只剩單邊保護。改為 re-arm 時配對腿一起復活；放棄重試時也保留配對腿。
+* **淨部位正負號三處分歧**：`risk_manager`/`order_guard`/`orders.py` 對未知 direction 的預設正負相反。收斂為 `risk_manager.signed_position_qty`/`net_position_of` 單一定義（未知方向一律回 0）。
+
+**延遲 / 可用性**
+* **對帳與 FIFO 重算移出下單佇列**：`order_sync`（每 2.5s 的 update_status+list_trades）與已實現損益重算之前都排在手動下單共用的單 worker broker 執行緒 → head-of-line 延遲尖峰。新增專用 `sync_executor`；已實現重算加合流防抖（0.2s 聚合窗）；`order_sync` 加 in-memory fill id watermark，不再每輪對全部 deals 重打 SQLite。
+* **心跳獨立成 task**：WS 心跳之前內嵌在 pnl 迴圈，會被排在 broker 執行緒的慢 `list_positions` 餓死 → 前端誤判假死、重連風暴。改為獨立 asyncio task，不受 broker 阻塞影響。
+* **錯誤 token 無限重連**：4401（token 認證失敗）之前被 onclose 當一般斷線無限重試。改為辨識 4401、停止重連並提示使用者。
+* **開機訂閱重試無上限**：subscribe 失敗重試之前 8 次（~20s）用完就停，LIVE 手動登入慢於此則主報價永久空白。改為無次數上限、延遲 ×1.5 封頂 10s、pending 旗標防重複、成功 ack 重置。
+* **盤前快照報價不顯示**：`mergeQuote` 之前對 Price=0 的訊息整筆丟棄，盤前/未成交商品只有 Reference/漲跌停的快照被丟 → DOM ladder 建不出檔位。改為保留帶靜態欄位的快照（不進逐筆 tape）。
+
+**清理**
+* RISK_BLOCKED 哨兵收斂為 core 單一定義、backend import（消除跨模組字串耦合）；`_cancel_linked` 復用 `_deactivate_linked_nolock` 謂詞；成交副作用扇出收斂為 `order_guard.fill_side_effects`（callback 與對帳路徑共用）；活躍委託狀態集合收斂為前端 `utils/orderStatus.ts`（消除 5 處複製）；移除死掉的 422 RISK_WARNING 分支與 Volume Profile 開關。
+* 測試：+8（成交 id 去重、reduce-only 豁免、OCO 腿復活、signed_position_qty/net_position_of、4401 停止重連、無上限訂閱重試、盤前快照保留）。後端 112 + 前端 206 全綠。
+
+---
+
+## [2.2.1] - 2026-07-04
+
+### 📈 報價顯示穩定性（三個「報價常常不顯示」的根因）
+
+* **廣播逾時誤踢 → 殭屍連線（主因）**：報價廣播對單一客戶端送出逾時 0.1 秒
+  就把連線從集合移除但「不關閉 socket」——瀏覽器分頁切背景 / GC / 網路抖動
+  都很容易超過 100ms。被踢後客戶端的 WS 仍是 OPEN、onclose 永遠不觸發、
+  永遠不重連，報價從此凍結。修復：逾時放寬到 1 秒、踢除時真正 `close()`
+  讓前端走既有重連（`shared.drop_connection`，quote/pnl/broadcast_ws 三處統一）。
+* **假死自癒**：後端新增每 ≤3 秒的輕量 `Heartbeat`（未登入/盤後也發，
+  之前只有 PnLUpdate 當心跳但它無持倉時不發）；前端 stale watchdog 升級——
+  >12 秒完全無訊息且 socket 看似 OPEN 時主動 close 觸發重連，
+  任何形式的無聲斷線（伺服器踢除、半開連線、睡眠喚醒）都能自癒。
+* **開機競態**：前端 WS 50ms 就緒、Shioaji 自動登入要 ~2 秒，訂閱先失敗且
+  之前「沒有 retry」→ 主報價空白直到手動重選商品。修復：subscribe error ack
+  觸發 2.5 秒間隔自動重試（最多 8 次，涵蓋登入最慢情境）。
+* **watch ack 別名修復**：tick 廣播用 canonical symbol（如 `TSE2330`），
+  自選清單存使用者輸入（`2330`）——watch ack 之前回的是輸入字串，前端對不上
+  key，報價看板/自選列永遠沒資料。修復：`subscribe_background` 回傳 canonical、
+  watch ack 帶 `aliases` 對應表、前端 tick/bidask 先映射再查自選 key。
+* 測試：後端 watch alias ack + 前端（subscribe retry / 假死強制重連 /
+  alias tick 映射），共 +4。
+
+---
+
+## [2.2.0] - 2026-07-04
+
+### 🔄 外部管道下單即時同步（委託對帳迴圈）
+
+* **問題**：Shioaji 只推播「本 session 下的單」。從券商 App / 其他 API session 下單，
+  這裡的介面看不到委託即時出現（要等前端 5 秒輪詢），外部「成交」更是完全
+  進不了 journal——交易日誌、已實現損益、風控熔斷全部漏算外部管道。
+* **新增 `backend/services/order_sync.py`**：背景迴圈（預設每 2.5 秒，
+  `LIGHTRADE_ORDER_SYNC_INTERVAL` 可調，0=停用）向券商 `update_status` + `list_trades`：
+  - 活躍委託快照有變化 → 直接推播 `WorkingOrdersSnapshot` 給前端
+    （沿用 snapshot seq 防亂序，前端不用再打 REST），外部掛單/刪單 ~2.5 秒內出現
+  - 對帳出 journal 沒有的成交（id = ordno#seq，與 callback 路徑天然去重）→
+    補進 journal、觸發已實現損益重算、作廢持倉快取、推播 `TradeUpdate`
+    （前端成交通知）、發射 `on_fill`（Bracket 母單在 callback 漏接時的補償）
+* **快照 builder 三處合一**：orders.py / accounts.sync_all / 對帳迴圈共用
+  `build_working_orders`（之前各自複製一份）。
+* 前端 `TradingContext` 新增 `WorkingOrdersSnapshot` 訊息處理（直接套用快照）。
+* 測試：後端對帳（外部委託推播 / 外部成交入帳 / 指紋與 id 去重 / 外部刪單）
+  + 前端快照套用與 seq 防亂序，共 +4。
+
+---
+
+## [2.1.0] - 2026-07-03
+
+### 🛡️ 資金安全（P0）
+
+* **日虧損熔斷修復**：原本 `max_daily_loss` 依賴從未被餵入資料的 OrderManager 事件鏈，生產環境永遠不會觸發。現在由真實路徑餵入：未實現損益來自 `pnl_broadcaster`（不依賴 WS 連線）、已實現損益來自成交 journal 的當日 FIFO 重算（`order_guard.refresh_daily_realized`）。
+* **所有下單路徑過風控**：`/reverse`（雙倍市價單）與智慧單觸發原本完全繞過 RiskManager，現在統一前置檢查。政策：保護性出場（一鍵平倉、平既有部位的停損觸發）即使熔斷後仍放行，只封鎖開新倉。
+* **股票停損 NameError 修復**：`shioaji_client.place_order` 使用了未 import 的 `StockOrderLot/StockOrderCond`，導致股票的 flatten / reverse / 智慧單觸發會直接 crash（停損不會執行）。
+* **智慧單 SQLite 持久化**：停損 / 移停 / OCO / Bracket 落地 `~/.lightrade/smart_orders.db`，backend 重啟自動 re-arm（移停 watermark 重啟後從當下市價重新追蹤）。
+* **市價單 confirm 流程補齊**：WARNING 級檢查（市價單 / 價格偏離 / 反向）回 409 `CONFIRM_REQUIRED` + warnings 清單，前端確認後帶 `confirm: true` 重送；原本 WARNING 一律 422、市價單經正規路徑永遠送不出去。
+* **可選 API Token 認證**：`LIGHTRADE_API_TOKEN` 設定後，所有 `/api`（除 health）需帶 `X-API-Token`、WebSocket 需帶 `?token=`。Docker / LAN 部署建議必開。
+* **LIVE 自動登入改為 opt-in**：`SIMULATION` 預設改回 true（與文件一致）；`SIMULATION=false` 時需 `LIGHTRADE_ALLOW_LIVE_AUTOLOGIN=true` 才會開機自動登入真實帳戶。
+* **Bracket 子單修復**：`on_fill` 事件現在由 bridge 從真實成交回報發出（原本只有死掉的 OrderManager 會發，bracket 停利停損永遠不會啟動）。
+* **.env 變數名對齊**：`API_KEY/SECRET_KEY/SIMULATION`（文件版）與 `SHIOAJI_*`（舊程式版）皆支援——原本 config 只讀 `SHIOAJI_*`，照文件設定的 .env 實際上不生效。
+
+### ⚡ 延遲與架構（P1）
+
+* **event loop 不再被券商呼叫卡死**：`run_in_qt_thread` 名為執行緒橋接、實為同步直呼，登入/下單/搜尋全卡在 asyncio loop 上。改為真正的單 worker `broker_executor`（`run_in_broker_thread`），報價與 PnL 推送不再受券商 RTT 影響。
+* **智慧單觸發移出行情執行緒**：觸發判斷仍在 tick 回呼（快），實際下單 dispatch 到 broker thread；`_smart_orders` 加 RLock。
+* **tick 雙重發射修復**：`on_tick` 原本在 shioaji_client 與 bridge 各發一次，所有消費者每 tick 處理兩遍；統一由 bridge 單點發射。
+* **重連補訂閱**：斷線重連原本只還原主商品，持倉/自選的背景訂閱全部丟失（PnL 無聲變舊）；現在全部補回。
+* **期貨乘數表統一**：原本 4 份複製且數值不一致（不同路徑算出不同損益），收斂到 `backend/services/contract_specs.py`。
+* **移除 PyQt5 依賴與死碼**：刪除 legacy/ PyQt 桌面版與 OrderManager / PositionTracker / HotkeyManager / WatchlistManager / SoundManager（後端無任何路徑使用；watchlist_manager 的頂層 PyQt5 import 甚至讓 Docker 容器無法啟動）。`requirements_backend.txt` 移除 pyqt5、補 `python-multipart`、shioaji 加上界 `<2.0`。
+
+### 🧪 測試與 CI（P2）
+
+* **新增 FastAPI TestClient 整合測試**（`tests/test_api_integration.py`，fake shioaji SDK）：confirm 流程、風控封鎖、flatten NameError 回歸、reverse 部位上限、智慧單觸發風控（開倉封鎖/保護放行）、日虧損熔斷、journal 已實現餵入、API token 認證。
+* **新增 SmartOrderEngine 單元測試**（`tests/test_smart_order_engine.py`）：MIT/移停/OCO/Bracket 觸發邏輯 + 持久化 re-arm。
+* **CI 強化**：vitest 進主 CI、ESLint 轉硬性擋 PR、backend 改從 requirements 安裝、新增 dependabot、補上缺失的 `.secrets.baseline`。
+* **基礎設施**：docker-compose `depends_on` 改 `service_healthy`；刪除孤兒 `lightning_trader/electron/`；backend Dockerfile 不再需要 pyqt5 過濾。
+
+### 🖥️ 前端
+
+* **TradingContext 拆分高頻/低頻雙 context + memoized value**：低頻消費者（帳戶/持倉/委託面板）不再於行情活躍時每 100ms 全部重繪；DOM ladder `React.memo` 化。
+* **每個 dashboard 面板獨立 ErrorBoundary**：單一面板崩潰不再炸掉整個交易畫面。
+* **下單 confirm 重送流程 + API token 支援**（設定視窗可填 token）。
+* **WS 重連加 jitter、訂單刷新輪詢整併降頻**；共用 playSound / API error / URL 解析工具。
+
+---
+
 ## [2.0.0] - 2026-06-02
 
 ### 🌟 重大優化與視覺重構

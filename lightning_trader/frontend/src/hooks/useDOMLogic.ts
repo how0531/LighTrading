@@ -1,27 +1,60 @@
-import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { useTradingContext } from '../contexts/TradingContext';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { apiClient, normalizeApiError } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
+import { useApiErrorToast } from './useApiErrorToast';
 import { splitOrders, randomDelay } from '../utils/splitOrder';
+import { placeOrderWithRiskConfirm } from '../utils/orderExec';
+import { buildChasePayload } from '../utils/chase';
 import { symbolMatches } from '../utils/instrument';
-import { resolveLots } from '../utils/sizing';
+import { buildWorkingOrderMap } from '../utils/workingOrders';
+import { playSound } from '../utils/sound';
+import { resolveLots, type SizingMode } from '../utils/sizing';
 import { useAccountEquity } from './useAccountEquity';
-import type { WorkingOrder } from '../contexts/TradingContext';
+import type { QuoteData, BidAskData } from '../types';
 import { getMultiplier } from '../types';
 
-export function useDOMLogic() {
-  const {
-    quote, bidAsk, targetSymbol, accountSummary, isStale,
-    workingOrders, refreshOrders,
-    smartOrders, refreshSmartOrders,
-    accounts, activeAccount, selectAccount
-  } = useTradingContext();
-  const { toast } = useToast();
+/** 下單回饋（ladder 格子閃爍用） */
+export interface OrderFeedback {
+  price: number;
+  action: string;
+  status: 'pending' | 'success' | 'error';
+}
 
-  const [orderValue, setOrderValue] = useState(1);
+/** 拆單進度（大單拆多筆連送時暴露給 UI 顯示 + 中止） */
+export interface SplitProgress {
+  sent: number;
+  total: number;
+  aborted: boolean;
+}
+
+/** 拖曳改價進行中（UX 批次 4 Item 6）：舊價位掛單標籤顯示「改價中」樣式 */
+export interface ReplacingOrder {
+  price: number;
+  action: 'Buy' | 'Sell';
+}
+
+export function useDOMLogic() {
+  // 低頻：連線 / 帳戶 / 委託 / actions
+  const {
+    targetSymbol, accountSummary, isStale,
+    workingOrders, scheduleOrderRefresh, refreshOrders,
+    smartOrders, refreshSmartOrders,
+    accounts, activeAccount, selectAccount,
+  } = useTradingCore();
+  // 高頻：tick 資料
+  const { quote, bidAsk } = useQuotes();
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
+  const handleApiError = useApiErrorToast();
+
   const [orderType, setOrderType] = useState('ROD');
   const [priceType, setPriceType] = useState('LMT');
+  // Sprint C：DOM 追價模式 — 開啟時 ladder 點價 / 追買追賣熱鍵改送 CHASE 智慧單。
+  // 一次性 UI 狀態（不持久化）：追價是高風險的「動態掛單」，不該跨 session 殘留。
+  const [chaseMode, setChaseMode] = useState(false);
   const [orderCond, setOrderCond] = useState('Cash');
   const [orderLot, setOrderLot] = useState('Common');
   const [isSyncing, setIsSyncing] = useState(false);
@@ -31,157 +64,115 @@ export function useDOMLogic() {
   const { hotkeys, splitOrder: splitCfg } = settings;
 
   // 下單回饋狀態
-  const [orderFeedback, setOrderFeedback] = useState<{ price: number; action: string; status: 'pending' | 'success' | 'error' } | null>(null);
+  const [orderFeedback, setOrderFeedback] = useState<OrderFeedback | null>(null);
   const feedbackTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const isOrderPendingRef = useRef(false);
+  // in-flight 去重被 block 時的輕量回饋（toast 節流：1 秒內不重複跳）
+  const blockedToastAtRef = useRef(0);
 
-  // 閃爍計時器
-  const flashTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
-  const scrollTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
+  // 拆單進度 + 中止（Sprint UX3）
+  const [splitProgress, setSplitProgress] = useState<SplitProgress | null>(null);
+  const splitAbortRef = useRef(false);
+  const abortSplit = useCallback(() => { splitAbortRef.current = true; }, []);
+
+  // 拖曳改價中的掛單（Item 6）：送出期間舊價位標籤轉虛線半透明
+  const [replacingOrder, setReplacingOrder] = useState<ReplacingOrder | null>(null);
+
   const syncTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
 
   useEffect(() => {
     return () => {
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
-      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-      if (scrollTimerRef.current) clearTimeout(scrollTimerRef.current);
       if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
     };
   }, []);
 
-  const tableRef = useRef<HTMLDivElement>(null);
-  const hasScrolled = useRef(false);
+  const qData: Partial<QuoteData> = quote ?? {};
+  const bData: Partial<BidAskData> = bidAsk ?? {};
 
-  const qData = quote || {};
-  const bData = bidAsk || {};
-
-  // ★ R9：把 6 個獨立 setState 合併為 sticky-reducer。
-  // 之前每次 qData 更新會觸發 6 次 setState（React 18+ batch 仍會 schedule reconcile），
-  // 且 effect 依賴整個 qData 物件，等同每 tick 都重跑。改為單一 useMemo + useRef 黏滯：
-  // - 報價欄位只在 > 0 時覆寫舊值（保留 Snapshot 帶來的靜態欄位）
-  // - 輸出物件 reference 只在實際變化時換新，避免無謂 re-render
-  const stickyDerivedRef = useRef<{
-    currentPrice: number; refPrice: number;
-    limitUp: number; limitDown: number;
-    highPrice: number; lowPrice: number;
-  }>({ currentPrice: 0, refPrice: 0, limitUp: 0, limitDown: 0, highPrice: 0, lowPrice: 0 });
-
-  const derived = useMemo(() => {
-    const q = qData as any;
-    const prev = stickyDerivedRef.current;
-    const next = {
-      currentPrice: q?.Price     > 0 ? q.Price     : prev.currentPrice,
-      refPrice:     q?.Reference > 0 ? q.Reference : prev.refPrice,
-      limitUp:      q?.LimitUp   > 0 ? q.LimitUp   : prev.limitUp,
-      limitDown:    q?.LimitDown > 0 ? q.LimitDown : prev.limitDown,
-      highPrice:    q?.High      > 0 ? q.High      : prev.highPrice,
-      lowPrice:     q?.Low       > 0 ? q.Low       : prev.lowPrice,
-    };
-    // 只在實際變化時才更新 ref + 給出新 object（穩定下游 memo）
-    if (
-      next.currentPrice === prev.currentPrice && next.refPrice === prev.refPrice &&
-      next.limitUp === prev.limitUp && next.limitDown === prev.limitDown &&
-      next.highPrice === prev.highPrice && next.lowPrice === prev.lowPrice
-    ) {
-      return prev;
-    }
-    stickyDerivedRef.current = next;
-    return next;
-  }, [qData]);
+  // 報價衍生值：TradingContext.mergeQuote 已保證非零欄位跨 tick 黏滯
+  // （Snapshot 靜態欄位不會被 0 洗掉），這裡直接純函式推導即可。
+  const derived = useMemo(() => ({
+    currentPrice: quote?.Price ?? 0,
+    refPrice:     quote?.Reference ?? 0,
+    limitUp:      quote?.LimitUp ?? 0,
+    limitDown:    quote?.LimitDown ?? 0,
+    highPrice:    quote?.High ?? 0,
+    lowPrice:     quote?.Low ?? 0,
+  }), [quote]);
 
   const { currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice } = derived;
 
-  // 切換商品時清掉 sticky 快取，避免上個商品的 LimitUp/LimitDown 殘留
-  useEffect(() => {
-    stickyDerivedRef.current = { currentPrice: 0, refPrice: 0, limitUp: 0, limitDown: 0, highPrice: 0, lowPrice: 0 };
-  }, [targetSymbol]);
-
-  // Sprint 20：切換商品時若 settings.qtyBySymbol 有對應預設口數，自動套用；
-  //   找不到就保持當前值。只在 sizing.mode === 'lots' 時生效。
-  useEffect(() => {
-    if (settings.sizing.mode !== 'lots') return;
-    const map = settings.qtyBySymbol;
-    if (!targetSymbol || !map) return;
-    const preset = map[targetSymbol.toUpperCase()];
-    if (preset && preset > 0) setOrderValue(preset);
-  }, [targetSymbol, settings.qtyBySymbol, settings.sizing.mode]);
-
-  // Sprint 32 QA fix：從 amount/% 模式「切回」lots 的瞬間，orderValue 會殘留
-  //   前一模式依價格換算出的張數（例：8 張），對 lots 使用者是非預期下單量。
-  //   只在 mode 真的由非 lots → lots 轉換時校正：有 per-symbol 預設就套用，否則回 1。
-  const prevSizingModeRef = useRef(settings.sizing.mode);
-  useEffect(() => {
-    const mode = settings.sizing.mode;
-    const prev = prevSizingModeRef.current;
-    prevSizingModeRef.current = mode;
-    if (mode === 'lots' && prev !== 'lots') {
-      const preset = settings.qtyBySymbol?.[(targetSymbol || '').toUpperCase()];
-      setOrderValue(preset && preset > 0 ? preset : 1);
+  // ── 下單數量 ──
+  // lots 模式的手動口數 state，加上「symbol / mode / 預設表變更」的校正。
+  // 校正走 render 期 guarded setState（React 官方 derived-state 模式），
+  // 取代原本三個 effect 內的同步 setState：
+  //  - Sprint 20：切換商品（或編輯預設表）時套用 settings.qtyBySymbol 預設
+  //  - Sprint 32 QA fix：amount/% 切回 lots 時套預設，無預設回 1
+  const sizingMode: SizingMode = settings.sizing.mode;
+  const presetMap = settings.qtyBySymbol;
+  const [lotsState, setLotsState] = useState<{
+    symbol: string; mode: SizingMode; presetMap: typeof presetMap; value: number;
+  }>({ symbol: targetSymbol, mode: sizingMode, presetMap, value: 1 });
+  if (lotsState.symbol !== targetSymbol || lotsState.mode !== sizingMode || lotsState.presetMap !== presetMap) {
+    let value = lotsState.value;
+    if (sizingMode === 'lots') {
+      const preset = presetMap?.[(targetSymbol || '').toUpperCase()];
+      if (lotsState.mode !== 'lots') value = preset && preset > 0 ? preset : 1;
+      else if (preset && preset > 0) value = preset;
     }
-  }, [settings.sizing.mode, settings.qtyBySymbol, targetSymbol]);
+    setLotsState({ symbol: targetSymbol, mode: sizingMode, presetMap, value });
+  }
 
-  // Sprint 28：智慧 sizing — 金額 / % 權益模式下，依當前價自動重算 orderValue
+  const setOrderValue = useCallback((v: React.SetStateAction<number>) => {
+    setLotsState((s) => ({ ...s, value: typeof v === 'function' ? v(s.value) : v }));
+  }, []);
+
+  // Sprint 28：智慧 sizing — 金額 / % 權益模式下，口數是「依當前價的純推導」，
+  // 不再寫回 state（原本每個 tick setState 一次，是多餘的重繪來源）。
   const accountEquity = useAccountEquity();
-  useEffect(() => {
+  const orderValue = useMemo(() => {
     const sz = settings.sizing;
-    if (sz.mode === 'lots') return;
+    if (sz.mode === 'lots') return lotsState.value;
     const price = currentPrice || refPrice;
-    if (!price || !targetSymbol) return;
+    if (!price || !targetSymbol) return lotsState.value;
     const multiplier = getMultiplier(targetSymbol);
     const value = sz.mode === 'amount' ? sz.amount : sz.equityPct;
     const lots = resolveLots(sz.mode, value, { price, multiplier, equity: accountEquity });
-    if (lots > 0) {
-      setOrderValue((prev) => (prev === lots ? prev : lots));
-    }
-  }, [settings.sizing, currentPrice, refPrice, targetSymbol, accountEquity]);
+    return lots > 0 ? lots : lotsState.value;
+  }, [settings.sizing, lotsState.value, currentPrice, refPrice, targetSymbol, accountEquity]);
 
   const isSimulation = accountSummary?.is_simulation ?? true;
 
-  const currentPriceRef = useRef(currentPrice);
-  const refPriceRef = useRef(refPrice);
-  useEffect(() => { currentPriceRef.current = currentPrice; }, [currentPrice]);
-  useEffect(() => { refPriceRef.current = refPrice; }, [refPrice]);
-
-  // --- 掛單查找表 ---
-  const workingBuyMap = useMemo(() => {
-    const m = new Map<number, number>();
-    if (!targetSymbol) return m;
-    workingOrders
-      .filter((o: WorkingOrder) => o.action === 'Buy' && symbolMatches(targetSymbol, o.symbol))
-      .forEach((o: WorkingOrder) => {
-        const key = Math.round(o.price * 100);
-        m.set(key, (m.get(key) || 0) + (o.qty - o.filled_qty));
-      });
-    return m;
-  }, [workingOrders, targetSymbol]);
-
-  const workingSellMap = useMemo(() => {
-    const m = new Map<number, number>();
-    if (!targetSymbol) return m;
-    workingOrders
-      .filter((o: WorkingOrder) => o.action === 'Sell' && symbolMatches(targetSymbol, o.symbol))
-      .forEach((o: WorkingOrder) => {
-        const key = Math.round(o.price * 100);
-        m.set(key, (m.get(key) || 0) + (o.qty - o.filled_qty));
-      });
-    return m;
-  }, [workingOrders, targetSymbol]);
+  // --- 掛單查找表（共用工廠，見 utils/workingOrders.ts） ---
+  const workingBuyMap = useMemo(
+    () => buildWorkingOrderMap(workingOrders, targetSymbol, 'Buy'),
+    [workingOrders, targetSymbol],
+  );
+  const workingSellMap = useMemo(
+    () => buildWorkingOrderMap(workingOrders, targetSymbol, 'Sell'),
+    [workingOrders, targetSymbol],
+  );
 
   // --- 報價閃爍邏輯 ---
-  const prevPriceRef = useRef<number>(currentPrice);
-  const [flashDir, setFlashDir] = useState<'up' | 'down' | null>(null);
+  // 價格變動方向在 render 期比對（derived-state 模式）；effect 只負責 300ms 後清除
+  const [flashState, setFlashState] = useState<{ price: number; dir: 'up' | 'down' | null }>(
+    { price: currentPrice, dir: null },
+  );
+  if (flashState.price !== currentPrice) {
+    setFlashState({ price: currentPrice, dir: currentPrice > flashState.price ? 'up' : 'down' });
+  }
+  const flashDir = flashState.dir;
   useEffect(() => {
-    if (currentPrice !== prevPriceRef.current) {
-      if (currentPrice > prevPriceRef.current) setFlashDir('up');
-      else if (currentPrice < prevPriceRef.current) setFlashDir('down');
-      prevPriceRef.current = currentPrice;
-      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
-      flashTimerRef.current = setTimeout(() => setFlashDir(null), 300);
-    }
-  }, [currentPrice]);
+    if (!flashDir) return;
+    const timer = setTimeout(() => {
+      setFlashState((s) => (s.dir ? { ...s, dir: null } : s));
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [flashState, flashDir]);
 
   // --- 手動同步按鈕 ---
-  const handleManualSync = async () => {
+  const handleManualSync = useCallback(async () => {
     if (isSyncing) return;
     setIsSyncing(true);
     try {
@@ -192,7 +183,7 @@ export function useDOMLogic() {
     } catch {
       setIsSyncing(false);
     }
-  };
+  }, [isSyncing, refreshOrders, refreshSmartOrders, targetSymbol]);
 
   // --- 右上角顯示目前持倉 ---
   const currentPosition = useMemo(() => {
@@ -203,72 +194,166 @@ export function useDOMLogic() {
   }, [accountSummary.positions, targetSymbol]);
 
   // --- 下單邏輯 ---
-  const handlePlaceOrder = useCallback(async (price: number, action: 'Buy' | 'Sell') => {
-    if (isOrderPendingRef.current || !targetSymbol) return;
-    isOrderPendingRef.current = true;
-    setOrderFeedback({ price, action, status: 'pending' });
-    if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
-
-    try {
-      if (splitCfg.enabled && orderValue > splitCfg.threshold) {
-        const reqs = [];
-        const lots = splitOrders(orderValue, splitCfg.minPerLot, splitCfg.maxPerLot);
-        for (let i = 0; i < lots.length; i++) {
-          reqs.push(apiClient.post('/place_order', {
-            symbol: targetSymbol, price, action, qty: lots[i], order_type: orderType, price_type: priceType, order_cond: orderCond, order_lot: orderLot
-          }));
-          if (i < lots.length - 1) {
-            await randomDelay(splitCfg.minDelay, splitCfg.maxDelay);
-          }
-        }
-        await Promise.all(reqs);
-      } else {
-        await apiClient.post('/place_order', {
-          symbol: targetSymbol, price, action, qty: orderValue,
-          order_type: orderType, price_type: priceType, order_cond: orderCond, order_lot: orderLot
-        });
+  // overridePriceType：市價熱鍵（Item 8）等呼叫端可強制 MKT，不動使用者的 priceType 選單
+  const handlePlaceOrder = useCallback(async (price: number, action: 'Buy' | 'Sell', overridePriceType?: string) => {
+    if (!targetSymbol) return;
+    const effPriceType = overridePriceType ?? priceType;
+    if (isOrderPendingRef.current) {
+      // in-flight 去重：上一筆還在送 → 輕量回饋（1 秒內不重複跳）
+      const now = Date.now();
+      if (now - blockedToastAtRef.current >= 1000) {
+        blockedToastAtRef.current = now;
+        toast.info('上一筆處理中…');
       }
-      setOrderFeedback({ price, action, status: 'success' });
-      setTimeout(refreshOrders, 200);
-      try {
-        const audio = new Audio('/sounds/order_placed.mp3');
-        audio.volume = 0.5;
-        audio.play().catch(() => { /* 瀏覽器音效政策 */ });
-      } catch { /* noop */ }
-    } catch (e) {
-      const err = normalizeApiError(e);
-      setOrderFeedback({ price, action, status: 'error' });
-      // RISK_WARNING → 提供「仍要下單」的 action 按鈕（Sprint 1 後端可回 warning level）
-      if (err.level === 'warning') {
-        toast.warn(err.user_msg, {
-          actionLabel: '仍要下單',
-          onAction: () => {
-            // 未來可附 confirm 旗標到後端；目前 warning 後端尚未支援 bypass，提示即可
-            toast.info('已收到，請手動再次點擊下單以確認');
-          },
+      return;
+    }
+    isOrderPendingRef.current = true;
+    try {
+      // ── Sprint C：追價模式 ─────────────────────────────
+      // 開啟時 ladder 點價與追買/追賣熱鍵改送 CHASE 智慧單（後端動態追價）；
+      // 市價熱鍵（overridePriceType=MKT/MKP）與刪單不受影響。
+      // 沿用 in-flight 去重（上方）與確認流（確認文案標明「追價單」）。
+      if (chaseMode && effPriceType !== 'MKT' && effPriceType !== 'MKP') {
+        if (settings.confirmations.placeOrder && !settings.isCombatMode) {
+          const dir = action === 'Buy' ? '買進' : '賣出';
+          const finalZh = settings.chase.finalAction === 'MARKET' ? '轉市價' : '放棄';
+          const ok = await confirm({
+            title: '追價單確認',
+            message: `確認送出追價單：${dir} ${targetSymbol} ${orderValue} 單位？\n（最多追 ${settings.chase.maxChaseTicks} tick，追不到則${finalZh}）`,
+            confirmLabel: `確認${dir}（追價）`,
+          });
+          if (!ok) return;
+        }
+        setOrderFeedback({ price, action, status: 'pending' });
+        if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+        try {
+          await apiClient.post('/smart_orders', buildChasePayload({
+            symbol: targetSymbol,
+            action,
+            quantity: orderValue,
+            maxChaseTicks: settings.chase.maxChaseTicks,
+            finalAction: settings.chase.finalAction,
+          }));
+          setOrderFeedback({ price, action, status: 'success' });
+          playSound('order_placed');
+          toast.success(`追價${action === 'Buy' ? '買' : '賣'} ${orderValue} 已送出 ⚡`);
+          scheduleOrderRefresh();
+          setTimeout(() => refreshSmartOrders(targetSymbol), 200);
+        } catch (e) {
+          const err = normalizeApiError(e);
+          setOrderFeedback({ price, action, status: 'error' });
+          toast.error(err.user_msg || '追價單送出失敗');
+        }
+        feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 800);
+        return;
+      }
+
+      // 前端二次確認：戰鬥模式（已解鎖）一鍵直送；否則若開啟下單確認則先問。
+      // 前端確認過就視同「已授權」，送單直接帶 confirm:true —— 避免與後端風控
+      // WARNING 的 409 CONFIRM_REQUIRED 重複，一次下單最多問一次。
+      let preConfirmed = false;
+      if (settings.confirmations.placeOrder && !settings.isCombatMode) {
+        const dir = action === 'Buy' ? '買進' : '賣出';
+        const at = (effPriceType === 'MKT' || effPriceType === 'MKP') ? '市價' : price;
+        const ok = await confirm({
+          title: '下單確認',
+          message: `確認${dir} ${targetSymbol} ${orderValue} 單位 @ ${at}？`,
+          confirmLabel: `確認${dir}`,
         });
-      } else {
+        if (!ok) return;
+        preConfirmed = true;
+      }
+      setOrderFeedback({ price, action, status: 'pending' });
+      if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
+
+      const basePayload = {
+        symbol: targetSymbol, price, action,
+        order_type: orderType, price_type: effPriceType, order_cond: orderCond, order_lot: orderLot,
+      };
+
+      // 送單核心抽到 utils/orderExec.placeOrderWithRiskConfirm（Sprint D，與 MiniDOM 宮格共用）：
+      // POST + 後端 409 CONFIRM_REQUIRED 確認重送。回傳 true=已下單, false=使用者拒絕確認。
+      // 同一次操作只問一次，拆單後續批次沿用已確認結果。其餘錯誤 rethrow 給外層統一處理。
+      let confirmGranted = preConfirmed;
+      const sendOrder = async (qty: number): Promise<boolean> => {
+        const outcome = await placeOrderWithRiskConfirm({ ...basePayload, qty }, confirm, confirmGranted);
+        if (outcome.confirmGranted) confirmGranted = true;
+        if (!outcome.placed) toast.info('已取消下單');
+        return outcome.placed;
+      };
+
+      try {
+        let placedCount = 0;
+        let placedQty = 0; // 實際送出的總口數（拆單時逐批累計）
+        if (splitCfg.enabled && orderValue > splitCfg.threshold) {
+          const lots = splitOrders(orderValue, splitCfg.minPerLot, splitCfg.maxPerLot);
+          splitAbortRef.current = false;
+          setSplitProgress({ sent: 0, total: lots.length, aborted: false });
+          let abortedByUser = false;
+          for (let i = 0; i < lots.length; i++) {
+            // 每筆送出前檢查中止旗標（UI 的「中止」按鈕）
+            if (splitAbortRef.current) { abortedByUser = true; break; }
+            const ok = await sendOrder(lots[i]);
+            if (!ok) break; // 使用者拒絕確認 → 不再送出剩餘批次
+            placedCount += 1;
+            placedQty += lots[i];
+            setSplitProgress({ sent: placedCount, total: lots.length, aborted: false });
+            if (i < lots.length - 1) {
+              await randomDelay(splitCfg.minDelay, splitCfg.maxDelay);
+            }
+          }
+          if (abortedByUser) {
+            setSplitProgress({ sent: placedCount, total: lots.length, aborted: true });
+            toast.info(`已中止，完成 ${placedCount}/${lots.length}`);
+          }
+        } else {
+          if (await sendOrder(orderValue)) { placedCount = 1; placedQty = orderValue; }
+        }
+
+        if (placedCount > 0) {
+          setOrderFeedback({ price, action, status: 'success' });
+          scheduleOrderRefresh();
+          playSound('order_placed');
+          const dirZh = action === 'Buy' ? '買' : '賣';
+          const atLabel = (effPriceType === 'MKT' || effPriceType === 'MKP') ? '市價' : price;
+          toast.success(`${dirZh} ${placedQty} @ ${atLabel} ✓`);
+        } else {
+          setOrderFeedback(null); // 使用者取消：清掉 pending 閃爍即可
+        }
+      } catch (e) {
+        const err = normalizeApiError(e);
+        setOrderFeedback({ price, action, status: 'error' });
+        // WARNING 級風控已改為 409 CONFIRM_REQUIRED，在 sendOrder 內處理
+        // （確認後帶 confirm=true 重送）；到這裡的都是真正的錯誤
         toast.error(err.user_msg || '下單失敗');
       }
+      feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 800);
+    } finally {
+      isOrderPendingRef.current = false;
+      setSplitProgress(null);
     }
-    isOrderPendingRef.current = false;
-    feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 800);
-  }, [targetSymbol, orderValue, orderType, priceType, orderCond, orderLot, splitCfg, refreshOrders, toast]);
+  }, [targetSymbol, orderValue, orderType, priceType, orderCond, orderLot, splitCfg, scheduleOrderRefresh, toast, confirm, settings.confirmations.placeOrder, settings.isCombatMode, chaseMode, settings.chase, refreshSmartOrders]);
 
   const handleCancelOrder = useCallback(async (action: 'Buy' | 'Sell', price?: number) => {
+    // 刪單確認：戰鬥模式跳過；否則若開啟刪單確認則先問
+    if (settings.confirmations.cancelOrder && !settings.isCombatMode) {
+      const side = action === 'Buy' ? '買方' : '賣方';
+      const at = price != null ? ` @ ${price}` : '（全部）';
+      const ok = await confirm({
+        title: '刪單確認',
+        message: `確認刪除 ${targetSymbol} ${side}掛單${at}？`,
+        confirmLabel: '確認刪單',
+      });
+      if (!ok) return;
+    }
     try {
       await apiClient.post('/cancel_all', { symbol: targetSymbol, action, price });
-      setTimeout(refreshOrders, 200);
-      try {
-        const audio = new Audio('/sounds/cancel_order.mp3');
-        audio.volume = 0.5;
-        audio.play().catch(() => { /* noop */ });
-      } catch { /* noop */ }
+      scheduleOrderRefresh();
+      playSound('cancel_order');
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '刪單失敗');
+      handleApiError(e, '刪單失敗');
     }
-  }, [targetSymbol, refreshOrders, toast]);
+  }, [targetSymbol, scheduleOrderRefresh, handleApiError, confirm, settings.confirmations.cancelOrder, settings.isCombatMode]);
 
   const handleAddStopOrder = useCallback(async (triggerPrice: number, action: 'Buy' | 'Sell') => {
     if (!targetSymbol) return;
@@ -287,25 +372,28 @@ export function useDOMLogic() {
       toast.success(`觸價單已掛 @${triggerPrice}`);
       setTimeout(() => refreshSmartOrders(targetSymbol), 200);
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '新增觸價單失敗');
+      handleApiError(e, '新增觸價單失敗');
     }
-  }, [targetSymbol, orderValue, refreshSmartOrders, toast]);
+  }, [targetSymbol, orderValue, refreshSmartOrders, toast, handleApiError]);
 
   const handleDropOrder = useCallback(async (e: React.DragEvent, newPrice: number, tgtAction: 'Buy' | 'Sell') => {
     e.preventDefault();
+    let oldPrice = 0;
     try {
       const dataStr = e.dataTransfer.getData('application/json');
       if (!dataStr) return;
       const data = JSON.parse(dataStr);
       if (data.action !== tgtAction) return;
 
-      const oldPrice = parseFloat(data.oldPriceStr);
+      oldPrice = parseFloat(data.oldPriceStr);
       if (oldPrice === newPrice) return;
 
       const oldKey = Math.round(oldPrice * 100);
       const qty = (tgtAction === 'Buy' ? workingBuyMap : workingSellMap).get(oldKey) || 0;
       if (qty <= 0) return;
+
+      // Item 6：送出期間舊價位標籤顯示「改價中」（虛線 / 半透明）
+      setReplacingOrder({ price: oldPrice, action: tgtAction });
 
       await apiClient.post('/update_order', {
         symbol: targetSymbol,
@@ -315,27 +403,53 @@ export function useDOMLogic() {
         qty: qty
       });
 
-      try {
-        const audio = new Audio('/sounds/order_replaced.mp3');
-        audio.volume = 0.5;
-        audio.play().catch(() => { /* noop */ });
-      } catch { /* noop */ }
-      setTimeout(refreshOrders, 200);
+      playSound('order_replaced');
+      toast.success(`改價成功：${tgtAction === 'Buy' ? '買' : '賣'} ${qty} 由 ${oldPrice} → ${newPrice}`);
+      scheduleOrderRefresh();
     } catch (e) {
       const err = normalizeApiError(e);
-      toast.error(err.user_msg || '改單失敗');
+      if (err.code === 'ORDER_NOT_FOUND') {
+        // 掛單其實已不存在（外部已刪/已成交）→ 立即對帳，清掉 ladder 上的殘留掛單徽章
+        scheduleOrderRefresh();
+      }
+      // 失敗：清掉「改價中」樣式即恢復原價位標籤（後端未改單，掛單仍在原價）
+      handleApiError(e, '改單失敗');
+    } finally {
+      setReplacingOrder(null);
     }
-  }, [targetSymbol, workingBuyMap, workingSellMap, refreshOrders, toast]);
+  }, [targetSymbol, workingBuyMap, workingSellMap, scheduleOrderRefresh, handleApiError, toast]);
+
+  // ── UX 批次 4 Item 8：追買 / 追賣 / 市價熱鍵 ────────────────
+  // 追買＝以「賣一價」掛買（吃最優賣方流動性）；追賣＝以「買一價」掛賣。
+  // 都走 handlePlaceOrder → 沿用戰鬥模式 / 確認流 / 風控 409 confirm 全套。
+  const handleChaseOrder = useCallback(async (action: 'Buy' | 'Sell') => {
+    const askArr = bidAsk?.AskPrice || [];
+    const bidArr = bidAsk?.BidPrice || [];
+    const px = action === 'Buy' ? Number(askArr[0] || 0) : Number(bidArr[0] || 0);
+    if (!(px > 0)) {
+      toast.warn(action === 'Buy' ? '無賣一價，無法追買' : '無買一價，無法追賣');
+      return;
+    }
+    await handlePlaceOrder(px, action);
+  }, [bidAsk, handlePlaceOrder, toast]);
+
+  // 市價單熱鍵：price=0 + price_type MKT（不改使用者的 priceType 選單狀態）
+  const handleMarketOrder = useCallback(async (action: 'Buy' | 'Sell') => {
+    await handlePlaceOrder(0, action, 'MKT');
+  }, [handlePlaceOrder]);
 
   return {
     qData, bData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice, isSimulation,
-    isStale, tableRef, hasScrolled, flashDir,
+    isStale, flashDir,
     orderValue, setOrderValue, orderType, setOrderType, priceType, setPriceType,
     orderCond, setOrderCond, orderLot, setOrderLot,
     isSyncing, handleManualSync,
     workingBuyMap, workingSellMap, currentPosition,
     handlePlaceOrder, handleCancelOrder, handleAddStopOrder, handleDropOrder,
-    orderFeedback, smartOrders,
+    handleChaseOrder, handleMarketOrder,
+    chaseMode, setChaseMode,
+    orderFeedback, replacingOrder, smartOrders,
+    splitProgress, abortSplit,
     targetSymbol, accountSummary, accounts, activeAccount, selectAccount,
     hotkeys,
     accountEquity,

@@ -45,10 +45,10 @@ async def daily_report(account_id: Optional[str] = None):
             }
         # 重用 get_order_history 拉到的格式（已含 status / filled 等）
         try:
-            await shared.run_in_qt_thread(shared.shioaji_client.api.update_status)
+            await shared.run_in_broker_thread(shared.shioaji_client.api.update_status)
         except Exception:
             pass
-        trades = await shared.run_in_qt_thread(shared.shioaji_client.get_order_history)
+        trades = await shared.run_in_broker_thread(shared.shioaji_client.get_order_history)
 
         # 按 symbol 累積
         agg: dict[str, dict] = defaultdict(lambda: {
@@ -137,11 +137,5 @@ async def daily_report(account_id: Optional[str] = None):
         }
 
 
-# 與 pnl_broadcaster 同步的乘數表（不 import 是為了避免 backend service 循環引用）
-_MULTIPLIERS = {'TXF': 200, 'MXF': 50, 'EXF': 4000, 'GTF': 200}
-def _multiplier_for(symbol: str) -> int:
-    sym = (symbol or "").upper()
-    for prefix, mult in _MULTIPLIERS.items():
-        if sym.startswith(prefix):
-            return mult
-    return 1000   # 股票
+# 乘數表唯一來源（contract_specs 無其他依賴，不會循環引用）
+from backend.services.contract_specs import get_multiplier as _multiplier_for  # noqa: E402

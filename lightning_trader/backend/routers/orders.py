@@ -33,6 +33,8 @@ class PlaceOrderRequest(BaseModel):
     price_type: str = "LMT"
     order_cond: str = "Cash"
     order_lot: str = "Common"
+    # WARNING 級風控（市價單/價格偏離/反向）確認後重送時帶 true
+    confirm: bool = False
 
 class CancelAllRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=12)
@@ -51,32 +53,16 @@ class SymbolRequest(BaseModel):
 
 # ─── 內部工具 ──────────────────────────────────────────────
 
-async def _get_working_orders_snapshot() -> list:
+async def _get_working_orders_snapshot() -> dict:
     """
     從 Shioaji 取得已確認的活躍委託快照。
     呼叫 update_status() 強制同步最新狀態後再查詢。
     """
+    from backend.services.order_sync import build_working_orders
     try:
-        await shared.run_in_qt_thread(shared.shioaji_client.api.update_status)
-        trades = await shared.run_in_qt_thread(shared.shioaji_client.get_order_history)
-        active_statuses = {'PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'}
-        working = []
-        for t in trades:
-            status_name = t.status.status.name if hasattr(t.status, 'status') else getattr(t.status, 'name', 'Unknown')
-            if status_name in active_statuses:
-                raw_symbol = getattr(t.contract, 'symbol', '')
-                if not raw_symbol:
-                    raw_symbol = getattr(t.contract, 'code', '')
-                working.append({
-                    "symbol": raw_symbol,
-                    "action": "Buy" if t.order.action == Action.Buy else "Sell",
-                    "price": float(t.order.price),
-                    "qty": t.order.quantity,
-                    "filled_qty": getattr(t.status, 'deal_quantity', getattr(t.status, 'filled_quantity', 0)),
-                    "status": status_name,
-                    "order_id": getattr(t.order, 'id', getattr(t.order, 'seqno', '')),
-                })
-        return {"seq_no": shared.generate_order_seq(), "orders": working}
+        await shared.run_in_broker_thread(shared.shioaji_client.api.update_status)
+        trades = await shared.run_in_broker_thread(shared.shioaji_client.get_order_history)
+        return {"seq_no": shared.generate_order_seq(), "orders": build_working_orders(trades)}
     except Exception as e:
         logger.error(f"_get_working_orders_snapshot 失敗: {e}")
         return {"seq_no": shared.generate_order_seq(), "orders": []}
@@ -115,7 +101,7 @@ async def place_order(req: PlaceOrderRequest, request: Request):
         is_market = req.price_type.upper() in {"MKT", "MKP"}
         # 取得目前持倉狀態（給部位上限檢查）
         try:
-            positions = await shared.run_in_qt_thread(shared.shioaji_client.list_positions)
+            positions = await shared.run_in_broker_thread(shared.shioaji_client.list_positions)
             pos = next((p for p in positions if p.get("symbol", "").upper() == req.symbol.upper()), None)
         except Exception:
             pos = None
@@ -129,16 +115,24 @@ async def place_order(req: PlaceOrderRequest, request: Request):
             is_market_order=is_market,
             position_qty=pos_qty,
             position_direction=pos_dir,
+            skip_warnings=req.confirm,
         )
         if not result.passed:
-            # BLOCK 直接 422；WARNING 也回 422 + warning flag，前端應彈確認框後重送 (帶 confirm=true)
-            raise HTTPException(status_code=422, detail={
-                "code": "RISK_BLOCK" if result.level.value == "block" else "RISK_WARNING",
+            if result.level.value == "block":
+                raise HTTPException(status_code=422, detail={
+                    "code": "RISK_BLOCK",
+                    "user_msg": result.reason,
+                    "level": "block",
+                })
+            # WARNING → 409：前端彈確認框後帶 confirm=true 重送
+            raise HTTPException(status_code=409, detail={
+                "code": "CONFIRM_REQUIRED",
                 "user_msg": result.reason,
-                "level": result.level.value,
+                "warnings": result.warnings,
+                "level": "warning",
             })
 
-    trade = await shared.run_in_qt_thread(
+    trade = await shared.run_in_broker_thread(
         shared.shioaji_client.place_order,
         symbol=req.symbol, price=req.price, action=action_val, qty=req.qty,
         order_type=order_type_val, price_type=price_type_val,
@@ -168,9 +162,15 @@ async def place_order(req: PlaceOrderRequest, request: Request):
 
 @router.post("/update_order")
 async def update_order(req: UpdateOrderRequest):
-    """改單指令"""
+    """改單指令（風控停止交易時一併封鎖改單）"""
+    risk_manager = getattr(shared.engine, "risk_manager", None)
+    if risk_manager is not None and not risk_manager.config.trading_enabled:
+        raise HTTPException(status_code=422, detail={
+            "code": "RISK_BLOCK",
+            "user_msg": "交易已被風控停止，無法改單",
+        })
     action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
-    success = await shared.run_in_qt_thread(
+    success = await shared.run_in_broker_thread(
         shared.shioaji_client.update_order,
         symbol=req.symbol, action=action_val,
         old_price=req.old_price, new_price=req.new_price, qty=req.qty
@@ -178,7 +178,10 @@ async def update_order(req: UpdateOrderRequest):
     if success:
         return {"status": "success", "message": "改單指令已送出"}
     else:
-        raise HTTPException(status_code=400, detail="改單失敗，找不到對應的委託。")
+        raise HTTPException(status_code=400, detail={
+            "code": "ORDER_NOT_FOUND",
+            "user_msg": "改單失敗，找不到對應的委託。",
+        })
 
 
 @router.post("/cancel_all")
@@ -186,12 +189,15 @@ async def cancel_all(req: CancelAllRequest):
     """刪單後回傳已確認的活躍委託快照"""
     action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
     try:
-        cancel_count = await shared.run_in_qt_thread(shared.shioaji_client.cancel_all, req.symbol, action_val)
+        cancel_count = await shared.run_in_broker_thread(shared.shioaji_client.cancel_all, req.symbol, action_val)
         snapshot = await _get_working_orders_snapshot()
         return {"status": "success", "message": f"成功送出 {cancel_count} 筆刪單指令", "data": snapshot}
     except Exception as e:
         logger.error(f"批次刪單失敗: {e}")
-        raise HTTPException(status_code=500, detail="刪單過程遭遇錯誤")
+        raise HTTPException(status_code=500, detail={
+            "code": "CANCEL_FAILED",
+            "user_msg": "刪單過程遭遇錯誤",
+        })
 
 
 class FlattenRequest(BaseModel):
@@ -204,15 +210,18 @@ async def flatten_position(req: FlattenRequest):
     """
     一鍵平倉：可選擇先撤掉所有同商品掛單，再送反向市價單。
     cancel_pending=True 時，平倉是 atomic-ish（先 cancel_all 兩側，再 flatten）。
+
+    注意：平倉是「保護性」動作（只減少曝險），刻意不過 RiskManager ——
+    日虧損熔斷後使用者仍必須能出場。
     """
     if req.cancel_pending:
         try:
-            await shared.run_in_qt_thread(shared.shioaji_client.cancel_all, req.symbol, Action.Buy)
-            await shared.run_in_qt_thread(shared.shioaji_client.cancel_all, req.symbol, Action.Sell)
+            await shared.run_in_broker_thread(shared.shioaji_client.cancel_all, req.symbol, Action.Buy)
+            await shared.run_in_broker_thread(shared.shioaji_client.cancel_all, req.symbol, Action.Sell)
         except Exception as e:
             logger.warning(f"flatten 前撤單失敗（仍會繼續平倉）: {e}")
 
-    success = await shared.run_in_qt_thread(shared.shioaji_client.flatten_position, req.symbol)
+    success = await shared.run_in_broker_thread(shared.shioaji_client.flatten_position, req.symbol)
     if success:
         return {"status": "success", "message": "一鍵平倉指令已送出", "cancelled_pending": req.cancel_pending}
     else:
@@ -224,15 +233,48 @@ async def flatten_position(req: FlattenRequest):
 
 @router.post("/reverse")
 async def reverse_position(req: SymbolRequest):
-    """一鍵反向"""
-    success = await shared.run_in_qt_thread(shared.shioaji_client.reverse_position, req.symbol)
+    """
+    一鍵反向：平倉 + 反向開倉（雙倍口數市價單）。
+    反向會「開新倉」，因此必須過 RiskManager（之前完全繞過風控）。
+    """
+    risk_manager = getattr(shared.engine, "risk_manager", None)
+    if risk_manager is not None:
+        # 反向是「開新倉」，持倉查不到就不能放行（fail-closed）
+        try:
+            positions = await shared.run_in_broker_thread(shared.shioaji_client.list_positions)
+        except Exception as e:
+            logger.error(f"reverse 前查持倉失敗: {e}")
+            raise HTTPException(status_code=503, detail={
+                "code": "POSITIONS_UNAVAILABLE",
+                "user_msg": "無法取得持倉狀態，反向已取消，請稍後再試",
+            })
+        # 聚合同商品所有列（多帳號/多列）成有號淨部位（共用唯一定義）
+        from core.risk_manager import net_position_of
+        net = net_position_of(positions, req.symbol)
+        if net != 0:
+            pos_dir = "Buy" if net > 0 else "Sell"
+            reverse_action = "Sell" if net > 0 else "Buy"
+            result = risk_manager.pre_order_check(
+                symbol=req.symbol,
+                action=reverse_action,
+                qty=abs(net) * 2,
+                price=0,
+                is_market_order=True,
+                position_qty=abs(net),
+                position_direction=pos_dir,
+                skip_warnings=True,  # 反向按鈕本身就是明確的使用者意圖
+            )
+            if not result.passed:
+                raise HTTPException(status_code=422, detail={
+                    "code": "RISK_BLOCK",
+                    "user_msg": result.reason,
+                })
+
+    success = await shared.run_in_broker_thread(shared.shioaji_client.reverse_position, req.symbol)
     if success:
         return {"status": "success", "message": "一鍵反向指令已送出"}
     else:
-        raise HTTPException(status_code=400, detail="一鍵反向失敗")
-
-
-@router.get("/volume_profile")
-async def get_volume_profile(symbol: str):
-    """獲取指定商品的價量累積數據"""
-    return shared.shioaji_client.volume_profile.get(symbol, {})
+        raise HTTPException(status_code=400, detail={
+            "code": "REVERSE_FAILED",
+            "user_msg": "一鍵反向失敗",
+        })

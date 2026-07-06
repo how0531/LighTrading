@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useMemo, useCallback } from 'react';
 import { ChevronRight, ChevronDown } from 'lucide-react';
 import { getPositions, getAccounts, apiClient } from '../api/client';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
 import {
   firstEntryTs,
@@ -27,7 +27,8 @@ interface Account {
 }
 
 const Panel_Positions: React.FC = () => {
-  const { isConnected, accountSummary, subscribe, flattenPosition, realtimePositions, totalRealtimePnl, smartOrders, watchlistQuotes } = useTradingContext();
+  const { isConnected, accountSummary, subscribe, flattenPosition, smartOrders } = useTradingCore();
+  const { realtimePositions, totalRealtimePnl, watchlistQuotes } = useQuotes(); // 即時 PnL 需要 tick 資料
   const { toast } = useToast();
   const [positions, setPositions] = useState<Position[]>([]);
   const [accounts, setAccounts] = useState<Account[]>([]);
@@ -58,7 +59,7 @@ const Panel_Positions: React.FC = () => {
       apiClient.get('/symbols/search', { params: { q: sym, limit: 5 } })
         .then(res => {
           const hits = res.data || [];
-          const hit = hits.find((h: any) => h.symbol === sym);
+          const hit = hits.find((h: { symbol: string; name?: string }) => h.symbol === sym);
           if (hit && hit.name) {
             setNamesCache(prev => ({ ...prev, [sym]: hit.name }));
           } else {
@@ -67,7 +68,7 @@ const Panel_Positions: React.FC = () => {
               apiClient.get('/symbols/search', { params: { q: cleanSym, limit: 5 } })
                 .then(res2 => {
                   const hits2 = res2.data || [];
-                  const hit2 = hits2.find((h: any) => h.symbol === cleanSym);
+                  const hit2 = hits2.find((h: { symbol: string; name?: string }) => h.symbol === cleanSym);
                   if (hit2 && hit2.name) {
                     setNamesCache(prev => ({ ...prev, [sym]: hit2.name }));
                   } else {

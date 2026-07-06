@@ -15,6 +15,25 @@
 
 ---
 
+## 功能總覽
+
+- **閃電下單 DOM**：五檔 ladder 點價下單、戰鬥模式（跳過確認）、拆單（進度可中止）、
+  一鍵平倉/反手、追買/追賣/市價熱鍵、拖曳改價、委託牆熱力圖、市價模式警示。
+- **智慧單（伺服器端，斷線重啟續存）**：停損 MIT / 移動停損 / OCO / Bracket /
+  **CHASE 追價**（自動 cancel-replace 追最佳對手價，上限後放棄或轉市價）。
+- **鋪單**：2–10 檔多價位一鍵鋪單、追價鋪單、一鍵撤鋪單。
+- **⚡全開宮格**：自選前 4/6/9 檔迷你 DOM 同屏交易。
+- **圖表**：K 線點擊下單、圖上委託線與成交標記、21 種內建指標、
+  TradingView 式指標選擇器、自訂 JS 指標（Web Worker 沙箱）。
+- **風控**：單筆上限 / 日虧損熔斷（保護性平倉豁免）、熔斷即時告警、
+  Header 日虧損儀表、兩段式風控確認（409 confirm 流程）。
+- **對帳同步**：外部管道（券商 App / 其他 API session）委託與成交
+  ~2.5 秒內同步進介面、journal 與已實現損益。
+- **可靠性**：四級連線燈與盤後/斷線橫幅、心跳 + 假死自癒重連、
+  盤後看門狗不空轉、自選退訂不洩漏、全成即時通知（精確一次）。
+
+---
+
 ## 架構
 
 ```
@@ -76,6 +95,14 @@ SECRET_KEY=YOUR_SHIOAJI_SECRET
 SIMULATION=true        # 預設模擬模式；改 false 才會送真實單
 CA_PATH=               # 真實交易才需要憑證
 CA_PASSWD=
+
+# 可選：API Token（Docker / LAN 部署強烈建議）
+# 設定後所有 /api 與 WebSocket 都需要帶此 token，前端在設定視窗填同一組
+LIGHTRADE_API_TOKEN=
+
+# 可選：SIMULATION=false 時預設「不會」開機自動登入真實帳戶，
+# 需明確設 true 才允許無人值守登入 LIVE
+LIGHTRADE_ALLOW_LIVE_AUTOLOGIN=
 ```
 
 > ⚠️ `.env` 已在 `.gitignore`，**永遠不要 commit**。
@@ -252,16 +279,15 @@ npx tsc -b
 lightning_trader/
 ├── backend/        # FastAPI 後端
 │   ├── routers/    # orders / accounts / smart / health / risk / user_settings
-│   ├── services/   # pnl_broadcaster / quote_broadcaster
-│   └── bridge.py   # Shioaji callback → asyncio queue
-├── core/           # 跨進程共用：ShioajiClient / SymbolResolver / RiskManager
+│   ├── services/   # pnl_broadcaster / quote_broadcaster / order_guard / contract_specs
+│   └── bridge.py   # Shioaji callback → asyncio queue + on_fill 事件
+├── core/           # ShioajiClient / SymbolResolver / RiskManager / SmartOrderEngine(+SQLite store)
 ├── frontend/       # React + Vite + Tailwind 4
 │   └── src/
 │       ├── contexts/  # TradingContext / SettingsContext / ToastContext
 │       ├── components/DOM/  # DOMHeader / DOMTable / DOMFooter
 │       └── utils/     # instrument / pnl / splitOrder
-├── tests/          # pytest 單元測試
-└── legacy/         # PyQt5 桌面版（已停止主動開發）
+└── tests/          # pytest 單元 + TestClient 整合測試（fake shioaji）
 ```
 
 ---
@@ -270,10 +296,15 @@ lightning_trader/
 
 1. **API Key 永遠不送到前端**：若 `.env` 已設定，前端登入頁可不填金鑰。
 2. **LIVE 模式有紅色全畫面警示**：避免 SIM/LIVE 誤操作。
-3. **RiskManager 在所有 /place_order 前置**：部位上限 + 日虧損上限 + 頻率防呆。
-4. **每日 04:00 自動重置日虧損計數**：避免跨日造成假性 trading_disabled。
-5. **CORS 限定本機**：可由 `LIGHTRADE_ALLOWED_ORIGINS` 環境變數擴增。
-
+3. **外部管道下單即時同步**：Shioaji 只推播「本 session 下的單」，從券商 App / 其他 API session 下的單沒有 callback。後端的委託對帳迴圈（預設每 2.5 秒，`LIGHTRADE_ORDER_SYNC_INTERVAL` 可調）會向券商同步並主動推播活躍委託快照給前端，外部「成交」也會補進 journal（交易日誌 / 已實現損益 / 風控熔斷都算得到）。
+4. **所有下單路徑都過 RiskManager**：`/place_order`、`/reverse`、改單、智慧單觸發皆前置檢查（部位上限 + 日虧損熔斷 + 頻率/重複防呆）。日虧損由真實資料餵入：未實現來自即時 PnL、已實現來自成交 journal 的 FIFO 重算。
+5. **保護性出場永遠放行**：一鍵平倉與「平既有部位」的停損觸發不受熔斷封鎖——風控停止交易後仍能出場，只擋開新倉。
+6. **WARNING 級檢查（市價單/價格偏離/反向）需二次確認**：API 回 409 `CONFIRM_REQUIRED`，前端確認後帶 `confirm: true` 重送。
+7. **智慧單持久化**：停損/移停/OCO/Bracket 落地 SQLite（`~/.lightrade/smart_orders.db`），backend 重啟自動 re-arm；移停的 watermark 重啟後從當下市價重新追蹤。
+8. **可選 API Token 認證**：設定 `LIGHTRADE_API_TOKEN` 後，所有 `/api`（除 health）需帶 `X-API-Token` header、WebSocket 需帶 `?token=`。**Docker / LAN 部署（backend 綁 0.0.0.0）務必設定**——CORS 只能約束瀏覽器，不是伺服器端存取控制。
+9. **SIMULATION 預設 true**；且 `SIMULATION=false` 時預設不做開機自動登入，需 `LIGHTRADE_ALLOW_LIVE_AUTOLOGIN=true` 明確允許。
+10. **每日 04:00 自動重置日虧損計數**：避免跨日造成假性 trading_disabled。
+11. **CORS 限定本機**：可由 `LIGHTRADE_ALLOWED_ORIGINS` 環境變數擴增。
 ---
 
 ## 文件

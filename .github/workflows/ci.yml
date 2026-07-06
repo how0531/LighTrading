@@ -30,8 +30,10 @@ jobs:
       - name: Install test deps (no shioaji / pyqt5)
         # CI 不裝 shioaji（券商 wheel 沒上 PyPI）與 pyqt5（無圖形環境）
         # tests/ 都是離線單元，會繞過 core/__init__.py 透過直接 import
+        # httpx 是 FastAPI TestClient 整合測試需要的
         run: |
-          pip install fastapi pydantic python-dotenv pytest
+          grep -viE '^(shioaji|pyqt5)' backend/requirements_backend.txt > /tmp/ci-req.txt
+          pip install -r /tmp/ci-req.txt pytest httpx
 
       - name: Pytest
         run: python -m pytest tests/ -q
@@ -56,6 +58,8 @@ jobs:
       - name: TypeScript compile
         run: npx tsc -b --pretty false
 
+      - name: Vitest
+        run: npx vitest run
+
       - name: ESLint
         run: npx eslint . --max-warnings 0
-        continue-on-error: true  # 漸進啟用：先記錄不擋 PR

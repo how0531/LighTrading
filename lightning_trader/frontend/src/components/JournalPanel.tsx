@@ -10,8 +10,9 @@
 import React, { useEffect, useState } from 'react';
 import { History, RefreshCw, Upload, ChevronRight, ChevronDown, Tag as TagIcon } from 'lucide-react';
 import { useRef } from 'react';
-import { apiClient, normalizeApiError } from '../api/client';
+import { apiClient } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
+import { useApiErrorToast } from '../hooks/useApiErrorToast';
 import { formatPrice } from '../utils/instrument';
 
 type Fill = {
@@ -54,6 +55,7 @@ function fmtTime(ts: number): string {
 
 const JournalPanel: React.FC = () => {
   const { toast } = useToast();
+  const handleApiError = useApiErrorToast();
   const [range, setRange] = useState<RangeId>('today');
   const [fills, setFills] = useState<Fill[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
@@ -84,8 +86,7 @@ const JournalPanel: React.FC = () => {
       setExpanded(null);
       toast.success('已更新標記');
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '標記失敗');
+      handleApiError(e, '標記失敗');
     } finally {
       setSavingMeta(false);
     }
@@ -106,8 +107,7 @@ const JournalPanel: React.FC = () => {
       setFills(f.data || []);
       setStats(s.data || null);
     } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '取得日誌失敗');
+      handleApiError(e, '取得日誌失敗');
     } finally {
       setLoading(false);
     }
@@ -133,8 +133,7 @@ const JournalPanel: React.FC = () => {
       }
       fetchAll();
     } catch (err) {
-      const ne = normalizeApiError(err);
-      toast.error(ne.user_msg || '匯入失敗');
+      handleApiError(err, '匯入失敗');
     } finally {
       if (fileInputRef.current) fileInputRef.current.value = '';
     }

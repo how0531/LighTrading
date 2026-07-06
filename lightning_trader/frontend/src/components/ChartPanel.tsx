@@ -10,47 +10,34 @@
  *
  * 用 TradingView lightweight-charts (MIT, ~30KB gzipped)
  *
- * Sprint 34：新增 symbol / compact props 供多圖看盤內嵌;新增 EMA20 / 布林通道 toggle。
+ * Sprint 34：新增 symbol / compact props 供多圖看盤內嵌。
+ * Sprint E：指標系統重構 —— 舊 MA20/MA60/VWAP/RSI/EMA20/BOLL toggle 與常駐
+ *   volume histogram 遷移為 settings.chart 指標系統（預設 SMA20 + 成交量）,
+ *   接線在 hooks/useIndicators（v5 panes：主圖 overlay + 副圖獨立 pane）,
+ *   工具列「指標」開啟 IndicatorPicker（含自訂 JS 指標）。
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   createChart,
   CandlestickSeries,
-  HistogramSeries,
-  LineSeries,
+  createSeriesMarkers,
   type IChartApi,
   type ISeriesApi,
+  type ISeriesMarkersPluginApi,
+  type IPriceLine,
+  type SeriesMarker,
   type CandlestickData,
-  type HistogramData,
-  type LineData,
   type Time,
+  type MouseEventParams,
 } from 'lightweight-charts';
-import { useTradingContext } from '../contexts/TradingContext';
-import { apiClient } from '../api/client';
-import {
-  computeSMA as _sma, computeVWAP as _vwap, computeRSI as _rsi,
-  computeEMA as _ema, computeBollinger as _boll,
-} from '../utils/indicators';
-
-// 包成 LineData<Time>[]：indicator utils 用 number；lightweight-charts 要 Time 型別 cast
-function computeSMA(bars: KBarApi[], period: number): LineData<Time>[] {
-  return _sma(bars, period).map((p) => ({ time: p.time as Time, value: p.value }));
-}
-function computeVWAP(bars: KBarApi[]): LineData<Time>[] {
-  return _vwap(bars).map((p) => ({ time: p.time as Time, value: p.value }));
-}
-function computeRSI(bars: KBarApi[], period: number = 14): LineData<Time>[] {
-  return _rsi(bars, period).map((p) => ({ time: p.time as Time, value: p.value }));
-}
-function computeEMA(bars: KBarApi[], period: number): LineData<Time>[] {
-  return _ema(bars, period).map((p) => ({ time: p.time as Time, value: p.value }));
-}
-function computeBoll(bars: KBarApi[], period = 20, mult = 2) {
-  const b = _boll(bars, period, mult);
-  const cast = (arr: Array<{ time: number; value: number }>): LineData<Time>[] =>
-    arr.map((p) => ({ time: p.time as Time, value: p.value }));
-  return { upper: cast(b.upper), middle: cast(b.middle), lower: cast(b.lower) };
-}
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
+import { useSettings } from '../contexts/SettingsContext';
+import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
+import { apiClient, normalizeApiError } from '../api/client';
+import { symbolMatches } from '../utils/instrument';
+import { useIndicators } from '../hooks/useIndicators';
+import IndicatorPicker from './IndicatorPicker';
 
 const PNL_COLOR_UP = '#EF4444';     // 台灣：紅 = 漲
 const PNL_COLOR_DOWN = '#10B981';   // 台灣：綠 = 跌
@@ -94,55 +81,50 @@ function aggregate1mBars(bars: KBarApi[], bucketSecs: number): KBarApi[] {
 interface ChartPanelProps {
   /** 傳入則固定顯示該商品（多圖看盤用）;不傳則跟隨 targetSymbol */
   symbol?: string;
-  /** 精簡模式:header 縮小、指標 toggle 收進選單（多圖宮格內用） */
+  /** 精簡模式:header 縮小（多圖宮格內用） */
   compact?: boolean;
 }
 
-// 指標 toggle 按鈕（hoist 到模組層,避免在 render 內定義 component）
-const IndicatorBtn: React.FC<{ on: boolean; onClick: () => void; label: string; cls: string; title: string }> =
-  ({ on, onClick, label, cls, title }) => (
-    <button
-      onClick={onClick}
-      className={`px-1.5 py-0.5 text-[10px] font-bold rounded border transition-colors ${
-        on ? cls : 'bg-slate-900 text-slate-500 border-slate-700'
-      }`}
-      title={title}
-    >{label}</button>
-  );
-
 const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
-  const { targetSymbol, quote, watchlistQuotes } = useTradingContext();
+  const { targetSymbol, workingOrders, accountSummary, scheduleOrderRefresh } = useTradingCore();
+  const { quote, watchlistQuotes } = useQuotes(); // K 線需要 tick 資料
+  const { settings } = useSettings();
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
   // 有 symbol prop → 固定該商品；否則跟隨 targetSymbol
   const effSymbol = (symbol ?? targetSymbol) || '';
   const isPinned = !!symbol;
   const mini = isPinned ? watchlistQuotes[effSymbol.toUpperCase()] : undefined;
+  // 互動下單只在「跟隨主商品」時啟用；pinned（多圖宮格）保持純顯示
+  const interactive = !isPinned;
+  const [chartQty, setChartQty] = useState(1);
+  // 讓 subscribeClick 的 handler（mount 一次）讀到最新值，不必每次 re-subscribe
+  const clickStateRef = useRef({
+    symbol: effSymbol,
+    qty: chartQty,
+    price: 0,
+    interactive,
+    confirmNeeded: true,
+    toast,
+    confirm,
+    scheduleOrderRefresh,
+  });
 
   const [timeframe, setTimeframe] = useState<Timeframe>('1m');
-  // 指標 toggles
-  const [showMA20, setShowMA20] = useState(!compact);
-  const [showMA60, setShowMA60] = useState(!compact);
-  const [showVWAP, setShowVWAP] = useState(!compact);
-  const [showRSI, setShowRSI] = useState(false);     // Sprint 25 預設關（不在 candle 同 scale）
-  const [showEMA20, setShowEMA20] = useState(false); // Sprint 34
-  const [showBoll, setShowBoll] = useState(false);   // Sprint 34
-  const [menuOpen, setMenuOpen] = useState(false);   // compact 模式的指標選單
+  const [barsVersion, setBarsVersion] = useState(0); // kbars 載入完成的訊號（成交標記/指標重算用）
+  const [pickerOpen, setPickerOpen] = useState(false); // Sprint E：指標選擇器
   const tfMeta = useMemo(() => TIMEFRAMES.find((t) => t.id === timeframe)!, [timeframe]);
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const candleSeriesRef = useRef<ISeriesApi<'Candlestick'> | null>(null);
-  const volSeriesRef = useRef<ISeriesApi<'Histogram'> | null>(null);
-  const ma20SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const ma60SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const vwapSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const rsiSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const ema20SeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const bollUpSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const bollMidSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
-  const bollLowSeriesRef = useRef<ISeriesApi<'Line'> | null>(null);
   const lastBarRef = useRef<CandlestickData<Time> | null>(null);
-  const lastVolRef = useRef<HistogramData<Time> | null>(null);
-  // 保留最近的聚合 bars，給指標重算用
+  // 保留最近的聚合 bars,給指標計算用（tick 時就地更新最後一根）
   const aggregatedBarsRef = useRef<KBarApi[]>([]);
+  // Sprint B：圖上委託/持倉價格線 + 成交標記
+  const priceLinesRef = useRef<IPriceLine[]>([]);
+  const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
+  // Sprint E：hover legend（useIndicators 直接寫 DOM）
+  const legendRef = useRef<HTMLDivElement>(null);
 
   // 初始化圖表（mount 一次）
   useEffect(() => {
@@ -153,6 +135,12 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
         background: { color: '#101623' },
         textColor: '#94A3B8',
         fontFamily: 'Barlow, monospace',
+        // Sprint E：副圖 pane 分隔線（v5 panes）
+        panes: {
+          separatorColor: 'rgba(62, 78, 109, 0.5)',
+          separatorHoverColor: 'rgba(212, 175, 55, 0.3)',
+          enableResize: true,
+        },
       },
       grid: {
         vertLines: { color: 'rgba(62, 78, 109, 0.25)' },
@@ -174,102 +162,32 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
       wickUpColor: PNL_COLOR_UP,
       wickDownColor: PNL_COLOR_DOWN,
     });
-    const vol = chart.addSeries(HistogramSeries, {
-      color: 'rgba(212, 175, 55, 0.4)',
-      priceFormat: { type: 'volume' },
-      priceScaleId: '',
-    });
-    vol.priceScale().applyOptions({ scaleMargins: { top: 0.85, bottom: 0 } });
-
-    // MA20 / MA60 / VWAP overlay。三條都共用 candle 的價格 scale，
-    // 不另開 priceScaleId 避免疊壓 candle。lineWidth=1 保持輕量。
-    const ma20 = chart.addSeries(LineSeries, {
-      color: '#60a5fa', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false, title: 'MA20',
-    });
-    const ma60 = chart.addSeries(LineSeries, {
-      color: '#a855f7', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false, title: 'MA60',
-    });
-    const vwap = chart.addSeries(LineSeries, {
-      color: '#D4AF37', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false, title: 'VWAP',
-    });
-    // Sprint 34：EMA20（橘）與布林通道（上/中/下軌,青色系半透明,同 candle scale）
-    const ema20 = chart.addSeries(LineSeries, {
-      color: '#fb923c', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false, title: 'EMA20',
-    });
-    const bollUp = chart.addSeries(LineSeries, {
-      color: 'rgba(34, 211, 238, 0.55)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false, title: 'BOLL+',
-    });
-    const bollMid = chart.addSeries(LineSeries, {
-      color: 'rgba(34, 211, 238, 0.3)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false, lineStyle: 2, title: 'BOLL',
-    });
-    const bollLow = chart.addSeries(LineSeries, {
-      color: 'rgba(34, 211, 238, 0.55)', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false, title: 'BOLL-',
-    });
-    // RSI 走自己的 priceScale（0-100 範圍），與 candle 不共軸
-    const rsi = chart.addSeries(LineSeries, {
-      color: '#fb7185', lineWidth: 1, priceLineVisible: false, lastValueVisible: false,
-      crosshairMarkerVisible: false, title: 'RSI14',
-      priceScaleId: 'rsi',
-    });
-    rsi.priceScale().applyOptions({ scaleMargins: { top: 0.7, bottom: 0 } });
 
     chartRef.current = chart;
     candleSeriesRef.current = candle;
-    volSeriesRef.current = vol;
-    ma20SeriesRef.current = ma20;
-    ma60SeriesRef.current = ma60;
-    vwapSeriesRef.current = vwap;
-    rsiSeriesRef.current = rsi;
-    ema20SeriesRef.current = ema20;
-    bollUpSeriesRef.current = bollUp;
-    bollMidSeriesRef.current = bollMid;
-    bollLowSeriesRef.current = bollLow;
+    markersPluginRef.current = createSeriesMarkers(candle, []);
 
     return () => {
       chart.remove();
       chartRef.current = null;
       candleSeriesRef.current = null;
-      volSeriesRef.current = null;
-      ma20SeriesRef.current = null;
-      ma60SeriesRef.current = null;
-      vwapSeriesRef.current = null;
-      rsiSeriesRef.current = null;
-      ema20SeriesRef.current = null;
-      bollUpSeriesRef.current = null;
-      bollMidSeriesRef.current = null;
-      bollLowSeriesRef.current = null;
+      markersPluginRef.current = null;
+      priceLinesRef.current = [];
     };
   }, []);
 
-  // 套用所有指標到對應 series（依 toggle 開關決定填資料或清空）
-  const applyIndicators = (bars: KBarApi[]) => {
-    ma20SeriesRef.current?.setData(showMA20 ? computeSMA(bars, 20) : []);
-    ma60SeriesRef.current?.setData(showMA60 ? computeSMA(bars, 60) : []);
-    vwapSeriesRef.current?.setData(showVWAP ? computeVWAP(bars) : []);
-    rsiSeriesRef.current?.setData(showRSI ? computeRSI(bars, 14) : []);
-    ema20SeriesRef.current?.setData(showEMA20 ? computeEMA(bars, 20) : []);
-    if (showBoll) {
-      const b = computeBoll(bars, 20, 2);
-      bollUpSeriesRef.current?.setData(b.upper);
-      bollMidSeriesRef.current?.setData(b.middle);
-      bollLowSeriesRef.current?.setData(b.lower);
-    } else {
-      bollUpSeriesRef.current?.setData([]);
-      bollMidSeriesRef.current?.setData([]);
-      bollLowSeriesRef.current?.setData([]);
-    }
-  };
+  // Sprint E：指標系統接線（chart 初始化 effect 之後呼叫,確保 effects 順序）
+  const { onBarsTick } = useIndicators({
+    chartRef,
+    barsRef: aggregatedBarsRef,
+    barsVersion,
+    chartSettings: settings.chart,
+    legendRef,
+  });
 
   // 切換商品或 timeframe：拉 1m kbars → aggregate → 填圖
   useEffect(() => {
-    if (!effSymbol || !candleSeriesRef.current || !volSeriesRef.current) return;
+    if (!effSymbol || !candleSeriesRef.current) return;
     let cancelled = false;
 
     apiClient.get<KBarApi[]>('/kbars', { params: { symbol: effSymbol, days: tfMeta.days } })
@@ -280,48 +198,22 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
         const candles: CandlestickData<Time>[] = bars.map((b) => ({
           time: b.time as Time, open: b.open, high: b.high, low: b.low, close: b.close,
         }));
-        const vols: HistogramData<Time>[] = bars.map((b) => ({
-          time: b.time as Time,
-          value: b.volume,
-          color: b.close >= b.open ? 'rgba(239, 68, 68, 0.4)' : 'rgba(16, 185, 129, 0.4)',
-        }));
         candleSeriesRef.current!.setData(candles);
-        volSeriesRef.current!.setData(vols);
         lastBarRef.current = candles[candles.length - 1] ?? null;
-        lastVolRef.current = vols[vols.length - 1] ?? null;
         aggregatedBarsRef.current = bars;
-        applyIndicators(bars);
+        setBarsVersion((v) => v + 1); // 通知成交標記/指標 effect：bars 已就緒
         chartRef.current?.timeScale().fitContent();
       })
       .catch(() => {
         // 沒登入或拉不到就清空；避免顯示其他商品殘留
         candleSeriesRef.current!.setData([]);
-        volSeriesRef.current!.setData([]);
-        ma20SeriesRef.current?.setData([]);
-        ma60SeriesRef.current?.setData([]);
-        vwapSeriesRef.current?.setData([]);
-        rsiSeriesRef.current?.setData([]);
-        ema20SeriesRef.current?.setData([]);
-        bollUpSeriesRef.current?.setData([]);
-        bollMidSeriesRef.current?.setData([]);
-        bollLowSeriesRef.current?.setData([]);
         aggregatedBarsRef.current = [];
         lastBarRef.current = null;
-        lastVolRef.current = null;
+        setBarsVersion((v) => v + 1); // 指標同步清空
       });
 
     return () => { cancelled = true; };
-    // applyIndicators 讀 toggle state 但每 render 重建,刻意不列入 deps（與既有寫法一致）
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [effSymbol, tfMeta.seconds, tfMeta.days]);
-
-  // toggle 指標 → 從快取 bars 重算（無需 refetch）
-  useEffect(() => {
-    const bars = aggregatedBarsRef.current;
-    if (!bars || bars.length === 0) return;
-    applyIndicators(bars);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [showMA20, showMA60, showVWAP, showRSI, showEMA20, showBoll]);
 
   // Live update：把最新成交價更新到當前 timeframe 的 K 棒
   // 來源依 isPinned 決定：pinned 用 MiniQuote（close-only），否則用主 quote（含量）
@@ -341,12 +233,12 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
       tickTimeSec = quote.TickTime ? Date.parse(quote.TickTime) / 1000 : Date.now() / 1000;
       tickVol = quote.Volume || 0;
     }
-    if (!candleSeriesRef.current || !volSeriesRef.current) return;
+    if (!candleSeriesRef.current) return;
 
     const barTime = alignToBucket(tickTimeSec, tfMeta.seconds);
     const prevBar = lastBarRef.current;
     if (prevBar && Number(prevBar.time) === barTime) {
-      // 同一根 bar → update close, high, low + 累積 volume
+      // 同一根 bar → update close, high, low
       const newBar: CandlestickData<Time> = {
         time: barTime as Time,
         open: prevBar.open,
@@ -357,15 +249,19 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
       candleSeriesRef.current.update(newBar);
       lastBarRef.current = newBar;
 
-      if (tickVol > 0) {
-        const prevVolValue = lastVolRef.current?.value ?? 0;
-        const newVol: HistogramData<Time> = {
-          time: barTime as Time,
-          value: prevVolValue + tickVol,
-          color: price >= newBar.open ? 'rgba(239, 68, 68, 0.4)' : 'rgba(16, 185, 129, 0.4)',
+      // 同步 bars 快取（指標資料源）：volume 累加
+      const bars = aggregatedBarsRef.current;
+      const lastIdx = bars.length - 1;
+      if (lastIdx >= 0 && bars[lastIdx].time === barTime) {
+        bars[lastIdx] = {
+          ...bars[lastIdx],
+          high: newBar.high,
+          low: newBar.low,
+          close: price,
+          volume: bars[lastIdx].volume + tickVol,
         };
-        volSeriesRef.current.update(newVol);
-        lastVolRef.current = newVol;
+      } else if (barTime > (bars[lastIdx]?.time ?? -Infinity)) {
+        bars.push({ time: barTime, open: newBar.open, high: newBar.high, low: newBar.low, close: price, volume: tickVol });
       }
     } else {
       // 跨 bin → push 新 bar
@@ -375,32 +271,184 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
       };
       candleSeriesRef.current.update(newBar);
       lastBarRef.current = newBar;
-      const newVol: HistogramData<Time> = {
-        time: barTime as Time,
-        value: tickVol,
-        color: 'rgba(212, 175, 55, 0.4)',
-      };
-      volSeriesRef.current.update(newVol);
-      lastVolRef.current = newVol;
+      const bars = aggregatedBarsRef.current;
+      if (barTime > (bars[bars.length - 1]?.time ?? -Infinity)) {
+        bars.push({ time: barTime, open: price, high: price, low: price, close: price, volume: tickVol });
+      }
     }
-  }, [quote, mini, isPinned, tfMeta.seconds]);
+    // 指標增量更新最後一點（內建 series.update；自訂走 worker 節流）
+    onBarsTick();
+  }, [quote, mini, isPinned, tfMeta.seconds, onBarsTick]);
 
-  const indicatorButtons = (
-    <>
-      <IndicatorBtn on={showMA20} onClick={() => setShowMA20((v) => !v)} label="MA20" title="20 期簡單移動平均"
-        cls="bg-blue-500/20 text-blue-300 border-blue-400" />
-      <IndicatorBtn on={showMA60} onClick={() => setShowMA60((v) => !v)} label="MA60" title="60 期簡單移動平均"
-        cls="bg-purple-500/20 text-purple-300 border-purple-400" />
-      <IndicatorBtn on={showEMA20} onClick={() => setShowEMA20((v) => !v)} label="EMA20" title="20 期指數移動平均"
-        cls="bg-orange-500/20 text-orange-300 border-orange-400" />
-      <IndicatorBtn on={showBoll} onClick={() => setShowBoll((v) => !v)} label="BB" title="布林通道 (20, 2σ)"
-        cls="bg-cyan-500/20 text-cyan-300 border-cyan-400" />
-      <IndicatorBtn on={showVWAP} onClick={() => setShowVWAP((v) => !v)} label="VWAP" title="累積成交量加權均價"
-        cls="bg-amber-500/20 text-amber-300 border-amber-400" />
-      <IndicatorBtn on={showRSI} onClick={() => setShowRSI((v) => !v)} label="RSI" title="Wilder RSI (14)，獨立 scale 在圖下緣"
-        cls="bg-pink-500/20 text-pink-300 border-pink-400" />
-    </>
-  );
+  // ── Sprint B：圖上委託單/持倉均價 價格線 ─────────────────
+  useEffect(() => {
+    const candle = candleSeriesRef.current;
+    if (!candle) return;
+    for (const line of priceLinesRef.current) {
+      try { candle.removePriceLine(line); } catch { /* chart 卸載中 */ }
+    }
+    priceLinesRef.current = [];
+    if (!interactive || !effSymbol) return;
+
+    const lines: IPriceLine[] = [];
+    // 持倉均價：金色虛線
+    const pos = (accountSummary.positions || []).find((p) => symbolMatches(effSymbol, p.symbol));
+    if (pos && pos.price > 0) {
+      lines.push(candle.createPriceLine({
+        price: pos.price,
+        color: '#D4AF37',
+        lineWidth: 1,
+        lineStyle: 2,
+        axisLabelVisible: true,
+        title: `${pos.direction === 'Buy' ? '多' : '空'}${pos.qty} 成本`,
+      }));
+    }
+    // 活躍委託：買紅/賣綠實線，標示（已成交/總量）
+    for (const o of workingOrders) {
+      if (!symbolMatches(effSymbol, o.symbol) || !(o.price > 0)) continue;
+      const isBuy = o.action === 'Buy';
+      const filled = o.filled_qty > 0 ? `${o.filled_qty}/` : '';
+      lines.push(candle.createPriceLine({
+        price: o.price,
+        color: isBuy ? PNL_COLOR_UP : PNL_COLOR_DOWN,
+        lineWidth: 1,
+        lineStyle: 0,
+        axisLabelVisible: true,
+        title: `${isBuy ? '買' : '賣'}${filled}${o.qty}`,
+      }));
+    }
+    priceLinesRef.current = lines;
+  }, [interactive, effSymbol, workingOrders, accountSummary.positions]);
+
+  // ── Sprint B：當日成交箭頭標記（買上/賣下）────────────────
+  useEffect(() => {
+    const plugin = markersPluginRef.current;
+    if (!plugin) return;
+    if (!interactive || !effSymbol) { plugin.setMarkers([]); return; }
+    let cancelled = false;
+    apiClient.get('/order_history')
+      .then((res) => {
+        if (cancelled || !markersPluginRef.current) return;
+        const bars = aggregatedBarsRef.current;
+        if (!bars.length) { markersPluginRef.current.setMarkers([]); return; }
+        const firstBar = bars[0].time;
+        const lastBar = bars[bars.length - 1].time;
+        interface HistOrder {
+          symbol: string; action: string; price: number; qty: number;
+          status: string; filled_qty: number; filled_avg_price: number; time: string;
+        }
+        const orders = ((res.data?.orders || []) as HistOrder[])
+          .filter((o) => symbolMatches(effSymbol, o.symbol)
+            && (o.status === 'Filled' || (o.filled_qty ?? 0) > 0));
+        const markers: SeriesMarker<Time>[] = [];
+        for (const o of orders) {
+          const parsed = Date.parse(o.time) / 1000;
+          if (!Number.isFinite(parsed)) continue;
+          // 對齊 bar bucket 並夾進現有資料範圍（時區/盤別偏差時退到最近的 bar）
+          let t = alignToBucket(parsed, tfMeta.seconds);
+          if (t < firstBar) t = firstBar;
+          if (t > lastBar) t = lastBar;
+          const isBuy = o.action === 'Buy';
+          markers.push({
+            time: t as Time,
+            position: isBuy ? 'belowBar' : 'aboveBar',
+            shape: isBuy ? 'arrowUp' : 'arrowDown',
+            color: isBuy ? PNL_COLOR_UP : PNL_COLOR_DOWN,
+            text: `${isBuy ? 'B' : 'S'}${o.filled_qty || o.qty}`,
+          });
+        }
+        markers.sort((a, b) => Number(a.time) - Number(b.time));
+        markersPluginRef.current.setMarkers(markers);
+      })
+      .catch(() => { /* 未登入等情況：不畫標記 */ });
+    return () => { cancelled = true; };
+  }, [interactive, effSymbol, tfMeta.seconds, workingOrders, barsVersion]);
+
+  // ── Sprint B：點擊圖表下單（現價下=掛買、上=掛賣）─────────
+  // clickStateRef 每 render 更新，click handler 只在 mount 訂閱一次
+  useEffect(() => {
+    clickStateRef.current = {
+      symbol: effSymbol,
+      qty: chartQty,
+      price: (isPinned ? (mini?.price ?? 0) : (quote?.Price ?? 0)) || 0,
+      interactive,
+      confirmNeeded: settings.confirmations.placeOrder && !settings.isCombatMode,
+      toast,
+      confirm,
+      scheduleOrderRefresh,
+    };
+  });
+
+  useEffect(() => {
+    const chart = chartRef.current;
+    const candle = candleSeriesRef.current;
+    if (!chart || !candle) return;
+
+    const onClick = async (param: MouseEventParams<Time>) => {
+      const st = clickStateRef.current;
+      if (!st.interactive || !st.symbol || !param.point) return;
+      const raw = candle.coordinateToPrice(param.point.y);
+      if (raw == null || !(raw > 0)) return;
+      if (!(st.price > 0)) {
+        st.toast.warn('尚無現價，無法判斷買賣方向');
+        return;
+      }
+      const px = Number(raw.toFixed(2));
+      const action: 'Buy' | 'Sell' = px <= st.price ? 'Buy' : 'Sell';
+      const dir = action === 'Buy' ? '買進' : '賣出';
+      // 與 useDOMLogic 一致：前端確認過即帶 confirm:true 授權後端 WARNING；
+      // 戰鬥模式不預先授權，收到 409 再問一次
+      let preConfirmed = false;
+      if (st.confirmNeeded) {
+        const ok = await st.confirm({
+          title: '圖表下單',
+          message: `確認${dir} ${st.symbol} ${st.qty} 單位 @ ${px}？（圖表下單）`,
+          confirmLabel: `確認${dir}`,
+        });
+        if (!ok) return;
+        preConfirmed = true;
+      }
+      const payload = {
+        symbol: st.symbol, price: px, action, qty: st.qty,
+        order_type: 'ROD', price_type: 'LMT', order_cond: 'Cash', order_lot: 'Common',
+        ...(preConfirmed ? { confirm: true } : {}),
+      };
+      apiClient.post('/place_order', payload)
+        .then(() => {
+          st.toast.success(`圖表下單：${dir} ${st.qty} @ ${px}`);
+          st.scheduleOrderRefresh();
+        })
+        .catch(async (e) => {
+          const err = normalizeApiError(e);
+          if (err.status === 409 && err.code === 'CONFIRM_REQUIRED') {
+            const msg = [err.user_msg, ...(err.warnings ?? [])].filter(Boolean).join('\n');
+            // 風控警告：danger 對話框（promise-based，不阻塞圖表更新）
+            const ok = await st.confirm({
+              title: '風控警告',
+              message: msg,
+              confirmLabel: '確認送單',
+              danger: true,
+            });
+            if (ok) {
+              try {
+                await apiClient.post('/place_order', { ...payload, confirm: true });
+                st.toast.success(`圖表下單：${dir} ${st.qty} @ ${px}`);
+                st.scheduleOrderRefresh();
+              } catch (e2) {
+                st.toast.error(normalizeApiError(e2).user_msg || '圖表下單失敗');
+              }
+            } else {
+              st.toast.info('已取消下單');
+            }
+            return;
+          }
+          st.toast.error(err.user_msg || '圖表下單失敗');
+        });
+    };
+
+    chart.subscribeClick(onClick);
+    return () => { chart.unsubscribeClick(onClick); };
+  }, []);
 
   const timeframeButtons = TIMEFRAMES.map((tf) => (
     <button
@@ -416,6 +464,8 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
     </button>
   ));
 
+  const activeCount = settings.chart.active.length;
+
   return (
     <div className="bg-slate-800/50 rounded-lg border border-slate-700 h-full flex flex-col glass-panel shadow-2xl">
       <div className={`${compact ? 'px-2 py-1' : 'px-3 py-2'} border-b border-slate-700/50 flex items-center justify-between gap-1`}>
@@ -424,31 +474,46 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
           <span className="truncate">{compact ? (effSymbol || '—') : `K 線圖 (${effSymbol || '—'})`}</span>
         </h3>
         <div className="flex items-center gap-1 flex-wrap justify-end">
-          {compact ? (
-            <div className="relative">
-              <button
-                onClick={() => setMenuOpen((v) => !v)}
-                className="px-1.5 py-0.5 text-[10px] font-bold rounded border bg-slate-900 text-slate-400 border-slate-700 hover:text-slate-200"
-                title="指標"
-              >指標 ▾</button>
-              {menuOpen && (
-                <div className="absolute right-0 top-full mt-1 z-30 flex flex-wrap gap-1 p-2 bg-slate-900 border border-slate-700 rounded shadow-xl w-40">
-                  {indicatorButtons}
-                </div>
-              )}
-            </div>
-          ) : (
-            <>
-              {indicatorButtons}
-              <div className="w-px h-4 bg-slate-700 mx-1" />
-            </>
+          <button
+            onClick={() => setPickerOpen(true)}
+            className="px-2 py-0.5 text-[10px] font-bold rounded border bg-slate-900 text-slate-400 border-slate-700 hover:text-[#D4AF37] hover:border-[#D4AF37]/60 transition-colors"
+            title="技術指標（選擇 / 參數 / 樣式 / 自訂 JS）"
+          >
+            ƒ 指標{activeCount > 0 ? ` ${activeCount}` : ''}
+          </button>
+          {!compact && <div className="w-px h-4 bg-slate-700 mx-1" />}
+          {interactive && !compact && (
+            <label className="flex items-center gap-1 ml-1" title="圖表點擊下單口數">
+              <span className="text-[9px] text-slate-500 font-bold">口數</span>
+              <input
+                type="number" min={1} max={499} value={chartQty}
+                onChange={(e) => setChartQty(Math.max(1, Math.min(499, parseInt(e.target.value || '1', 10) || 1)))}
+                className="w-11 bg-[#101623] border border-slate-700 rounded text-right text-slate-200 text-[10px] px-1 py-0.5"
+              />
+            </label>
           )}
           {timeframeButtons}
         </div>
       </div>
-      <div className="flex-1 min-h-0">
+      <div className="flex-1 min-h-0 relative">
         <div ref={containerRef} className="w-full h-full" />
+        {/* Sprint E：指標 hover legend（useIndicators 直接寫入,無 React 重繪） */}
+        <div
+          ref={legendRef}
+          style={{ display: 'none' }}
+          className="absolute top-1 left-1 z-10 pointer-events-none select-none text-[10px] leading-snug bg-[#101623]/80 border border-slate-700/50 rounded px-1.5 py-1 space-y-0.5"
+        />
+        {interactive && (
+          <div className="absolute bottom-1 left-1 z-10 text-[9px] text-slate-600 pointer-events-none select-none">
+            點擊圖面掛限價單（現價下=買 / 上=賣）
+          </div>
+        )}
       </div>
+      <IndicatorPicker
+        isOpen={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        getBars={() => aggregatedBarsRef.current}
+      />
     </div>
   );
 };

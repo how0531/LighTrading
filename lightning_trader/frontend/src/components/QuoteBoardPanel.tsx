@@ -12,7 +12,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { ArrowUpDown, ArrowUp, ArrowDown } from 'lucide-react';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { SymbolPicker } from './SymbolPicker';
 import { formatPrice } from '../utils/instrument';
@@ -41,7 +41,8 @@ const COLUMNS: Column[] = [
 ];
 
 const QuoteBoardPanel: React.FC = () => {
-  const { targetSymbol, subscribe, watchlistQuotes, watchSymbols } = useTradingContext();
+  const { targetSymbol, subscribe, watchSymbols } = useTradingCore();
+  const { watchlistQuotes } = useQuotes(); // 報價看板跟著 tick 更新
   const { settings, updateSetting } = useSettings();
   const list = settings.watchlist;
 
@@ -192,10 +193,11 @@ const QuoteBoardPanel: React.FC = () => {
                   <td className="px-2 py-1 text-right font-mono text-slate-400">
                     {r.volume > 0 ? r.volume.toLocaleString() : '—'}
                   </td>
-                  <td className="px-2 py-1 text-right font-mono text-emerald-300/70">
+                  {/* 委買=紅系 / 委賣=綠系（與 DOM ladder、dirColor 的紅漲綠跌一致） */}
+                  <td className="px-2 py-1 text-right font-mono text-red-300/70">
                     {r.bidPrice > 0 ? formatPrice(r.bidPrice, r.symbol) : '—'}
                   </td>
-                  <td className="px-2 py-1 text-right font-mono text-red-300/70">
+                  <td className="px-2 py-1 text-right font-mono text-emerald-300/70">
                     {r.askPrice > 0 ? formatPrice(r.askPrice, r.symbol) : '—'}
                   </td>
                 </tr>

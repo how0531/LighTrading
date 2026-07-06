@@ -9,7 +9,7 @@
  */
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { LayoutGrid, Square, Grid2x2 } from 'lucide-react';
-import { useTradingContext } from '../contexts/TradingContext';
+import { useTradingCore } from '../contexts/TradingContext';
 import ChartPanel from './ChartPanel';
 
 type GridMode = 1 | 2 | 4;
@@ -36,7 +36,7 @@ function loadState(fallbackSymbol: string): MChartState {
 }
 
 const MultiChartPanel: React.FC = () => {
-  const { targetSymbol, setAuxWatch } = useTradingContext();
+  const { targetSymbol, setAuxWatch } = useTradingCore();
   const [state, setState] = useState<MChartState>(() => loadState(targetSymbol));
   // 每格的輸入暫存（未按 Enter 前不套用）
   const [drafts, setDrafts] = useState<string[]>(() => state.symbols.slice());

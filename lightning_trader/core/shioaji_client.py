@@ -1,5 +1,8 @@
 import shioaji as sj
-from shioaji.constant import StockPriceType, FuturesPriceType, OrderType, Action, QuoteType
+from shioaji.constant import (
+    StockPriceType, FuturesPriceType, OrderType, Action, QuoteType,
+    StockOrderLot, StockOrderCond,
+)
 import threading
 from .config import Config
 from .event_bus import Signal
@@ -7,6 +10,7 @@ from .symbol_resolver import SymbolResolver
 import json
 import logging
 import time
+from datetime import datetime, time as dtime
 from typing import Optional, List, Dict, Any
 
 logger = logging.getLogger(__name__)
@@ -42,10 +46,10 @@ class ShioajiClient:
         self._deal_prices: Dict[str, float] = {}
         # ★ 切換訂閱用的 mutex，避免兩筆 subscribe 競態
         self._subscribe_lock = threading.Lock()
+        # ★ 背景訂閱的商品（持倉/自選）— 重連後要全部重訂，否則 PnL 無聲變舊
+        self._background_symbols: set = set()
 
         self._setup_callbacks()
-        self.smart_orders: List[Dict[str, Any]] = []
-        self.volume_profile: Dict[str, Any] = {}
         self.last_message_time = time.time()
         self._start_reconnect_timer()
 
@@ -59,9 +63,34 @@ class ShioajiClient:
         self.check_connection()
         self._start_reconnect_timer()
 
+    def _in_quote_session(self, now: Optional[datetime] = None) -> bool:
+        """判斷 current_contract 此刻是否在行情時段內。
+
+        - 'STK' → TSE 日盤；其餘（期貨/選擇權）→ TAIFEX 日盤+夜盤
+          （與 place_order 選帳號用同一個 security_type 判別）
+        - 夜盤 15:00–05:00 跨午夜：start > end 時，now >= start 或 now <= end 即在盤中
+        - 沒有訂閱合約 → False（沒有行情可等，watchdog 不該觸發）
+        """
+        contract = self.current_contract
+        if contract is None:
+            return False
+        sec_type = getattr(contract, "security_type", None)
+        sessions = Config.TSE_SESSIONS if sec_type == 'STK' else Config.TAIFEX_SESSIONS
+        now_t = (now or datetime.now()).time()
+        for start_s, end_s in sessions:
+            start = dtime(*(int(x) for x in start_s.split(":")))
+            end = dtime(*(int(x) for x in end_s.split(":")))
+            if start <= end:
+                if start <= now_t <= end:
+                    return True
+            else:  # 跨午夜（例如 15:00 → 翌日 05:00）
+                if now_t >= start or now_t <= end:
+                    return True
+        return False
+
     def check_connection(self):
         if getattr(self, '_is_reconnecting', False): return
-        
+
         # 1. 檢查帳戶清單 API 存取
         api_ok = False
         if self._is_connected:
@@ -73,9 +102,12 @@ class ShioajiClient:
                 
         # 2. 檢查 Watchdog (最後收到行情封包的時間)
         # 縮短為 15 秒：當沖場景每秒都有 tick，超過 15 秒沒任何封包就視為靜默斷線
+        # ★ 盤後（收盤～開盤間）本來就沒有 tick —— 只在行情時段內才把靜默視為斷線，
+        #   否則盤後每 ~20 秒重登一次、整夜無限迴圈。list_accounts 檢查仍然照跑，
+        #   真正的 session 死亡在盤後一樣抓得到。
         watchdog_timeout = 15
         is_stale = False
-        if api_ok and self.current_contract and self._is_connected:
+        if api_ok and self.current_contract and self._is_connected and self._in_quote_session():
             elapsed = time.time() - getattr(self, 'last_message_time', time.time())
             if elapsed > watchdog_timeout:
                 logger.warning(f"Watchdog 觸發：超過 {watchdog_timeout} 秒未收到報價，疑似靜默斷線 (elapsed={elapsed:.1f}s)")
@@ -84,10 +116,20 @@ class ShioajiClient:
         if not api_ok or is_stale:
             if self._is_connected:
                 self._is_connected = False
+                if self.event_bus:
+                    try:
+                        self.event_bus.on_connection_state.emit("disconnected")
+                    except Exception:
+                        pass
                 self._attempt_reconnect()
 
     def _attempt_reconnect(self):
         self._is_reconnecting = True
+        if self.event_bus:
+            try:
+                self.event_bus.on_connection_state.emit("reconnecting")
+            except Exception:
+                pass
         threading.Timer(5.0, self._do_login_reconnect).start()
 
     def _do_login_reconnect(self):
@@ -95,7 +137,7 @@ class ShioajiClient:
             logger.info("重連成功")
             self._is_reconnecting = False
             self.last_message_time = time.time() # 重置時間
-            
+
             # 重新訂閱原合約
             if self.current_contract:
                 logger.info(f"重新啟動合約訂閱: {self.current_contract.symbol}")
@@ -106,6 +148,14 @@ class ShioajiClient:
         else:
             logger.warning("重連失敗，10 秒後重試")
             threading.Timer(10.0, self._do_login_reconnect).start()
+
+    def _resubscribe_background(self):
+        """重連 / 重新登入後把所有背景訂閱（持倉、自選）補回來。"""
+        for sym in list(self._background_symbols):
+            try:
+                self.subscribe_background(sym)
+            except Exception as e:
+                logger.warning(f"重連後補訂背景商品 {sym} 失敗: {e}")
 
     def _setup_callbacks(self):
         # === Shioaji v1 回呼（新版 SDK 預設格式） ===
@@ -120,6 +170,8 @@ class ShioajiClient:
                     "Symbol": symbol,
                     "Price": float(tick.close),
                     "Volume": int(tick.volume),
+                    # 交易所當日累計成交量 — 前端不用再自己累加（避免重訂閱/重連時重複計數）
+                    "TotalVolume": int(getattr(tick, "total_volume", 0) or 0),
                     "Open": float(tick.open),
                     "High": float(tick.high),
                     "Low": float(tick.low),
@@ -129,11 +181,8 @@ class ShioajiClient:
                 }
                 if q["Price"] > 0 and symbol:
                     self._latest_prices[symbol] = q["Price"]
-                    if self.event_bus:
-                        try:
-                            self.event_bus.on_tick.emit(symbol, q)
-                        except Exception:
-                            pass
+                    # on_tick 事件統一由 bridge.on_shioaji_quote 發射（單一來源，
+                    # 之前這裡也 emit 導致所有消費者每個 tick 處理兩次）
                     if self._direct_quote_callback:
                         self._direct_quote_callback(q)
             except Exception as e:
@@ -172,6 +221,8 @@ class ShioajiClient:
                     "Symbol": symbol,
                     "Price": float(tick.close),
                     "Volume": int(tick.volume),
+                    # 交易所當日累計成交量（同 _on_tick_stk）
+                    "TotalVolume": int(getattr(tick, "total_volume", 0) or 0),
                     "Open": float(tick.open),
                     "High": float(tick.high),
                     "Low": float(tick.low),
@@ -181,11 +232,7 @@ class ShioajiClient:
                 }
                 if q["Price"] > 0 and symbol:
                     self._latest_prices[symbol] = q["Price"]
-                    if self.event_bus:
-                        try:
-                            self.event_bus.on_tick.emit(symbol, q)
-                        except Exception:
-                            pass
+                    # on_tick 事件統一由 bridge.on_shioaji_quote 發射（見 _on_tick_stk 註解）
                     if self._direct_quote_callback:
                         self._direct_quote_callback(q)
             except Exception as e:
@@ -248,15 +295,23 @@ class ShioajiClient:
         logger.info("✅ 已註冊 Fallback 報價回呼 (set_quote_callback)")
 
         def on_order_status(state, msg: dict):
-            # ★ 政抓 Deal 事件，提取成交均價並快取存儲
+            # ★ 攔截 Deal 事件，提取成交均價並快取存儲
             state_name = str(state).lower()
-            if 'deal' in state_name:
+            is_deal = 'deal' in state_name
+            if is_deal:
                 ordno = msg.get('ordno', '') or msg.get('seqno', '')
                 deal_price = msg.get('price', 0)
                 if ordno and deal_price:
                     self._deal_prices[ordno] = float(deal_price)
                     logger.debug(f"★ 成交均價快取: ordno={ordno} price={deal_price}")
             self.signal_order_update.emit(msg)
+            # ★ Deal（成交）另外走 signal_trade_update →
+            #   journal 落地 / on_fill 事件 / 已實現損益餵風控 / webhook。
+            #   這個 signal 之前從來沒有人 emit，整條成交處理鏈在生產環境是死的。
+            if is_deal:
+                payload = dict(msg) if isinstance(msg, dict) else {"raw": str(msg)}
+                payload.setdefault("state", str(state))
+                self.signal_trade_update.emit(payload)
             threading.Timer(0.5, self.trigger_account_update).start()
 
         self.api.set_order_callback(on_order_status)
@@ -285,8 +340,15 @@ class ShioajiClient:
             self._setup_callbacks()
             logger.info("✅ Shioaji 登入成功，回呼已重新註冊")
             self.signal_login_status.emit(True, "登入成功")
+            if self.event_bus:
+                try:
+                    self.event_bus.on_connection_state.emit("connected")
+                except Exception:
+                    pass
             threading.Timer(1.0, self.trigger_account_update).start()
             if self.current_contract: self.subscribe(self.current_contract.symbol)
+            # 補回所有背景訂閱（持倉 / 自選）— 之前重連只還原 current_contract
+            self._resubscribe_background()
             return True
         except Exception as e:
             self._is_connected = False
@@ -405,11 +467,17 @@ class ShioajiClient:
             old_contract = self.current_contract
             # 切換到不同合約時，把舊合約的 latest price 清掉（避免新商品 DOM 用到舊價）
             if old_contract is not None and getattr(old_contract, "symbol", "") != getattr(contract, "symbol", ""):
-                try:
-                    self.api.quote.unsubscribe(old_contract, QuoteType.Tick)
-                    self.api.quote.unsubscribe(old_contract, QuoteType.BidAsk)
-                except Exception as e:
-                    logger.debug(f"取消訂閱舊合約時發生例外: {e}")
+                # ★ 防誤殺：舊商品若在背景訂閱清單（持倉/自選）中，絕不能取消訂閱 —
+                #   watchlist / PnL 依賴同一條 Tick/BidAsk 串流，取消會讓背景報價無聲斷掉。
+                old_canonical = self.symbol_resolver.canonical(getattr(old_contract, "symbol", ""))
+                if old_canonical in self._background_symbols:
+                    logger.info(f"跳過取消訂閱 {old_canonical}：仍在背景訂閱清單（持倉/自選）")
+                else:
+                    try:
+                        self.api.quote.unsubscribe(old_contract, QuoteType.Tick)
+                        self.api.quote.unsubscribe(old_contract, QuoteType.BidAsk)
+                    except Exception as e:
+                        logger.debug(f"取消訂閱舊合約時發生例外: {e}")
                 # 注意：持倉商品的價格仍由 subscribe_background 維護，不在此清除
             self.current_contract = contract
             # ★ 登記到 resolver，確保 tick.code 能映射回 user-facing symbol
@@ -433,6 +501,7 @@ class ShioajiClient:
                     "Symbol": canonical,
                     "Price": close_price,
                     "Volume": int(getattr(s, 'volume', 0)),
+                    "TotalVolume": int(getattr(s, 'total_volume', 0) or 0),
                     "Open": float(getattr(s, 'open', close_price)),
                     "High": float(getattr(s, 'high', close_price)),
                     "Low": float(getattr(s, 'low', close_price)),
@@ -471,24 +540,31 @@ class ShioajiClient:
         threading.Timer(0.5, self.trigger_account_update).start()
         return contract.symbol
 
-    def subscribe_background(self, symbol: str) -> bool:
+    def subscribe_background(self, symbol: str) -> str:
         """
         背景訂閱商品報價：不切換 current_contract，但
           1. 登記 resolver alias，讓 tick.code 回呼能對應到 user-facing symbol
-          2. 訂閱 Tick（PnL 計算所需）
+          2. 訂閱 Tick（PnL 計算所需）+ BidAsk（watchlist 切回時的一檔買賣盤）
           3. 推送一份 Snapshot（Reference/LimitUp/LimitDown/初始 BidAsk）給前端，
              避免使用者切換到該商品時看不到漲跌停或一檔買賣盤
+
+        回傳 canonical symbol（tick 廣播用的 key；失敗回 ""）——
+        呼叫端（WS watch ack）必須把 canonical 告訴前端，否則使用者輸入
+        「2330」而 tick 帶「TSE2330」時，前端對不上 key、報價永遠不顯示。
         """
         contract = self.get_contract(symbol)
         if not contract:
             logger.warning(f"subscribe_background: 找不到合約 {symbol}")
-            return False
+            return ""
         try:
             self.symbol_resolver.register(contract)
             canonical = self.symbol_resolver.canonical(contract.symbol)
 
             self.api.quote.subscribe(contract, QuoteType.Tick)
-            logger.info(f"  ✅ 背景訂閱 {symbol} Tick 成功 (canonical={canonical})")
+            # ★ 背景商品也訂 BidAsk：watchlist 切回該商品時 DOM 一檔買賣盤才不會停在 snapshot
+            self.api.quote.subscribe(contract, QuoteType.BidAsk)
+            self._background_symbols.add(canonical)
+            logger.info(f"  ✅ 背景訂閱 {symbol} Tick+BidAsk 成功 (canonical={canonical})")
 
             # 推送 Snapshot 補齊 Reference / LimitUp / LimitDown / 初始一檔 BidAsk
             try:
@@ -503,6 +579,7 @@ class ShioajiClient:
                         "Symbol": canonical,
                         "Price": close_price,
                         "Volume": int(getattr(s, "volume", 0)),
+                        "TotalVolume": int(getattr(s, "total_volume", 0) or 0),
                         "Open": float(getattr(s, "open", close_price)),
                         "High": float(getattr(s, "high", close_price)),
                         "Low": float(getattr(s, "low", close_price)),
@@ -532,10 +609,56 @@ class ShioajiClient:
                             self._direct_quote_callback(bidask_data)
             except Exception as snap_err:
                 logger.warning(f"subscribe_background {symbol} snapshot 失敗: {snap_err}")
-            return True
+            return canonical
         except Exception as e:
             logger.warning(f"subscribe_background {symbol} 失敗: {e}")
+            return ""
+
+    def unsubscribe_background(self, symbol: str) -> bool:
+        """
+        退訂背景商品報價（UX 批次 4 Item 10：自選清單移除後不再洩漏 Tick+BidAsk 訂閱）。
+
+        保護規則：
+          1. 持倉商品不退訂 —— PnL 廣播依賴其 tick（回 False，保留在 _background_symbols）
+          2. 當前 DOM 主商品（current_contract）不動串流 —— 只從 _background_symbols
+             移除，之後主商品切走時 subscribe() 會照常取消訂閱（回 True）
+          3. 不在背景清單的 symbol 視為 no-op（回 False）
+
+        回傳 True 表示已退訂（或已從背景清單移除、交由主訂閱管理）。
+        """
+        contract = self.get_contract(symbol)
+        if not contract:
+            logger.warning(f"unsubscribe_background: 找不到合約 {symbol}")
             return False
+        canonical = self.symbol_resolver.canonical(getattr(contract, "symbol", "")) or str(symbol).strip().upper()
+        if canonical not in self._background_symbols:
+            return False
+
+        # 持倉商品：PnL 需要這條 tick 串流，絕不能退訂
+        try:
+            positions = self.list_positions()
+            if any((p.get("symbol") or "") == canonical for p in positions):
+                logger.info(f"unsubscribe_background 跳過 {canonical}：持倉中，PnL 需要背景報價")
+                return False
+        except Exception as e:
+            logger.debug(f"unsubscribe_background 查持倉失敗（保守跳過退訂）: {e}")
+            return False
+
+        with self._subscribe_lock:
+            self._background_symbols.discard(canonical)
+            # 當前 DOM 交易中的主商品：串流由主訂閱持有，不能在這裡取消；
+            # 已從背景清單移除，之後 subscribe() 切走時會照常 unsubscribe
+            cur = self.current_contract
+            if cur is not None and self.symbol_resolver.canonical(getattr(cur, "symbol", "")) == canonical:
+                logger.info(f"unsubscribe_background {canonical}：為當前主商品，僅移出背景清單")
+                return True
+            try:
+                self.api.quote.unsubscribe(contract, QuoteType.Tick)
+                self.api.quote.unsubscribe(contract, QuoteType.BidAsk)
+                logger.info(f"  ✅ 已退訂背景商品 {canonical} Tick+BidAsk")
+            except Exception as e:
+                logger.debug(f"unsubscribe_background {canonical} 取消訂閱例外: {e}")
+        return True
 
     def place_order(self, symbol: str, price: float, action: Action, qty: int, order_type: OrderType = OrderType.ROD, price_type=None, order_lot=None, order_cond=None):
         contract = self.get_contract(symbol)
@@ -781,6 +904,43 @@ class ShioajiClient:
             logger.error(f"update_order 失敗: {e}")
             return False
 
+    def cancel_order_by_ids(self, order_ids) -> bool:
+        """
+        依委託單號（id / seqno / ordno 任一）撤掉「一張」活躍委託。
+        CHASE 追價單 cancel-replace 專用：比 cancel_orders_by_action_price
+        精準（不會誤殺同價位的其他委託）。
+
+        回傳 True = 已送出撤單；False = 找不到活躍的對應委託
+        （可能已全成 / 已被撤 —— 呼叫端交給成交/對帳路徑收尾）。
+        """
+        ids = {str(i) for i in (order_ids or []) if i}
+        if not ids:
+            return False
+        try:
+            trades = self.api.list_trades()
+            for trade in trades:
+                order = getattr(trade, "order", None)
+                candidates = {str(getattr(order, a, "") or "")
+                              for a in ("id", "seqno", "ordno")}
+                candidates.discard("")
+                if not (candidates & ids):
+                    continue
+                status_name = (trade.status.status.name if hasattr(trade.status, "status")
+                               else getattr(trade.status, "name", ""))
+                if status_name in ("PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"):
+                    self.api.cancel_order(trade)
+                    logger.info(f"cancel_order_by_ids: 已撤單 {sorted(candidates & ids)}")
+                    threading.Timer(0.5, self.trigger_account_update).start()
+                    return True
+                logger.info(f"cancel_order_by_ids: 委託 {sorted(candidates & ids)} "
+                            f"已非活躍狀態（{status_name}），不撤")
+                return False
+            logger.warning(f"cancel_order_by_ids: 找不到委託 {sorted(ids)}")
+            return False
+        except Exception as e:
+            logger.error(f"cancel_order_by_ids 失敗: {e}")
+            return False
+
     def cancel_all(self, symbol: str, action: Action) -> int:
         """批次刪單：取消指定標的與方向的所有未完成委託"""
         cancel_count = 0
@@ -855,17 +1015,3 @@ class ShioajiClient:
             logger.error(f"reverse_position 失敗: {e}")
             return False
 
-    def add_smart_order(self, symbol: str, action: Action, qty: int, stop_price: float = 0, trailing_offset: float = 0):
-        """新增本地端智慧單（停損/移動停損監控）"""
-        smart_order = {
-            "symbol": symbol,
-            "action": action,
-            "qty": qty,
-            "stop_price": stop_price,
-            "trailing_offset": trailing_offset,
-            "highest_price": 0,
-            "lowest_price": float('inf'),
-            "is_triggered": False
-        }
-        self.smart_orders.append(smart_order)
-        logger.info(f"add_smart_order: {symbol} {'Buy' if action == Action.Buy else 'Sell'} {qty}口, 停損={stop_price}, 移停={trailing_offset}")

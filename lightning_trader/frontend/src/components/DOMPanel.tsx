@@ -1,12 +1,18 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { useDOMLogic } from '../hooks/useDOMLogic';
+import { useLayOrders } from '../hooks/useLayOrders';
 import { DOMHeader } from './DOM/DOMHeader';
 import { DOMTable } from './DOM/DOMTable';
 import { DOMFooter } from './DOM/DOMFooter';
+import { DepthHeatmap } from './DOM/DepthHeatmap';
+import { LayOrdersPanel } from './DOM/LayOrdersPanel';
 import { getTickSize } from '../utils/instrument';
-import { apiClient, normalizeApiError } from '../api/client';
+import { apiClient } from '../api/client';
 import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
+import { useApiErrorToast } from '../hooks/useApiErrorToast';
 import { useSettings } from '../contexts/SettingsContext';
+import type { AccountPosition } from '../contexts/TradingContext';
 import { getMultiplier } from '../types';
 import type { SizingMode } from '../utils/sizing';
 import { nearestLadderPrice, resolveAnchorTarget, type DomAnchor } from '../utils/domAnchor';
@@ -15,22 +21,38 @@ import { nearestLadderPrice, resolveAnchorTarget, type DomAnchor } from '../util
 const round2 = (n: number): number => Math.round(n * 100) / 100;
 
 export const DOMPanel: React.FC = () => {
-  const logic = useDOMLogic();
   const { toast } = useToast();
+  const { confirm } = useConfirm();
+  const handleApiError = useApiErrorToast();
   const { settings, updateSetting } = useSettings();
   const compactMode = settings.visuals.compactMode;
   const {
     qData, currentPrice, refPrice, limitUp, limitDown, highPrice, lowPrice, isSimulation,
-    isStale, tableRef, hasScrolled, flashDir,
+    isStale, flashDir,
     orderValue, setOrderValue, orderType, setOrderType, priceType, setPriceType,
     orderCond, setOrderCond, orderLot, setOrderLot,
     isSyncing, handleManualSync,
     workingBuyMap, workingSellMap, currentPosition,
     handlePlaceOrder, handleCancelOrder, handleAddStopOrder, handleDropOrder,
-    orderFeedback, smartOrders, bData,
+    handleChaseOrder, handleMarketOrder,
+    chaseMode, setChaseMode,
+    orderFeedback, replacingOrder, smartOrders, bData,
+    splitProgress, abortSplit,
     targetSymbol, accounts, activeAccount, selectAccount,
     hotkeys, accountEquity,
-  } = logic;
+  } = useDOMLogic();
+
+  // Sprint C：鋪單（多價位掛單）— 獨立於拆單的送出/中止/撤單邏輯
+  const { layProgress, abortLay, submitLay, laidOrders, cancelLaid } = useLayOrders();
+  const [showLayPanel, setShowLayPanel] = useState(false);
+
+  // Sprint D：五檔委託牆熱力圖 — ladder 上方緊湊區的可切換視圖（預設關閉，
+  // 一次性 UI 狀態不持久化；ladder 本體是 flex-1 overflow-auto，不會被擠壓變形）
+  const [showDepthWall, setShowDepthWall] = useState(false);
+
+  // ladder scroll 狀態（local ref — 不進 hook，避免跨模組改動 ref.current）
+  const tableRef = useRef<HTMLDivElement>(null);
+  const hasScrolledRef = useRef(false);
 
   // --- 損益重算 ---
   const netQty = currentPosition ? (currentPosition.direction === 'Buy' ? currentPosition.qty : -currentPosition.qty) : 0;
@@ -42,23 +64,22 @@ export const DOMPanel: React.FC = () => {
       const localPnl = Math.round((cp - currentPosition.price) * netQty * multiplier);
       if (localPnl !== 0) return localPnl;
     }
-    return (currentPosition as any)?.backendPnl || 0;
+    return (currentPosition as (AccountPosition & { backendPnl?: number }) | null)?.backendPnl || 0;
   }, [currentPrice, refPrice, currentPosition, netQty, targetSymbol]);
 
   // --- 核心：以參考價為中心展開 500 檔價格 ---
-  const [priceBase, setPriceBase] = useState(0);
-
-  useEffect(() => {
-    if (refPrice > 0) {
-      setPriceBase(prev => prev === 0 || prev !== refPrice ? refPrice : prev);
-    } else if (currentPrice > 0 && priceBase === 0) {
-      setPriceBase(currentPrice);
-    }
-  }, [refPrice, currentPrice, priceBase]);
-
-  useEffect(() => {
-    setPriceBase(0);
-  }, [targetSymbol]);
+  // 錨定價：有參考價用參考價；沒有就黏滯在「第一筆成交價」（避免每 tick 重建 ladder）。
+  // 切換商品歸零。用 render 期 guarded setState（derived-state 模式）取代 effect 內同步 setState。
+  const [baseState, setBaseState] = useState<{ symbol: string; price: number }>(
+    { symbol: targetSymbol, price: 0 },
+  );
+  const carriedBase = baseState.symbol === targetSymbol ? baseState.price : 0;
+  const priceBase = refPrice > 0
+    ? refPrice
+    : (carriedBase === 0 && currentPrice > 0 ? currentPrice : carriedBase);
+  if (baseState.symbol !== targetSymbol || baseState.price !== priceBase) {
+    setBaseState({ symbol: targetSymbol, price: priceBase });
+  }
 
   const fullPrices = React.useMemo(() => {
     if (priceBase <= 0) return [];
@@ -107,16 +128,23 @@ export const DOMPanel: React.FC = () => {
     scrollToAnchor('price');
   }, [scrollToAnchor]);
 
-  useEffect(() => {
-    if (currentPrice > 0 && fullPrices.length > 0 && !hasScrolled.current) {
-      hasScrolled.current = true;
-      setTimeout(() => scrollToCurrentPrice(), 100);
-    }
-  }, [currentPrice, fullPrices, scrollToCurrentPrice, hasScrolled]);
+  // DOMHeader 的 onClick 會把 MouseEvent 當第一個參數傳入 —— 不能直接把
+  // scrollToAnchor 傳下去（event 會被當成 anchorOverride）；穩定包一層
+  // 讓 DOMHeader 的 React.memo 真的能擋掉重繪
+  const handleScrollToAnchor = React.useCallback(() => {
+    scrollToAnchor();
+  }, [scrollToAnchor]);
 
   useEffect(() => {
-    hasScrolled.current = false;
-  }, [targetSymbol, hasScrolled]);
+    if (currentPrice > 0 && fullPrices.length > 0 && !hasScrolledRef.current) {
+      hasScrolledRef.current = true;
+      setTimeout(() => scrollToCurrentPrice(), 100);
+    }
+  }, [currentPrice, fullPrices, scrollToCurrentPrice]);
+
+  useEffect(() => {
+    hasScrolledRef.current = false;
+  }, [targetSymbol]);
 
   // ★ 跟隨價格：每 10 秒檢查當前價是不是還在可視範圍。若飄出去就靜默捲回。
   //   不直接綁在 price tick 上，避免使用者手動滾動研究 ladder 時被搶回去。
@@ -162,6 +190,44 @@ export const DOMPanel: React.FC = () => {
   }, [tableRef, currentPrice]);
 
 
+  const handleFlatten = React.useCallback(async () => {
+    // 平倉確認：戰鬥模式跳過；否則若開啟平倉確認則先問
+    if (settings.confirmations.flatten && !settings.isCombatMode) {
+      const ok = await confirm({
+        title: '一鍵平倉',
+        message: `確認一鍵平倉 ${targetSymbol}？\n將以市價清空當前商品所有部位。`,
+        confirmLabel: '確認平倉',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    try {
+      await apiClient.post('/flatten', { symbol: targetSymbol });
+      toast.success(`${targetSymbol} 平倉指令已送出`);
+    } catch (e) {
+      handleApiError(e, '平倉失敗');
+    }
+  }, [targetSymbol, toast, confirm, handleApiError, settings.confirmations.flatten, settings.isCombatMode]);
+
+  const handleReverse = React.useCallback(async () => {
+    // 反手是「開新倉」，比平倉更該確認；戰鬥模式跳過
+    if (settings.confirmations.flatten && !settings.isCombatMode) {
+      const ok = await confirm({
+        title: '一鍵反手',
+        message: `確認一鍵反手 ${targetSymbol}？（平倉後反向開倉）`,
+        confirmLabel: '確認反手',
+        danger: true,
+      });
+      if (!ok) return;
+    }
+    try {
+      await apiClient.post('/reverse', { symbol: targetSymbol });
+      toast.success(`${targetSymbol} 反手指令已送出`);
+    } catch (e) {
+      handleApiError(e, '反手失敗');
+    }
+  }, [targetSymbol, toast, confirm, handleApiError, settings.confirmations.flatten, settings.isCombatMode]);
+
   // ★ 全域快捷鍵監聽
   useEffect(() => {
     const onKeyDown = async (e: KeyboardEvent) => {
@@ -177,7 +243,7 @@ export const DOMPanel: React.FC = () => {
         const N = Number(e.key);
         const mode: SizingMode = settings.sizing.mode;
         if (mode === 'lots') {
-          logic.setOrderValue(N);
+          setOrderValue(N);
         } else if (mode === 'amount') {
           updateSetting({
             sizing: { ...settings.sizing, amount: N * settings.sizing.hotkeyAmountUnit },
@@ -193,7 +259,7 @@ export const DOMPanel: React.FC = () => {
         return;
       }
 
-      const matched = hotkeys.find((hk: any) => hk.key === e.key);
+      const matched = hotkeys.find((hk) => hk.key === e.key);
       if (!matched) return;
 
       e.preventDefault();
@@ -212,38 +278,32 @@ export const DOMPanel: React.FC = () => {
           break;
         case 'Flatten':
           // B1 fix: 平倉前必須兩側都撤單，否則殘留掛單會被吃進新部位
-          logic.handleCancelOrder('Buy');
-          logic.handleCancelOrder('Sell');
+          handleCancelOrder('Buy');
+          handleCancelOrder('Sell');
           await handleFlatten();
           break;
         case 'ScrollCenter':
           scrollToCurrentPrice();
           break;
+        // UX 批次 4 Item 8：追買（賣一價掛買）/ 追賣（買一價掛賣）/ 市價單。
+        // 走 handleChaseOrder / handleMarketOrder → 尊重戰鬥模式與確認流。
+        case 'ChaseBuy':
+          handleChaseOrder('Buy');
+          break;
+        case 'ChaseSell':
+          handleChaseOrder('Sell');
+          break;
+        case 'MarketBuy':
+          handleMarketOrder('Buy');
+          break;
+        case 'MarketSell':
+          handleMarketOrder('Sell');
+          break;
       }
     };
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
-  }, [hotkeys, handlePlaceOrder, handleCancelOrder, scrollToCurrentPrice, currentPrice, refPrice, targetSymbol, logic, settings.sizing, updateSetting]);
-
-  const handleFlatten = async () => {
-    try {
-      await apiClient.post('/flatten', { symbol: targetSymbol });
-      toast.success(`${targetSymbol} 平倉指令已送出`);
-    } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '平倉失敗');
-    }
-  };
-
-  const handleReverse = async () => {
-    try {
-      await apiClient.post('/reverse', { symbol: targetSymbol });
-      toast.success(`${targetSymbol} 反手指令已送出`);
-    } catch (e) {
-      const err = normalizeApiError(e);
-      toast.error(err.user_msg || '反手失敗');
-    }
-  };
+  }, [hotkeys, handlePlaceOrder, handleCancelOrder, handleFlatten, handleChaseOrder, handleMarketOrder, scrollToCurrentPrice, currentPrice, refPrice, setOrderValue, settings.sizing, updateSetting]);
 
 
   return (
@@ -258,23 +318,80 @@ export const DOMPanel: React.FC = () => {
         orderValue={orderValue} setOrderValue={setOrderValue}
         accountEquity={accountEquity}
         scrollAnchor={scrollAnchor} setScrollAnchor={setScrollAnchor}
-        onScrollToAnchor={() => scrollToAnchor()}
+        onScrollToAnchor={handleScrollToAnchor}
+        chaseMode={chaseMode} setChaseMode={setChaseMode}
+        showDepthWall={showDepthWall} setShowDepthWall={setShowDepthWall}
       />
-      
+
+      {/* 追價模式常駐警示帶：點價 / 追買追賣熱鍵改送 CHASE 智慧單 */}
+      {chaseMode && (
+        <div className="flex-shrink-0 px-3 py-1 bg-sky-500/15 border-y border-sky-500/40 text-sky-300 text-[11px] font-bold text-center tracking-wide">
+          ⛨ 追價模式：點價／追買追賣熱鍵送出 CHASE 追價智慧單（市價熱鍵與刪單不受影響）
+        </div>
+      )}
+
+      {/* 市價模式常駐警示帶：非 LMT 時點擊任意檔位都會直接以市價送出 */}
+      {priceType !== 'LMT' && (
+        <div className="flex-shrink-0 px-3 py-1 bg-amber-500/15 border-y border-amber-500/40 text-amber-300 text-[11px] font-bold text-center tracking-wide">
+          ⚡ 市價模式：點擊任意價位即以市價送出
+        </div>
+      )}
+
+      {/* Sprint D：五檔委託牆熱力圖（ladder 上方緊湊區；固定高度、不擠壓可捲動的 ladder） */}
+      {showDepthWall && <DepthHeatmap targetSymbol={targetSymbol} />}
+
       <div ref={tableRef} className="flex-1 overflow-auto bg-black/10 custom-scrollbar">
         <DOMTable
           fullPrices={fullPrices} isStale={isStale} compactMode={compactMode} qData={qData} currentPrice={currentPrice} refPrice={refPrice}
           limitUp={limitUp} limitDown={limitDown} highPrice={highPrice} lowPrice={lowPrice} targetSymbol={targetSymbol}
           currentPosition={currentPosition} flashDir={flashDir} smartOrders={smartOrders}
           workingBuyMap={workingBuyMap} workingSellMap={workingSellMap} bData={bData}
-          orderFeedback={orderFeedback} handleAddStopOrder={handleAddStopOrder} handleCancelOrder={handleCancelOrder}
+          orderFeedback={orderFeedback} replacingOrder={replacingOrder}
+          handleAddStopOrder={handleAddStopOrder} handleCancelOrder={handleCancelOrder}
           handlePlaceOrder={handlePlaceOrder} handleDropOrder={handleDropOrder}
         />
       </div>
 
-      <DOMFooter 
+      {/* Sprint C：鋪單面板（緊湊 section；進度/中止/撤鋪單都在面板內） */}
+      {showLayPanel && (
+        <LayOrdersPanel
+          targetSymbol={targetSymbol} currentPrice={currentPrice} bData={bData}
+          orderCond={orderCond} orderLot={orderLot}
+          layProgress={layProgress} abortLay={abortLay} submitLay={submitLay}
+          laidOrders={laidOrders} cancelLaid={cancelLaid}
+          onClose={() => setShowLayPanel(false)}
+        />
+      )}
+
+      {/* 拆單進度列：大單連送時顯示進度 + 中止按鈕 */}
+      {splitProgress && !splitProgress.aborted && (
+        <div className="flex-shrink-0 px-3 py-1.5 bg-sky-500/10 border-t border-sky-500/40 flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2 min-w-0">
+            <span className="text-[11px] font-black text-sky-300 tabular-nums whitespace-nowrap">
+              拆單 {splitProgress.sent}/{splitProgress.total}
+            </span>
+            <div className="w-32 h-1.5 rounded-full bg-slate-800 overflow-hidden">
+              <div
+                className="h-full bg-sky-400 transition-all duration-200"
+                style={{ width: `${(splitProgress.sent / Math.max(1, splitProgress.total)) * 100}%` }}
+              />
+            </div>
+          </div>
+          <button
+            onClick={abortSplit}
+            className="px-2.5 py-0.5 rounded text-[10px] font-black bg-red-900/40 hover:bg-red-800/60 text-red-300 border border-red-800/60 transition-colors cursor-pointer"
+            title="停止送出剩餘批次（已送出的不受影響）"
+          >
+            中止
+          </button>
+        </div>
+      )}
+
+      <DOMFooter
         isSyncing={isSyncing} handleManualSync={handleManualSync} handleCancelOrder={handleCancelOrder}
         handleFlatten={handleFlatten} handleReverse={handleReverse}
+        layPanelOpen={showLayPanel} onToggleLayPanel={() => setShowLayPanel((v) => !v)}
+        laidCount={laidOrders.length}
       />
     </div>
   );

@@ -1,8 +1,17 @@
+/* eslint-disable react-refresh/only-export-components --
+ * Context Provider 與 hook 需同檔共享；改動本檔會整頁 HMR reload，可接受 */
 import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { apiClient } from '../api/client';
+import { configureSound } from '../utils/sound';
 import type { SizingMode } from '../utils/sizing';
 import type { FeeConfig } from '../utils/fees';
 import { DEFAULT_FEE_CONFIG } from '../utils/fees';
+import type { ChaseFinalAction } from '../utils/chase';
+import type { ChartIndicatorSettings } from '../utils/chartIndicatorSettings';
+import {
+  defaultChartIndicatorSettings,
+  normalizeChartIndicatorSettings,
+} from '../utils/chartIndicatorSettings';
 
 /** Sprint 28：智慧下單尺寸。
  *  mode 決定按下下單時最終口數的來源：
@@ -23,10 +32,21 @@ export interface SizingSettings {
 }
 
 // 快捷鍵行為定義
+// UX 批次 4 Item 8：新增追買（賣一價掛買）/ 追賣（買一價掛賣）/ 市價買賣。
+// 「市價單送出」拆成買/賣兩個 action —— 無方向的市價熱鍵在交易終端太危險。
 export interface HotkeyItem {
   key: string;          // e.g. "F1", "Escape", "q", " "
-  action: 'Buy' | 'Sell' | 'CancelAll' | 'Flatten' | 'ScrollCenter';
+  action: 'Buy' | 'Sell' | 'CancelAll' | 'Flatten' | 'ScrollCenter'
+        | 'ChaseBuy' | 'ChaseSell' | 'MarketBuy' | 'MarketSell';
   label: string;
+}
+
+/** Sprint C：追價（CHASE）智慧單預設參數。
+ *  maxChaseTicks → max_chase_ticks；finalAction → final_action。
+ *  reprice_ticks / reprice_interval_ms 用 utils/chase.ts 的預設值，不開放設定。 */
+export interface ChaseSettings {
+  maxChaseTicks: number;
+  finalAction: ChaseFinalAction;
 }
 
 // 拆單設定
@@ -52,7 +72,6 @@ export interface Settings {
   visuals: {
     showVWAP: boolean;
     showHL: boolean;
-    showVolumeProfile: boolean;
     fontSize: number;
     compactMode: boolean;     // ★ Sprint 10 R7a：DOM row 高度 h-8 → h-6（多 ~33% 可視檔位）
   };
@@ -71,6 +90,11 @@ export interface Settings {
       fill: boolean;
       risk_breach: boolean;
     };
+    /** 操作音效（下單 / 刪單 / 改單 / 成交提示音）開關與音量（0–1） */
+    sound: {
+      enabled: boolean;
+      volume: number;
+    };
   };
   /** Sprint 23：自選清單跨裝置同步 — 從 localStorage 搬進 SettingsContext，
    *  自動透過 /api/user_settings 跨裝置同步。 */
@@ -85,6 +109,10 @@ export interface Settings {
   showNetPnL: boolean;
   /** Sprint 31 / 34：版面 preset。custom = 沿用使用者拖曳儲存的版面（向後相容預設）。 */
   layoutPreset: 'momentum' | 'daytrade' | 'swing' | 'marketwatch' | 'custom';
+  /** Sprint C：DOM 追價模式送出 CHASE 智慧單時的預設參數 */
+  chase: ChaseSettings;
+  /** Sprint E：圖表技術指標系統 — 啟用清單 + 參數 + 線樣式 + 收藏 + 自訂 JS 指標（含 code） */
+  chart: ChartIndicatorSettings;
 }
 
 /** 單一價格警報。symbol 是 canonical symbol。op above = 價格 >= price；below = <=。 */
@@ -110,7 +138,6 @@ const DEFAULT_SETTINGS: Settings = {
   visuals: {
     showVWAP: true,
     showHL: true,
-    showVolumeProfile: true,
     fontSize: 12,
     compactMode: false,
   },
@@ -121,6 +148,11 @@ const DEFAULT_SETTINGS: Settings = {
     { key: 'Escape', action: 'CancelAll',    label: '全刪掛單' },
     { key: 'Delete', action: 'Flatten',      label: '全部平倉' },
     { key: ' ',      action: 'ScrollCenter', label: '置中 (捲動到現價)' },
+    // UX 批次 4 Item 8
+    { key: 'q',      action: 'ChaseBuy',     label: '追買 (賣一價掛買)' },
+    { key: 'w',      action: 'ChaseSell',    label: '追賣 (買一價掛賣)' },
+    { key: 'a',      action: 'MarketBuy',    label: '市價買進' },
+    { key: 's',      action: 'MarketSell',   label: '市價賣出' },
   ],
   splitOrder: {
     enabled: false,
@@ -134,6 +166,7 @@ const DEFAULT_SETTINGS: Settings = {
   notifications: {
     webhookUrl: '',
     events: { fill: false, risk_breach: false },
+    sound: { enabled: true, volume: 0.6 },
   },
   watchlist: ['TXFR1', 'MXFR1', '2330', '2454', '0050'],
   priceAlerts: [],
@@ -149,7 +182,27 @@ const DEFAULT_SETTINGS: Settings = {
   fees: DEFAULT_FEE_CONFIG,
   showNetPnL: false,
   layoutPreset: 'custom',
+  chase: {
+    maxChaseTicks: 10,
+    finalAction: 'GIVE_UP',
+  },
+  chart: defaultChartIndicatorSettings(),
 };
+
+/** 舊版（localStorage / 後端）存的 hotkeys 沒有新 action（追買/追賣/市價）
+ *  → 用預設補齊缺少的 action；使用者已占用的按鍵不覆蓋（避免衝突）。 */
+function mergeHotkeys(saved: unknown): HotkeyItem[] {
+  const base = Array.isArray(saved)
+    ? (saved as HotkeyItem[]).filter((h) => h && typeof h.key === 'string' && typeof h.action === 'string')
+    : [];
+  if (base.length === 0) return DEFAULT_SETTINGS.hotkeys;
+  const existingActions = new Set(base.map((h) => h.action));
+  const usedKeys = new Set(base.map((h) => h.key));
+  const additions = DEFAULT_SETTINGS.hotkeys.filter(
+    (d) => !existingActions.has(d.action) && !usedKeys.has(d.key),
+  );
+  return additions.length > 0 ? [...base, ...additions] : base;
+}
 
 interface SettingsContextType {
   settings: Settings;
@@ -174,12 +227,13 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ...parsed,
           confirmations: { ...DEFAULT_SETTINGS.confirmations, ...parsed.confirmations },
           visuals: { ...DEFAULT_SETTINGS.visuals, ...parsed.visuals },
-          hotkeys: parsed.hotkeys || DEFAULT_SETTINGS.hotkeys,
+          hotkeys: mergeHotkeys(parsed.hotkeys),
           splitOrder: { ...DEFAULT_SETTINGS.splitOrder, ...parsed.splitOrder },
           qtyBySymbol: { ...DEFAULT_SETTINGS.qtyBySymbol, ...(parsed.qtyBySymbol || {}) },
           notifications: {
             webhookUrl: parsed.notifications?.webhookUrl ?? DEFAULT_SETTINGS.notifications.webhookUrl,
             events: { ...DEFAULT_SETTINGS.notifications.events, ...(parsed.notifications?.events || {}) },
+            sound: { ...DEFAULT_SETTINGS.notifications.sound, ...(parsed.notifications?.sound || {}) },
           },
           watchlist: Array.isArray(parsed.watchlist) ? parsed.watchlist : DEFAULT_SETTINGS.watchlist,
           priceAlerts: Array.isArray(parsed.priceAlerts) ? parsed.priceAlerts : DEFAULT_SETTINGS.priceAlerts,
@@ -187,6 +241,8 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           fees: { ...DEFAULT_SETTINGS.fees, ...(parsed.fees || {}) },
           showNetPnL: typeof parsed.showNetPnL === 'boolean' ? parsed.showNetPnL : DEFAULT_SETTINGS.showNetPnL,
           layoutPreset: parsed.layoutPreset || DEFAULT_SETTINGS.layoutPreset,
+          chase: { ...DEFAULT_SETTINGS.chase, ...(parsed.chase || {}) },
+          chart: normalizeChartIndicatorSettings(parsed.chart),
         };
       } catch (e) {
         console.error("Failed to parse settings from localStorage", e);
@@ -208,10 +264,18 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
           ...remote,
           confirmations: { ...prev.confirmations, ...(remote.confirmations || {}) },
           visuals: { ...prev.visuals, ...(remote.visuals || {}) },
-          hotkeys: remote.hotkeys || prev.hotkeys,
+          hotkeys: mergeHotkeys(remote.hotkeys || prev.hotkeys),
           splitOrder: { ...prev.splitOrder, ...(remote.splitOrder || {}) },
           sizing: { ...prev.sizing, ...(remote.sizing || {}) },
           fees: { ...prev.fees, ...(remote.fees || {}) },
+          chase: { ...prev.chase, ...(remote.chase || {}) },
+          chart: remote.chart ? normalizeChartIndicatorSettings(remote.chart) : prev.chart,
+          notifications: {
+            ...prev.notifications,
+            ...(remote.notifications || {}),
+            events: { ...prev.notifications.events, ...(remote.notifications?.events || {}) },
+            sound: { ...prev.notifications.sound, ...(remote.notifications?.sound || {}) },
+          },
         }));
       }
       hydratedFromServerRef.current = true;
@@ -220,6 +284,11 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     });
     return () => { cancelled = true; };
   }, []);
+
+  // 音效開關/音量 → 注入 utils/sound 的模組層級設定（playSound 免 context 穿透）
+  useEffect(() => {
+    configureSound(settings.notifications.sound);
+  }, [settings.notifications.sound]);
 
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
@@ -248,6 +317,10 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
       if (updates.splitOrder) next.splitOrder = { ...prev.splitOrder, ...updates.splitOrder };
       if (updates.sizing) next.sizing = { ...prev.sizing, ...updates.sizing };
       if (updates.fees) next.fees = { ...prev.fees, ...updates.fees };
+      if (updates.chase) next.chase = { ...prev.chase, ...updates.chase };
+      // chart：active/custom 為陣列（整組替換語意）,不做深 merge；
+      // IndicatorPicker 一律以 functional update 寫入完整物件
+      if (updates.chart) next.chart = { ...prev.chart, ...updates.chart };
       return next;
     });
   };

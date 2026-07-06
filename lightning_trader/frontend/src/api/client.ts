@@ -1,24 +1,49 @@
 import axios, { AxiosError } from 'axios';
+import { getApiToken, resolveApiBaseUrl } from '../utils/backendUrl';
 
 export interface LighTradeApiError {
   status: number;
   code: string;
   user_msg: string;
   level?: 'block' | 'warning';
+  /** RiskManager WARNING 明細（例：市價單、價格偏離），409 CONFIRM_REQUIRED 會帶 */
+  warnings?: string[];
   raw?: AxiosError;
+}
+
+interface ApiErrorDetail {
+  code?: string;
+  user_msg?: string;
+  message?: string;
+  detail?: string;
+  level?: string;
+  warnings?: unknown;
 }
 
 export const normalizeApiError = (err: unknown): LighTradeApiError => {
   if (axios.isAxiosError(err)) {
     const axiosError = err as AxiosError;
-    const errorData = axiosError.response?.data as any;
-    const detail = errorData?.detail || {};
-    
+    const errorData = axiosError.response?.data as { detail?: ApiErrorDetail | string } | undefined;
+
+    // 部分後端 endpoint 直接 raise HTTPException(detail="訊息字串")：
+    // detail 是純字串而非結構化物件，直接把它當 user_msg 呈現
+    if (typeof errorData?.detail === 'string') {
+      return {
+        status: axiosError.response?.status || 500,
+        code: 'API_ERROR',
+        user_msg: errorData.detail,
+        raw: axiosError,
+      };
+    }
+
+    const detail: ApiErrorDetail = errorData?.detail || {};
+
     return {
       status: axiosError.response?.status || 500,
       code: detail.code || axiosError.code || 'UNKNOWN_ERROR',
       user_msg: detail.user_msg || detail.message || detail.detail || axiosError.message || 'API 請求發生錯誤',
       level: (detail.level === 'block' || detail.level === 'warning') ? detail.level : undefined,
+      warnings: Array.isArray(detail.warnings) ? detail.warnings.map(String) : undefined,
       raw: axiosError,
     };
   }
@@ -28,20 +53,22 @@ export const normalizeApiError = (err: unknown): LighTradeApiError => {
   return { status: 500, code: 'UNKNOWN_ERROR', user_msg: String(err) || '發生未知錯誤' };
 };
 
-// Electron packaged build 跑 file:// 協議時，window.location.hostname 會是空字串，
-// 導致 baseURL 組成 "http://:8000/api" 這種無效 URL。
-// 固定指向 127.0.0.1；Electron 與瀏覽器 dev 都走本機 backend。
-const BACKEND_HOST =
-  window.location.protocol === 'file:' || !window.location.hostname
-    ? '127.0.0.1'
-    : window.location.hostname;
-
 export const apiClient = axios.create({
-  baseURL: `http://${BACKEND_HOST}:8000/api`,
+  baseURL: resolveApiBaseUrl(),
   timeout: 30000, // Shioaji 登入可能需要 10-15 秒
   headers: {
     'Content-Type': 'application/json',
   },
+});
+
+// 選配 API Token：後端設定 LIGHTRADE_API_TOKEN 時，所有 /api/* 請求
+// （/api/health 除外）都必須帶 X-API-Token header。Token 由 SettingsModal 維護。
+apiClient.interceptors.request.use((config) => {
+  const token = getApiToken();
+  if (token && config.url !== '/health') {
+    config.headers.set('X-API-Token', token);
+  }
+  return config;
 });
 
 export const getPositions = async (accountId?: string) => {

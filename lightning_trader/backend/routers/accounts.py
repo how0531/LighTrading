@@ -72,7 +72,7 @@ async def login(req: LoginRequest, request: Request):
     )
 
     try:
-        success = await shared.run_in_qt_thread(
+        success = await shared.run_in_broker_thread(
             shared.shioaji_client.login,
             api_key=api_key, secret_key=secret_key,
             simulation=req.simulation,
@@ -99,18 +99,21 @@ async def login(req: LoginRequest, request: Request):
 @router.post("/set_active_account")
 async def set_active_account(req: AccountSwitchRequest):
     """切換活躍帳號"""
-    success = await shared.run_in_qt_thread(shared.shioaji_client.set_active_account, req.account_id)
+    success = await shared.run_in_broker_thread(shared.shioaji_client.set_active_account, req.account_id)
     if success:
         return {"status": "success", "message": f"帳號已切換"}
     else:
-        raise HTTPException(status_code=400, detail="切換帳號失敗")
+        raise HTTPException(status_code=400, detail={
+            "code": "ACCOUNT_SWITCH_FAILED",
+            "user_msg": "切換帳號失敗",
+        })
 
 
 @router.get("/positions")
 async def get_positions(account_id: str = None):
     """獲取目前的持倉部位，支援依 account_id 篩選"""
     try:
-        results = await shared.run_in_qt_thread(shared.shioaji_client.list_positions)
+        results = await shared.run_in_broker_thread(shared.shioaji_client.list_positions)
         if account_id:
             results = [p for p in results if p.get("account", "") == account_id]
         return results
@@ -123,7 +126,7 @@ async def get_positions(account_id: str = None):
 async def get_account_balance():
     """獲取帳戶餘額 (保證金)"""
     try:
-        balance = await shared.run_in_qt_thread(shared.shioaji_client.get_account_balance)
+        balance = await shared.run_in_broker_thread(shared.shioaji_client.get_account_balance)
         if balance:
             return {
                 "equity": float(getattr(balance, 'equity', 0)),
@@ -142,11 +145,11 @@ async def get_order_history(account_id: str = None):
     """獲取當日委託/成交紀錄"""
     try:
         try:
-            await shared.run_in_qt_thread(shared.shioaji_client.api.update_status)
+            await shared.run_in_broker_thread(shared.shioaji_client.api.update_status)
         except Exception:
             pass
 
-        trades = await shared.run_in_qt_thread(shared.shioaji_client.get_order_history)
+        trades = await shared.run_in_broker_thread(shared.shioaji_client.get_order_history)
         trade_list = []
 
         if trades and logger.isEnabledFor(logging.DEBUG):
@@ -197,7 +200,7 @@ async def get_order_history(account_id: str = None):
 async def get_accounts():
     """獲取所有可用帳號資訊"""
     try:
-        return await shared.run_in_qt_thread(shared.shioaji_client.get_all_accounts)
+        return await shared.run_in_broker_thread(shared.shioaji_client.get_all_accounts)
     except Exception as e:
         logger.error(f"獲取帳號列表失敗: {e}")
         return []
@@ -216,10 +219,42 @@ async def get_kbars(symbol: str, days: int = 1):
         return []
     try:
         days = max(1, min(30, int(days)))   # 限制 1~30 日
-        return await shared.run_in_qt_thread(shared.shioaji_client.get_kbars, sym, days)
+        return await shared.run_in_broker_thread(shared.shioaji_client.get_kbars, sym, days)
     except Exception as e:
         logger.error(f"get_kbars endpoint 失敗: {e}")
         return []
+
+
+class UnwatchRequest(BaseModel):
+    symbols: list[str]
+
+
+@router.post("/unwatch")
+async def unwatch(req: UnwatchRequest):
+    """
+    UX 批次 4 Item 10：退訂背景報價（自選清單移除商品時前端呼叫）。
+
+    對每個 symbol 呼叫 shioaji_client.unsubscribe_background（單一 broker 執行緒），
+    core 端會保護：持倉商品、當前 DOM 主商品不退訂（見 unsubscribe_background docstring）。
+    """
+    if not getattr(shared.shioaji_client, "_is_connected", False):
+        return {"status": "success", "removed": [], "skipped": [
+            s.strip().upper() for s in req.symbols if isinstance(s, str) and s.strip()
+        ]}
+    removed: list[str] = []
+    skipped: list[str] = []
+    for s in req.symbols[:30]:   # 與 watch 相同上限
+        if not isinstance(s, str) or not s.strip():
+            continue
+        sym = s.strip().upper()
+        try:
+            ok = await shared.run_in_broker_thread(
+                shared.shioaji_client.unsubscribe_background, sym)
+        except Exception as e:
+            logger.warning(f"unwatch 退訂 {sym} 失敗: {e}")
+            ok = False
+        (removed if ok else skipped).append(sym)
+    return {"status": "success", "removed": removed, "skipped": skipped}
 
 
 # 離線常用股票中文名稱資料庫。
@@ -274,7 +309,7 @@ async def search_symbols(q: str, limit: int = 20):
         return offline_results[:limit]
         
     try:
-        online_results = await shared.run_in_qt_thread(shared.shioaji_client.search_contracts, q.strip(), limit)
+        online_results = await shared.run_in_broker_thread(shared.shioaji_client.search_contracts, q.strip(), limit)
         if not isinstance(online_results, list):
             online_results = []
             
@@ -324,32 +359,20 @@ async def sync_all():
     """
     client = shared.shioaji_client
     if not getattr(client, "_is_connected", False):
-        raise HTTPException(status_code=409, detail="尚未登入，無法同步")
+        raise HTTPException(status_code=409, detail={
+            "code": "NOT_LOGGED_IN",
+            "user_msg": "尚未登入，無法同步",
+        })
 
     try:
         # 1. update_status：強制券商主機把外部 session 的單也同步回來
-        await shared.run_in_qt_thread(client.api.update_status)
-        # 2. list_trades → 活躍委託快照
-        trades = await shared.run_in_qt_thread(client.get_order_history)
-        active_statuses = {"PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"}
-        working = []
-        from shioaji.constant import Action as _Action
-        for t in trades:
-            status_name = t.status.status.name if hasattr(t.status, "status") else getattr(t.status, "name", "Unknown")
-            if status_name not in active_statuses:
-                continue
-            raw_symbol = getattr(t.contract, "symbol", "") or getattr(t.contract, "code", "")
-            working.append({
-                "symbol": raw_symbol,
-                "action": "Buy" if t.order.action == _Action.Buy else "Sell",
-                "price": float(t.order.price),
-                "qty": t.order.quantity,
-                "filled_qty": getattr(t.status, "deal_quantity", getattr(t.status, "filled_quantity", 0)),
-                "status": status_name,
-                "order_id": getattr(t.order, "id", getattr(t.order, "seqno", "")),
-            })
+        await shared.run_in_broker_thread(client.api.update_status)
+        # 2. list_trades → 活躍委託快照（與 orders.py / order_sync 共用 builder）
+        from backend.services.order_sync import build_working_orders
+        trades = await shared.run_in_broker_thread(client.get_order_history)
+        working = build_working_orders(trades)
         # 3. list_positions
-        positions = await shared.run_in_qt_thread(client.list_positions)
+        positions = await shared.run_in_broker_thread(client.list_positions)
         # 4. 觸發一次帳務廣播
         try:
             client.trigger_account_update()
@@ -363,4 +386,7 @@ async def sync_all():
         }
     except Exception as e:
         logger.error(f"sync_all 失敗: {e}", exc_info=True)
-        raise HTTPException(status_code=500, detail="同步失敗")
+        raise HTTPException(status_code=500, detail={
+            "code": "SYNC_FAILED",
+            "user_msg": "同步失敗",
+        })

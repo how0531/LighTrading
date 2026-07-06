@@ -50,6 +50,13 @@ def on_shioaji_quote(quote_data: dict):
             if any(bidask_data["AskPrice"]) or any(bidask_data["BidPrice"]):
                 items_to_send.append({"type": "BidAsk", "data": bidask_data})
 
+                # 發送給 EventBus 供 CHASE 追價引擎追蹤最佳對手價
+                # （與 on_tick 同模式：這裡是 on_bidask 唯一的發射點）
+                try:
+                    shared.engine.event_bus.on_bidask.emit(symbol, bidask_data)
+                except Exception as e:
+                    logger.error(f"EventBus emit on_bidask error: {e}")
+
         if has_tick:
             p_val = float(_val(q.get('Close', q.get('close', q.get('Price', 0)))))
             v_val = int(_val(q.get('Volume', q.get('volume', 0))))
@@ -69,14 +76,19 @@ def on_shioaji_quote(quote_data: dict):
             ref = float(_val(q.get('Reference', q.get('reference', 0))))
             lu = float(_val(q.get('LimitUp', q.get('limit_up', 0))))
             ld = float(_val(q.get('LimitDown', q.get('limit_down', 0))))
+            # 交易所當日累計量（前端不再自行累加，避免重連/重訂閱時重複計數）
+            tv = int(_val(q.get('TotalVolume', q.get('total_volume', 0))))
             if ref > 0: tick_data["Reference"] = ref
             if lu > 0: tick_data["LimitUp"] = lu
             if ld > 0: tick_data["LimitDown"] = ld
+            if tv > 0: tick_data["TotalVolume"] = tv
 
             if p_val > 0 or ref > 0 or v_val > 0:
                 items_to_send.append({"type": "Tick", "data": tick_data})
 
-            # 發送給 EventBus 供洗價引擎使用
+            # 發送給 EventBus 供洗價引擎 / RiskManager / PnL 使用。
+            # ★ 這裡是 on_tick 唯一的發射點（shioaji_client 的 v1 回呼不再重複 emit，
+            #   避免智慧單等消費者每個 tick 被觸發兩次）
             if p_val > 0:
                 try:
                     shared.engine.event_bus.on_tick.emit(symbol, tick_data)
@@ -143,10 +155,19 @@ def on_shioaji_trade_update(trade_data: dict):
         if shared.fastapi_loop:
             shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg_item)
 
-        # ★ 通知 pnl_broadcaster：成交 → 持倉變動 → 作廢快取
+        # ★ Sprint 14：每筆 Deal/Fill 落地到 SQLite journal（極短 IO，~1ms，不會卡 tick）
         try:
-            from backend.services import pnl_broadcaster as pb
-            pb.on_fill_event(trade_data)
+            from backend.services import trade_journal
+            trade_journal.record_trade(trade_data)
+        except Exception:
+            pass
+
+        # ★ 成交共用副作用（on_fill 事件 / PnL 快取作廢 / 已實現重算排程）
+        #   —— 與 order_sync 對帳路徑共用同一個 helper
+        try:
+            from backend.services.trade_journal import extract_fill
+            from backend.services.order_guard import fill_side_effects
+            fill_side_effects(extract_fill(trade_data))
         except Exception:
             pass
 
@@ -155,13 +176,6 @@ def on_shioaji_trade_update(trade_data: dict):
             from backend.services.pnl_broadcaster import subscribe_position_contracts
             if shared.fastapi_loop:
                 asyncio.run_coroutine_threadsafe(subscribe_position_contracts(), shared.fastapi_loop)
-        except Exception:
-            pass
-
-        # ★ Sprint 14：每筆 Deal/Fill 落地到 SQLite journal（極短 IO，~1ms，不會卡 tick）
-        try:
-            from backend.services import trade_journal
-            trade_journal.record_trade(trade_data)
         except Exception:
             pass
 
@@ -194,6 +208,26 @@ def on_smart_order_update(order_data: dict):
         logger.error(f"廣播智慧單回報時發生錯誤: {e}")
 
 
+def on_connection_state(state: str):
+    """券商連線狀態推播（connected / disconnected / reconnecting）"""
+    try:
+        msg_item = {"type": "ConnectionState", "data": {"broker": state}}
+        if shared.fastapi_loop:
+            shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg_item)
+    except Exception as e:
+        logger.error(f"廣播連線狀態時發生錯誤: {e}")
+
+
+def on_risk_breach_ws(level: str, message: str):
+    """風控熔斷/警示即時推播（與 webhook dispatcher 並存的第二個消費者）"""
+    try:
+        msg_item = {"type": "RiskStatusUpdate", "data": {"level": level, "reason": message}}
+        if shared.fastapi_loop:
+            shared.fastapi_loop.call_soon_threadsafe(shared.quotes_to_broadcast.put_nowait, msg_item)
+    except Exception as e:
+        logger.error(f"廣播風控警示時發生錯誤: {e}")
+
+
 def wire_callbacks():
     """
     連接所有 Shioaji 回呼。在 main.py 初始化 engine 後呼叫一次。
@@ -207,6 +241,8 @@ def wire_callbacks():
     client.signal_trade_update.connect(on_shioaji_trade_update)
     eng.event_bus.on_smart_order_added.connect(on_smart_order_update)
     eng.event_bus.on_smart_order_triggered.connect(on_smart_order_update)
+    # ★ Sprint C：CHASE 追價進度（目前掛價/改價次數/剩量）也走 SmartOrderUpdate
+    eng.event_bus.on_smart_order_updated.connect(on_smart_order_update)
     # ★ event-driven PnL：tick 一進來就喚醒重算
     eng.event_bus.on_tick.connect(on_shioaji_tick_for_pnl)
     # ★ Sprint 22：risk_breach → webhook 通知
@@ -215,6 +251,10 @@ def wire_callbacks():
         eng.event_bus.on_risk_breach.connect(on_risk_breach)
     except Exception as e:
         logger.warning(f"無法連接 risk_breach → alert_dispatcher: {e}")
+    # ★ UX batch 2：risk_breach → WebSocket 即時廣播（與 webhook 並存）
+    eng.event_bus.on_risk_breach.connect(on_risk_breach_ws)
+    # ★ UX batch 2：券商連線狀態 → WebSocket（之前 on_connection_state 零消費者）
+    eng.event_bus.on_connection_state.connect(on_connection_state)
 
     # 高頻報價使用直接回呼（繞過 Signal）
     client._direct_quote_callback = on_shioaji_quote

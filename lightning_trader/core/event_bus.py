@@ -1,7 +1,7 @@
 """
 EventBus — 集中式事件分發匯流排
 
-解耦 ShioajiClient、OrderManager、PositionTracker 與 UI/Backend 之間的通訊。
+解耦 ShioajiClient、SmartOrderEngine、RiskManager 與 UI/Backend 之間的通訊。
 所有模組只依賴 EventBus，不直接引用彼此。
 """
 import logging
@@ -51,6 +51,7 @@ class EventBus:
     def __init__(self):
         # ──── 行情事件 ────
         self.on_tick = Signal()           # (symbol, tick_data)
+        self.on_bidask = Signal()         # (symbol, bidask_data) 五檔買賣報價
 
         # ──── 交易事件 ────
         self.on_order_update = Signal()        # OrderEntry dict
@@ -65,6 +66,7 @@ class EventBus:
         # ──── 智慧單事件 ────
         self.on_smart_order_triggered = Signal()  # 觸價/移停觸發
         self.on_smart_order_added = Signal()      # 新增智慧單
+        self.on_smart_order_updated = Signal()    # 智慧單狀態變更（CHASE 追價進度等）
 
         # ──── 系統事件 ────
         self.on_connection_state = Signal()     # "connected" | "disconnected" | "reconnecting"

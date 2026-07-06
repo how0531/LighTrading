@@ -18,11 +18,7 @@ from backend import shared
 
 logger = logging.getLogger(__name__)
 
-_PNL_MULTIPLIERS = {
-    'TXF': 200, 'MXF': 50,
-    'EXF': 4000,
-    'GTF': 200,
-}
+from backend.services.contract_specs import get_multiplier as _get_multiplier  # noqa: E402,F401 (乘數表唯一來源)
 
 # 持倉快取相關
 _pos_cache: list = []
@@ -36,14 +32,6 @@ _tick_event = asyncio.Event()
 # Debounce 與心跳
 _DEBOUNCE_MS = 100
 _HEARTBEAT_S = 1.5
-
-
-def _get_multiplier(symbol: str) -> int:
-    sym = (symbol or "").upper()
-    for prefix, mult in _PNL_MULTIPLIERS.items():
-        if sym.startswith(prefix):
-            return mult
-    return 1000
 
 
 def on_tick_event(symbol: str, tick_data: dict) -> None:
@@ -68,7 +56,7 @@ async def _refresh_positions_if_stale() -> list:
     forced = _invalidate_event.is_set()
     if forced or (now - _pos_cache_time > POS_CACHE_TTL):
         try:
-            fresh = await shared.run_in_qt_thread(shared.shioaji_client.list_positions)
+            fresh = await shared.run_in_broker_thread(shared.shioaji_client.list_positions)
             if fresh is not None:
                 _pos_cache = fresh
                 _pos_cache_time = now
@@ -116,17 +104,61 @@ def _compute_pnl_payload() -> dict:
     }
 
 
-async def _broadcast_pnl():
+_HEARTBEAT_MSG = json.dumps({"type": "Heartbeat"})
+_HEARTBEAT_EVERY_S = 3.0
+
+
+async def heartbeat_loop():
+    """
+    獨立的 WS 心跳 task（main.py lifespan 啟動）。
+
+    前端 stale watchdog 需要穩定的訊息流，才能把「盤後/未登入沒行情
+    （正常）」與「連線假死（要強制重連）」分開。必須獨立於 pnl 迴圈 ——
+    pnl 迴圈會 await 排在 broker 執行緒上的 list_positions，一個慢的
+    券商呼叫（30 天 kbars、全商品搜尋）就能讓內嵌心跳停發 >12 秒，
+    前端反而把健康的連線誤判成假死、強制重連。
+    """
+    logger.info("★ WS 心跳已啟動（每 %.0fs）" % _HEARTBEAT_EVERY_S)
+    while True:
+        try:
+            await asyncio.sleep(_HEARTBEAT_EVERY_S)
+            if not shared.active_connections:
+                continue
+            for conn in list(shared.active_connections):
+                try:
+                    await asyncio.wait_for(conn.send_text(_HEARTBEAT_MSG), timeout=1.0)
+                except Exception:
+                    await shared.drop_connection(conn)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.error(f"heartbeat_loop 錯誤: {e}")
+            await asyncio.sleep(1)
+
+
+def _feed_risk_manager(payload: dict) -> None:
+    """把即時未實現損益 + 持倉快照餵給 RiskManager（日虧損熔斷的資料源）。"""
+    rm = getattr(shared.engine, "risk_manager", None) if shared.engine else None
+    if rm is None:
+        return
+    try:
+        rm.update_positions(payload.get("positions", []))
+        rm.update_daily_pnl(unrealized=payload.get("total_pnl", 0))
+    except Exception as e:
+        logger.warning(f"feed risk manager 失敗: {e}")
+
+
+async def _broadcast_pnl(payload: dict):
     """把目前 payload 廣播給所有 WebSocket 客戶端"""
     if not shared.active_connections:
         return
-    payload = _compute_pnl_payload()
     msg = json.dumps({"type": "PnLUpdate", "data": payload})
     async def _send(conn):
         try:
-            await asyncio.wait_for(conn.send_text(msg), timeout=0.2)
+            await asyncio.wait_for(conn.send_text(msg), timeout=1.0)
         except Exception:
-            shared.active_connections.discard(conn)
+            # 移除 + 真正關閉，讓客戶端 onclose 觸發自動重連（見 shared.drop_connection）
+            await shared.drop_connection(conn)
     tasks = [_send(c) for c in list(shared.active_connections)]
     await asyncio.gather(*tasks, return_exceptions=True)
 
@@ -152,13 +184,16 @@ async def pnl_broadcaster():
             client = shared.shioaji_client
             if not client or not getattr(client, "_is_connected", False):
                 continue
-            if not shared.active_connections:
-                continue
 
             await _refresh_positions_if_stale()
+            payload = _compute_pnl_payload()
+            # ★ 風控餵入不依賴 WS 連線、也不依賴「有持倉」——
+            #   全部平倉後 payload 為 {positions: [], total_pnl: 0}，
+            #   必須把未實現損益歸零，否則熔斷會拿「已實現 + 凍結的舊未實現」重複計算
+            _feed_risk_manager(payload)
             if not _pos_cache:
                 continue
-            await _broadcast_pnl()
+            await _broadcast_pnl(payload)
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -170,12 +205,12 @@ async def subscribe_position_contracts():
     """登入後／新成交後自動訂閱所有持倉商品的報價"""
     try:
         client = shared.shioaji_client
-        positions = await shared.run_in_qt_thread(client.list_positions)
+        positions = await shared.run_in_broker_thread(client.list_positions)
         symbols = list({p['symbol'] for p in positions if p.get('symbol')})
         logger.info(f"★ 自動訂閱持倉商品報價: {symbols}")
         for sym in symbols:
             try:
-                await shared.run_in_qt_thread(client.subscribe_background, sym)
+                await shared.run_in_broker_thread(client.subscribe_background, sym)
                 logger.info(f"  ✓ 已訂閱: {sym}")
             except Exception as e:
                 logger.warning(f"  ✗ 訂閱 {sym} 失敗: {e}")

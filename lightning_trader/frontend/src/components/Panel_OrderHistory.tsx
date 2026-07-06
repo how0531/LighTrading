@@ -1,7 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { getOrderHistory, apiClient, normalizeApiError } from '../api/client';
-import { useTradingContext } from '../contexts/TradingContext';
+import { getOrderHistory, apiClient } from '../api/client';
+import { useTradingCore } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
+import { useApiErrorToast } from '../hooks/useApiErrorToast';
+import { isActiveOrderStatus } from '../utils/orderStatus';
 
 interface Trade {
   time: string;
@@ -31,7 +34,7 @@ const getBadgeStyle = (status: string) => {
   const baseStyle = "border rounded px-1.5 py-0.5 text-[10px] whitespace-nowrap";
   if (status === 'Filled') return `${baseStyle} bg-slate-600/30 text-slate-300 border-slate-600/50`;
   if (status === 'Cancelled') return `${baseStyle} bg-slate-500/10 text-slate-500 border-slate-500/20`;
-  if (['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(status)) return `${baseStyle} bg-yellow-500/20 text-yellow-400 border-yellow-500/30`;
+  if (isActiveOrderStatus(status)) return `${baseStyle} bg-yellow-500/20 text-yellow-400 border-yellow-500/30`;
   if (['Failed', 'Rejected'].includes(status)) return `${baseStyle} bg-red-500/20 text-red-400 border-red-500/30`;
   return `${baseStyle} bg-slate-500/20 text-slate-400 border-slate-500/30`;
 };
@@ -46,8 +49,10 @@ const formatStatusText = (status: string, failedMsg?: string): string => {
 };
 
 const Panel_OrderHistory: React.FC = () => {
-  const { accountSummary, cancelOrder, isConnected } = useTradingContext();
+  const { accountSummary, cancelOrder, isConnected } = useTradingCore();
   const { toast } = useToast();
+  const { confirmWithInput } = useConfirm();
+  const handleApiError = useApiErrorToast();
   const [trades, setTrades] = useState<Trade[]>([]);
   const [isLoading, setIsLoading] = useState(true);
   const [lastSyncTime, setLastSyncTime] = useState<Date | null>(null);
@@ -75,7 +80,7 @@ const Panel_OrderHistory: React.FC = () => {
       apiClient.get('/symbols/search', { params: { q: sym, limit: 5 } })
         .then(res => {
           const hits = res.data || [];
-          const hit = hits.find((h: any) => h.symbol === sym);
+          const hit = hits.find((h: { symbol: string; name?: string }) => h.symbol === sym);
           if (hit && hit.name) {
             setNamesCache(prev => ({ ...prev, [sym]: hit.name }));
           } else {
@@ -84,7 +89,7 @@ const Panel_OrderHistory: React.FC = () => {
               apiClient.get('/symbols/search', { params: { q: cleanSym, limit: 5 } })
                 .then(res2 => {
                   const hits2 = res2.data || [];
-                  const hit2 = hits2.find((h: any) => h.symbol === cleanSym);
+                  const hit2 = hits2.find((h: { symbol: string; name?: string }) => h.symbol === cleanSym);
                   if (hit2 && hit2.name) {
                     setNamesCache(prev => ({ ...prev, [sym]: hit2.name }));
                   } else {
@@ -108,7 +113,7 @@ const Panel_OrderHistory: React.FC = () => {
   const fetchHistory = async () => {
     setIsLoading(true);
     try {
-      const data: any = await getOrderHistory();
+      const data: Trade[] | { orders?: Trade[] } = await getOrderHistory();
       const historyTrades = Array.isArray(data) ? data : (data?.orders || []);
       setTrades(historyTrades);
       setLastSyncTime(new Date());
@@ -120,11 +125,23 @@ const Panel_OrderHistory: React.FC = () => {
   };
 
   const handleUpdateQty = async (t: Trade) => {
-    // 減量 prompt 改用瀏覽器原生 prompt 仍可接受（單行數字輸入，後面想做美化再升級為 Modal）
+    // 減量改用 ConfirmDialog 的輸入模式（UX 批次 3，取代 window.prompt）
     const remainingQty = t.qty - t.filled_qty;
-    const msg = `輸入新的總委託數量\n原委託 ${t.qty}，已成交 ${t.filled_qty}，最多可減至 ${t.filled_qty}（最少）`;
-    const input = window.prompt(msg, remainingQty.toString());
-    if (!input) return;
+    const input = await confirmWithInput({
+      title: '委託減量',
+      message: `輸入新的總委託數量\n原委託 ${t.qty}，已成交 ${t.filled_qty}，最多可減至 ${t.filled_qty}（最少）`,
+      defaultValue: remainingQty.toString(),
+      confirmLabel: '確認減量',
+      validate: (v) => {
+        const trimmed = v.trim();
+        const n = /^\d+$/.test(trimmed) ? parseInt(trimmed, 10) : NaN;
+        if (isNaN(n) || n >= t.qty || n < t.filled_qty) {
+          return `輸入無效：必須 ≥ ${t.filled_qty} 且 < ${t.qty}`;
+        }
+        return null;
+      },
+    });
+    if (input == null) return;
 
     const newQty = parseInt(input, 10);
     if (isNaN(newQty) || newQty >= t.qty || newQty < t.filled_qty) {
@@ -143,8 +160,7 @@ const Panel_OrderHistory: React.FC = () => {
       toast.success(`${t.symbol} 減量至 ${newQty}`);
       setTimeout(fetchHistory, 500);
     } catch (err) {
-      const e = normalizeApiError(err);
-      toast.error(e.user_msg || '減量失敗');
+      handleApiError(err, '減量失敗');
     }
   };
 
@@ -166,7 +182,7 @@ const Panel_OrderHistory: React.FC = () => {
 
   const validTrades = trades.filter(t => t.symbol && t.symbol.trim() !== "");
   const cancellable = validTrades.filter(t =>
-    ['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(t.status)
+    isActiveOrderStatus(t.status)
   );
 
   const toggleSelected = (key: string) => {
@@ -269,9 +285,11 @@ const Panel_OrderHistory: React.FC = () => {
             ) : (
               validTrades.map((t, idx) => {
                 const k = tradeKey(t);
-                const isCancellable = ['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(t.status);
+                const isCancellable = isActiveOrderStatus(t.status);
+                // UX 批次 4 Item 5：部分成交（活躍單已成交部分數量）→ 琥珀色列標記 + 進度徽章
+                const isPartialFill = isCancellable && t.filled_qty > 0 && t.filled_qty < t.qty;
                 return (
-                <tr key={`${t.time}-${idx}`} className={`hover:bg-white/5 transition-colors ${selected.has(k) ? 'bg-amber-500/10 ring-1 ring-amber-500/30' : 'bg-slate-700/20'}`}>
+                <tr key={`${t.time}-${idx}`} className={`hover:bg-white/5 transition-colors ${selected.has(k) ? 'bg-amber-500/10 ring-1 ring-amber-500/30' : isPartialFill ? 'bg-amber-500/5 border-l-2 border-amber-400/70' : 'bg-slate-700/20'}`}>
                   <td className="py-2 px-2">
                     {isCancellable && (
                       <input
@@ -306,13 +324,21 @@ const Panel_OrderHistory: React.FC = () => {
                   </td>
                   <td className="py-2 px-2 text-right">
                     <div className="flex items-center justify-end gap-2">
-                      <span 
+                      {isPartialFill && (
+                        <span
+                          className="border rounded px-1.5 py-0.5 text-[10px] whitespace-nowrap font-mono tabular-nums bg-amber-500/20 text-amber-300 border-amber-500/40 font-bold"
+                          title={`部分成交：已成交 ${t.filled_qty} / 委託 ${t.qty}`}
+                        >
+                          {t.filled_qty}/{t.qty}
+                        </span>
+                      )}
+                      <span
                         className={getBadgeStyle(t.status)}
                         title={['Failed', 'Rejected'].includes(t.status) && t.failed_msg ? `原始原因: ${t.failed_msg}` : undefined}
                       >
                         {formatStatusText(t.status, t.failed_msg)}
                       </span>
-                      {['PendingSubmit', 'PreSubmitted', 'Submitted', 'PartFilled'].includes(t.status) && (
+                      {isActiveOrderStatus(t.status) && (
                         <>
                           <button
                             onClick={() => handleUpdateQty(t)}

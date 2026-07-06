@@ -1,10 +1,15 @@
-import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
+/* eslint-disable react-refresh/only-export-components --
+ * Context 物件 / hooks 與 Provider 需同檔共享；改動本檔會整頁 HMR reload，可接受 */
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import type { QuoteData, BidAskData } from '../types';
 import { apiClient } from '../api/client';
+import { resolveWsUrl } from '../utils/backendUrl';
 import { computeLocalPnL } from '../utils/pnl';
+import { isActiveOrderStatus } from '../utils/orderStatus';
 import { useToast } from './ToastContext';
+import { playSound } from '../utils/sound';
 
-interface AccountPosition {
+export interface AccountPosition {
   symbol: string; qty: number; direction: 'Buy' | 'Sell'; price: number; pnl: number; account?: string; raw_qty?: number;
 }
 
@@ -16,10 +21,10 @@ export interface RealtimePosition extends AccountPosition {
 }
 
 
-interface AccountSummary {
+export interface AccountSummary {
   "當日交易": number; "參考損益": number; positions: AccountPosition[]; is_simulation?: boolean; active_stock?: string; active_future?: string; person_id?: string; msg_count?: number;
 }
-interface AccountInfo {
+export interface AccountInfo {
   account_id: string; category: string; person_id: string; broker_id: string; account_name: string;
 }
 export interface WorkingOrder {
@@ -30,6 +35,24 @@ export interface SmartOrderData {
   trigger_price: number; trigger_condition: string; trailing_offset: number;
   take_profit_price: number; stop_loss_price: number;
   is_active: boolean; is_triggered: boolean; created_at: string; triggered_at?: string;
+  // Sprint C：CHASE 追價單的 SmartOrderUpdate 延伸欄位（後端並行實作中，
+  // 一律 optional + 前端防禦性取值：目前掛價 / 已改價次數 / 剩量 / 狀態文字）
+  current_price?: number;
+  reprice_count?: number;
+  remaining_qty?: number;
+  max_chase_ticks?: number;
+  final_action?: string;
+  status?: string;
+}
+// Item 11：券商端連線狀態（後端 ConnectionState 推播；WS 斷線時重設為 unknown）
+export type BrokerState = 'connected' | 'disconnected' | 'reconnecting' | 'unknown';
+// Item 12：正規化後的成交事件（TradeUpdate 驅動的全成通知資料源）
+export interface FillEvent {
+  id: string; symbol: string; action: 'Buy' | 'Sell'; price: number; qty: number;
+}
+// Item 13：風控熔斷即時告警（後端 RiskStatusUpdate 推播）
+export interface RiskAlert {
+  level: 'block' | 'warning'; reason: string; at: number;
 }
 // Sprint 12：watchlist 用的 mini quote（多 symbol 同時跑時不要塞整份 QuoteData）
 export interface MiniQuote {
@@ -40,47 +63,101 @@ export interface MiniQuote {
   low: number;
   updatedAt: number;      // local epoch ms
   // Sprint 34：報價看板需要的延伸欄位
-  volume?: number;        // 自「開始訂閱」起累計的成交量；重連會歸零（後端 tick 只給單筆量，前端累加）
+  volume?: number;        // 累計成交量：優先採後端 TotalVolume（交易所累計、單調自癒）；沒有才前端累加單筆量（重連會歸零）
   bidPrice?: number;      // 第一檔委買價（背景商品的 BidAsk 也會廣播過來，這裡一併擷取）
   askPrice?: number;      // 第一檔委賣價
 }
 
-interface TradingContextType {
+/**
+ * 高頻 context — 100ms throttle flush 更新的 tick 資料。
+ * 只有真的要跟著每筆報價重繪的元件（DOM ladder、K 線、逐筆、報價看板…）
+ * 才透過 useQuotes() 訂閱，其餘面板不會被 10 次/秒的 flush 掃到。
+ */
+export interface QuotesContextType {
+  quote: QuoteData | null;
+  bidAsk: BidAskData | null;
+  quoteHistory: QuoteData[];
+  // Sprint 12：所有 watchlist + position 商品的最新 mini-quote（key = canonical symbol）
+  watchlistQuotes: Record<string, MiniQuote>;
+  // Sprint D：watch 商品的完整五檔（背景訂閱已含 BidAsk，之前只擷取第一檔進 MiniQuote）。
+  // key 與 watchlistQuotes 同一套：canonical 廣播 symbol 先經 canonicalAliasRef 歸一回
+  // 使用者輸入的自選 key（TSE2330 → 2330），MultiDOMGrid / MiniDOM 直接用自選清單查表。
+  // flush 沿用 100ms dirty-set：只有有新 BidAsk 的 symbol 才換物件參照。
+  bidAskBySymbol: Record<string, BidAskData>;
+  // 即時損益（前端隨 tick 計算 + 後端 PnLUpdate 推播）
+  realtimePositions: RealtimePosition[];
+  totalRealtimePnl: number;
+  totalRealizedPnl: number;
+}
+
+/**
+ * 低頻 context — 連線狀態、帳戶、委託與所有 action 方法。
+ * action 方法全部 useCallback 固定，value 只在低頻狀態真的變動時才換新。
+ */
+export interface TradingCoreContextType {
   isConnected: boolean;
   isStale: boolean;          // 任何訊息都沒收到（連線假死）
   isTickStale: boolean;      // 連線正常但沒 tick（盤後或商品冷門）
+  brokerState: BrokerState;  // Item 11：後端 ↔ 券商（Shioaji）的連線狀態
+  recentFills: FillEvent[];  // Item 12：最近成交事件（新的在前，最多 20 筆）
+  riskAlert: RiskAlert | null; // Item 13：最近一次風控熔斷告警（WS 即時）
   targetSymbol: string; setTargetSymbol: (sym: string) => void;
-  quote: QuoteData | null; bidAsk: BidAskData | null; quoteHistory: QuoteData[];
-  // Sprint 12：所有 watchlist + position 商品的最新 mini-quote（key = canonical symbol）
-  watchlistQuotes: Record<string, MiniQuote>;
   watchSymbols: (syms: string[]) => void;
   // Sprint 34：輔助訂閱來源（多圖看盤）。與 watchSymbols 的自選清單取聯集，
   // 兩者互不覆蓋，避免多圖把自選的背景訂閱洗掉。
   setAuxWatch: (syms: string[]) => void;
   accountSummary: AccountSummary; accounts: AccountInfo[]; activeAccount: string | null;
-  workingOrders: WorkingOrder[]; setWorkingOrders: React.Dispatch<React.SetStateAction<WorkingOrder[]>>; refreshOrders: () => Promise<void>;
+  workingOrders: WorkingOrder[]; setWorkingOrders: React.Dispatch<React.SetStateAction<WorkingOrder[]>>;
+  refreshOrders: () => Promise<void>;
+  /** 委託單同步的統一入口：leading-edge debounce（500ms），取代散落的 setTimeout(refreshOrders, …) */
+  scheduleOrderRefresh: () => void;
   syncAll: () => Promise<void>;
   forceReconnect: () => void;
   subscribe: (symbol: string) => void; selectAccount: (accountId: string) => Promise<void>;
   cancelOrder: (action: 'Buy' | 'Sell', price?: number) => Promise<void>;
   flattenPosition: (symbol: string, cancelPending?: boolean) => Promise<void>;
-  // 即時損益（前端隨 tick 計算）
-  realtimePositions: RealtimePosition[];
-  totalRealtimePnl: number;
-  totalRealizedPnl: number;
   // 智慧單
   smartOrders: SmartOrderData[];
   refreshSmartOrders: (symbol?: string) => Promise<void>;
 }
 
-const TradingContext = createContext<TradingContextType | null>(null);
+/** 合併型別（useTradingContext 回傳；既有 consumer 相容） */
+export type TradingContextType = QuotesContextType & TradingCoreContextType;
+
+// 匯出 context 物件本身供測試 stub 使用（一般程式請走 hooks）
+export const QuotesContext = createContext<QuotesContextType | null>(null);
+export const TradingCoreContext = createContext<TradingCoreContextType | null>(null);
+
 const initialSummary: AccountSummary = { "當日交易": 0, "參考損益": 0, positions: [], is_simulation: true, msg_count: 0 };
+
+// 委託清單內容相同就沿用舊 reference，避免 5s 輪詢每次都換新陣列打掛 memo
+const sameOrders = (a: WorkingOrder[], b: WorkingOrder[]): boolean =>
+  a.length === b.length && JSON.stringify(a) === JSON.stringify(b);
+
+const ORDER_REFRESH_DEBOUNCE_MS = 500;
+const ORDER_POLL_INTERVAL_MS = 5000;
+// UX 批次 4 Item 1：tape（逐筆成交）資料保留 500 筆（渲染上限由面板自行控制）
+const QUOTE_HISTORY_MAX = 500;
+const MAX_RECENT_FILLS = 20;         // recentFills 保留筆數
+const MAX_SEEN_FILL_IDS = 500;       // 成交去重 Set 上限（超過砍最舊一半）
+const RISK_TOAST_DEDUPE_MS = 5000;   // 相同熔斷原因 5 秒內不重複 toast
+
+// Set 去重容器封頂：超過上限時刪掉最舊的一半（Set 迭代順序 = 插入順序）
+const trimSet = (set: Set<string>, max: number): void => {
+  if (set.size <= max) return;
+  const it = set.values();
+  for (let i = 0; i < Math.floor(max / 2); i++) {
+    const v = it.next();
+    if (v.done) break;
+    set.delete(v.value);
+  }
+};
 
 export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [isConnected, setIsConnected] = useState(false);
   const [isStale, setIsStale] = useState(false);
   const [isTickStale, setIsTickStale] = useState(false);
-  const lastTickTimeRef = useRef<number>(Date.now());
+  const lastTickTimeRef = useRef<number>(0);      // mount 時補為 Date.now()（避免 render 期呼叫 impure）
   const isTickStaleRef = useRef<boolean>(false);
   const [targetSymbolState, setTargetSymbolState] = useState('2330');
   const targetSymbolRef = useRef('2330');
@@ -101,6 +178,15 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // 委託單狀態（部分由 WebSocket OrderUpdate 即時更新，部分由 REST 初始化）
   const [workingOrders, setWorkingOrders] = useState<WorkingOrder[]>([]);
 
+  // Item 11：券商端連線狀態（後端 ConnectionState hello frame + 推播）
+  const [brokerState, setBrokerState] = useState<BrokerState>('unknown');
+  // Item 12：最近成交事件（TradeUpdate 正規化後，新的在前）
+  const [recentFills, setRecentFills] = useState<FillEvent[]>([]);
+  const seenFillIdsRef = useRef<Set<string>>(new Set());
+  // Item 13：風控熔斷即時告警 + toast 去重（相同原因 5 秒內只跳一次）
+  const [riskAlert, setRiskAlert] = useState<RiskAlert | null>(null);
+  const lastRiskToastRef = useRef<{ reason: string; at: number }>({ reason: '', at: 0 });
+
   // 即時損益狀態（後端 WS PnLUpdate 推播）
   const [realtimePositions, setRealtimePositions] = useState<RealtimePosition[]>([]);
   const [totalRealtimePnl, setTotalRealtimePnl] = useState(0);
@@ -111,12 +197,21 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [watchlistQuotes, setWatchlistQuotes] = useState<Record<string, MiniQuote>>({});
   const watchlistDirtyRef = useRef<Record<string, MiniQuote>>({});
   const watchlistQuotesRef = useRef<Record<string, MiniQuote>>({}); // Sprint 34：mirror state，給 onmessage 跨 flush 讀累計值
+  // Sprint D：watch 商品的完整五檔 — 同一套 dirty-set 100ms flush（key 同 watchlistQuotes）
+  const [bidAskBySymbol, setBidAskBySymbol] = useState<Record<string, BidAskData>>({});
+  const bidAskBySymbolDirtyRef = useRef<Record<string, BidAskData>>({});
   const watchSymbolsRef = useRef<Set<string>>(new Set());  // 聯集（給 onmessage 過濾 + onopen 重發）
   // Sprint 34：watch 訂閱拆成兩個來源，最終送後端的是聯集
   const primaryWatchRef = useRef<Set<string>>(new Set());  // 自選清單（WatchlistPanel / QuoteBoardPanel）
   const auxWatchRef = useRef<Set<string>>(new Set());      // 多圖看盤等輔助來源
   const watchRetryCountRef = useRef<number>(0);   // Sprint 12 R2：watch error ack retry 計數
   const watchRejectedRef = useRef<Set<string>>(new Set()); // R4：記住已警告過的 rejected，避免每次重連都重複 toast
+  const subscribeRetryCountRef = useRef<number>(0); // 開機競態：backend 未登入時訂閱失敗的 retry 計數
+  const subscribeRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // canonical → 使用者輸入 的別名表（backend watch ack 的 aliases）。
+  // tick 廣播用 canonical（例如 TSE2330），自選清單存使用者輸入（2330），
+  // 沒有這層對應報價看板/自選列會永遠對不上 key
+  const canonicalAliasRef = useRef<Record<string, string>>({});
 
   const refreshSmartOrders = useCallback(async (symbol?: string) => {
     try {
@@ -136,18 +231,36 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const res = await apiClient.get('/order_history');
       const payload = res.data || {};
       const newSeq = payload.seq_no || 0;
-      const historyList = payload.orders || [];
+      const historyList: WorkingOrder[] = payload.orders || [];
 
       if (newSeq >= snapshotSeqRef.current) {
         snapshotSeqRef.current = newSeq;
-        const active: WorkingOrder[] = historyList.filter((o: any) =>
-          o.status === 'PendingSubmit' || o.status === 'PreSubmitted' ||
-          o.status === 'Submitted' || o.status === 'PartFilled'
-        );
-        setWorkingOrders(active);
+        const active = historyList.filter((o) => isActiveOrderStatus(o.status));
+        setWorkingOrders((prev) => (sameOrders(prev, active) ? prev : active));
       }
     } catch { /* 靜默，維持舊狀態 */ }
   }, []);
+
+  // ★ 委託單同步統一入口：leading-edge debounce。
+  // 之前 OrderUpdate / TradeUpdate / 下單 / 刪單 各自 setTimeout(refreshOrders, 200~800)，
+  // 活躍交易時會連環打 REST。改為：距上次同步 >500ms 立即執行，否則排一次 trailing。
+  const orderRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastOrderRefreshAtRef = useRef(0);
+  const scheduleOrderRefresh = useCallback(() => {
+    const now = Date.now();
+    const elapsed = now - lastOrderRefreshAtRef.current;
+    if (elapsed >= ORDER_REFRESH_DEBOUNCE_MS) {
+      lastOrderRefreshAtRef.current = now;
+      void refreshOrders();
+      return;
+    }
+    if (orderRefreshTimerRef.current) return; // 已有 trailing 排程
+    orderRefreshTimerRef.current = setTimeout(() => {
+      orderRefreshTimerRef.current = null;
+      lastOrderRefreshAtRef.current = Date.now();
+      void refreshOrders();
+    }, ORDER_REFRESH_DEBOUNCE_MS - elapsed);
+  }, [refreshOrders]);
 
   // 強制全量同步（給 reconnect / 使用者手動 sync）
   const syncAll = useCallback(async () => {
@@ -157,7 +270,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       const newSeq = payload.seq_no || 0;
       if (newSeq >= snapshotSeqRef.current) {
         snapshotSeqRef.current = newSeq;
-        setWorkingOrders(payload.working_orders || []);
+        const next: WorkingOrder[] = payload.working_orders || [];
+        setWorkingOrders((prev) => (sameOrders(prev, next) ? prev : next));
       }
     } catch { /* 靜默；reconnect 時若失敗會自動重試 */ }
   }, []);
@@ -166,12 +280,13 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const reconnectDelayRef = useRef(1000);
   const isUnmounted = useRef(false);
   const isSwitchingAccountRef = useRef(false);
-  const lastMessageTimeRef = useRef<number>(Date.now());
+  const lastMessageTimeRef = useRef<number>(0);   // mount 時補為 Date.now()
   const isStaleRef = useRef(false); // 避免 onmessage closure 中讀到舊值
   const wsAttemptCountRef = useRef(0); // 0=首次, 1+=重連
   const { toast } = useToast();
 
   // 穩定的 quote 緩衝區
+  const quoteSeqRef = useRef(0);   // Item 9：tape 穩定 key 的單調序號
   const latestQuoteRef = useRef<QuoteData | null>(null);
   const latestBidAskRef = useRef<BidAskData | null>(null);
   const quoteDirtyRef = useRef(false);   // 標記 quote 有新資料需同步
@@ -207,7 +322,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (pendingHistoryRef.current.length > 0) {
         const batch = pendingHistoryRef.current;
         pendingHistoryRef.current = [];
-        setQuoteHistory(prev => [...batch, ...prev].slice(0, 50));
+        setQuoteHistory(prev => [...batch, ...prev].slice(0, QUOTE_HISTORY_MAX));
       }
       if (pendingAccountRef.current !== null) {
         const summary = pendingAccountRef.current;
@@ -228,6 +343,14 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           watchlistQuotesRef.current = next; // 同步 mirror，供下一批 tick 累加用
           return next;
         });
+      }
+      // Sprint D：完整五檔 dirty flush — 只有收到新 BidAsk 的 symbol 換新物件參照，
+      // 其餘 key 沿用舊參照（MiniDOM React.memo 據此跳過重繪）
+      const baDirtyKeys = Object.keys(bidAskBySymbolDirtyRef.current);
+      if (baDirtyKeys.length > 0) {
+        const updates = bidAskBySymbolDirtyRef.current;
+        bidAskBySymbolDirtyRef.current = {};
+        setBidAskBySymbol((prev) => ({ ...prev, ...updates }));
       }
     }, 100);
     return () => clearInterval(timer);
@@ -258,6 +381,16 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         isTickStaleRef.current = wantTickStale;
         setIsTickStale(wantTickStale);
       }
+      // ★ 假死自癒：後端每 ≤3 秒有 Heartbeat，>12 秒完全無訊息代表連線
+      // 已無聲死亡（伺服器踢除/半開連線）——socket 看起來還是 OPEN，
+      // onclose 永遠不會來，必須主動 close 觸發既有的退避重連
+      if (msgElapsed > 12000) {
+        const sock = wsRef.current;
+        if (sock && sock.readyState === WebSocket.OPEN) {
+          console.warn('[WS] >12s 無任何訊息，判定連線假死，強制重連');
+          sock.close();
+        }
+      }
     }, 1000);
     return () => clearInterval(timer);
   }, [isConnected]);
@@ -267,7 +400,12 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const prev = latestQuoteRef.current;
     const newPrice = (incoming.Price != null && incoming.Price > 0)
       ? incoming.Price : (prev?.Price ?? 0);
-    if (newPrice === 0) return; // 跳過無效 tick
+    // ★ 盤前 / 尚未成交的商品：snapshot 只有 Reference/漲跌停、Price=0。
+    //   不能整筆丟棄 —— 否則 DOM ladder 在第一筆成交前建不出價格檔位、
+    //   看不到參考價與漲跌停線（「報價不顯示」的無成交情境）
+    const hasStatic = (incoming.Reference ?? 0) > 0
+      || (incoming.LimitUp ?? 0) > 0 || (incoming.LimitDown ?? 0) > 0;
+    if (newPrice === 0 && !hasStatic) return; // 完全沒有可用欄位才丟棄
 
     const merged: QuoteData = {
       Symbol: incoming.Symbol ?? prev?.Symbol ?? targetSymbolRef.current,
@@ -286,25 +424,25 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
     latestQuoteRef.current = merged;
     quoteDirtyRef.current = true;
-    pendingHistoryRef.current.push(merged);
+    if (newPrice > 0) {
+      // Item 9：附上單調遞增 Seq，讓 tape 面板有穩定的 React key（避免整列 re-mount）
+      quoteSeqRef.current += 1;
+      pendingHistoryRef.current.push({ ...merged, Seq: quoteSeqRef.current }); // Price=0 的靜態快照不進逐筆 tape
+    }
   }, []);
 
-  // WebSocket 連線管理 — 定義為 ref 函式避免 useEffect 依賴問題
+  // WebSocket 連線管理 — 定義為 ref 函式避免 useEffect 依賴問題。
+  // ref 寫入放在 effect（每次 render 後刷新 closure；render 期間不可寫 ref）。
   const connectWsRef = useRef<() => void>(() => { });
+  useEffect(() => {
   connectWsRef.current = () => {
     if (isUnmounted.current) return;
     // 如果已經有活躍連線，不要重複建立
     const existing = wsRef.current;
     if (existing && (existing.readyState === WebSocket.OPEN || existing.readyState === WebSocket.CONNECTING)) return;
 
-    // 與 /api 相同策略：用 same-origin，由 vite dev proxy 或 nginx 轉發到 backend。
-    // https 站台自動升級成 wss。
-    const wsScheme = window.location.protocol === 'https:' ? 'wss' : 'ws';
-    let wsUrl = `${wsScheme}://${window.location.host}/ws/quotes`;
-    if (window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1' || window.location.protocol === 'file:') {
-      wsUrl = 'ws://127.0.0.1:8000/ws/quotes';
-    }
-    const ws = new WebSocket(wsUrl);
+    // URL 解析共用 utils/backendUrl（與 api/client 同一套 host 邏輯；含選配 ?token=）
+    const ws = new WebSocket(resolveWsUrl());
 
     ws.onopen = () => {
       if (isUnmounted.current) { ws.close(); return; }
@@ -312,14 +450,14 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       reconnectDelayRef.current = 1000;
       const sym = targetSymbolRef.current;
       ws.send(JSON.stringify({ action: 'subscribe', symbol: sym }));
-      console.log(`[WS] 連線成功，訂閱 ${sym}`);
+      console.info(`[WS] 連線成功，訂閱 ${sym}`);
       lastMessageTimeRef.current = Date.now();
       // Sprint 12 R2：重發 watchlist。backend 不持久化 subscribe_background，
       // 斷線重連會丟掉所有 watch 訂閱；ws.onopen 主動補回。
       const watched = Array.from(watchSymbolsRef.current);
       if (watched.length > 0) {
         ws.send(JSON.stringify({ action: 'watch', symbols: watched }));
-        console.log(`[WS] 重發 watchlist (${watched.length})`);
+        console.info(`[WS] 重發 watchlist (${watched.length})`);
       }
       // ★ 重連後立即強制三合一同步：確保斷線期間外部下單的單也會出現
       syncAll();
@@ -336,7 +474,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (isStaleRef.current) { isStaleRef.current = false; setIsStale(false); }
 
         const data = JSON.parse(event.data);
-        const isMatch = (payload: any): boolean => {
+        const isMatch = (payload: { Symbol?: unknown } | null | undefined): boolean => {
           if (!payload?.Symbol) return true;
           const sym = String(payload.Symbol).trim().toUpperCase();
           const target = targetSymbolRef.current.trim().toUpperCase();
@@ -350,7 +488,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
             mergeQuote(data.data as Partial<QuoteData>);
           }
           // Sprint 12：所有 Tick（含 target）都更新 watchlistDirtyRef，讓 watchlist panel 拿到報價
-          const tickSym = String(data.data.Symbol || '').trim().toUpperCase();
+          // tick 帶的是 canonical symbol —— 先映射回使用者輸入的 key（如 TSE2330 → 2330）
+          const rawTickSym = String(data.data.Symbol || '').trim().toUpperCase();
+          const tickSym = canonicalAliasRef.current[rawTickSym] ?? rawTickSym;
           const tickPrice = Number(data.data.Price || 0);
           if (tickSym && tickPrice > 0 && watchSymbolsRef.current.has(tickSym)) {
             // 先看 dirty 緩衝，再 fallback 到已 flush 的 state，確保 volume 累加跨 flush 不歸零
@@ -362,8 +502,11 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
             const ref = Number(data.data.Reference || 0) || existing.reference;
             const high = Number(data.data.High || 0) || existing.high || tickPrice;
             const low  = Number(data.data.Low || 0)  || existing.low  || tickPrice;
-            // Sprint 34：後端 tick.Volume 是單筆量，累加成「本場累計量」（重連歸零，已於 UI 標註）
+            // 累計量：後端若帶 TotalVolume（交易所累計總量）就直接採用 ——
+            // 單調遞增且自癒（重連 / 漏 tick 都不會歸零或短算）；
+            // 沒帶才 fallback 到前端逐筆累加（Sprint 34 舊行為，重連會歸零）
             const tickVol = Number(data.data.Volume || 0);
+            const totalVol = Number(data.data.TotalVolume || 0);
             watchlistDirtyRef.current[tickSym] = {
               ...existing,
               symbol: tickSym,
@@ -371,7 +514,9 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
               reference: ref,
               high: Math.max(high, tickPrice),
               low: Math.min(low || tickPrice, tickPrice),
-              volume: (existing.volume || 0) + (tickVol > 0 ? tickVol : 0),
+              volume: totalVol > 0
+                ? totalVol
+                : (existing.volume || 0) + (tickVol > 0 ? tickVol : 0),
               updatedAt: Date.now(),
             };
           }
@@ -381,7 +526,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
             bidaskDirtyRef.current = true;
           }
           // Sprint 34：背景商品的 BidAsk 也會被全廣播過來，擷取第一檔買/賣價給報價看板
-          const baSym = String(data.data.Symbol || '').trim().toUpperCase();
+          const rawBaSym = String(data.data.Symbol || '').trim().toUpperCase();
+          const baSym = canonicalAliasRef.current[rawBaSym] ?? rawBaSym;
           if (baSym && watchSymbolsRef.current.has(baSym)) {
             const bid = Array.isArray(data.data.BidPrice) ? Number(data.data.BidPrice[0] || 0) : 0;
             const ask = Array.isArray(data.data.AskPrice) ? Number(data.data.AskPrice[0] || 0) : 0;
@@ -395,6 +541,12 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
                 bidPrice: bid > 0 ? bid : existing.bidPrice,
                 askPrice: ask > 0 ? ask : existing.askPrice,
                 updatedAt: Date.now(),
+              };
+              // Sprint D：完整五檔進 bidAskBySymbol（MiniDOM 宮格資料源）。
+              // Symbol 覆寫為歸一後的自選 key，消費端不必再管 canonical 前綴
+              bidAskBySymbolDirtyRef.current[baSym] = {
+                ...(data.data as BidAskData),
+                Symbol: baSym,
               };
             }
           }
@@ -411,7 +563,16 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const incSeq = data.seq_no || 0;
           if (incSeq >= callbackSeqRef.current) {
              callbackSeqRef.current = incSeq;
-             setTimeout(refreshOrders, 500);
+             scheduleOrderRefresh();
+          }
+        } else if (data.type === 'WorkingOrdersSnapshot' && data.data) {
+          // 後端委託對帳迴圈主動推播（外部管道下的單也會即時出現）——
+          // 直接套用快照，不必再打 REST；沿用 snapshot seq 防亂序
+          const incSeq = data.seq_no || 0;
+          if (incSeq >= snapshotSeqRef.current) {
+            snapshotSeqRef.current = incSeq;
+            const next: WorkingOrder[] = data.data.orders || [];
+            setWorkingOrders((prev) => (sameOrders(prev, next) ? prev : next));
           }
         } else if (data.type === 'SmartOrderUpdate' && data.data) {
           // 智慧單狀態更新（新增/觸發/已取消）
@@ -427,9 +588,71 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           });
         } else if (data.type === 'TradeUpdate' && data.data) {
           // 成交回報也觸發一次 REST 同步，確保填協數量正確
-          setTimeout(refreshOrders, 800);
+          scheduleOrderRefresh();
+          // Item 12：正規化成交 payload → recentFills（全成通知的主要資料源）。
+          // 欄位來源可能是 Shioaji deal callback 或 order_sync SyncDeal，鍵名不一致：
+          // symbol/code、quantity/qty、order_id/ordno、id 有時缺 → compound fallback。
+          const d = data.data as Record<string, unknown>;
+          const fillSymbol = String(d.symbol ?? d.code ?? '').trim().toUpperCase();
+          const fillAction: 'Buy' | 'Sell' =
+            String(d.action ?? '').toLowerCase() === 'sell' ? 'Sell' : 'Buy';
+          const fillPrice = Number(d.price ?? 0);
+          const fillQty = Number(d.quantity ?? d.qty ?? 0);
+          const fillOrderId = String(d.order_id ?? d.ordno ?? '');
+          const fillId = d.id != null && String(d.id) !== ''
+            ? String(d.id)
+            : `${fillOrderId}#${fillPrice}#${fillQty}`;
+          if (fillSymbol && fillQty > 0 && !seenFillIdsRef.current.has(fillId)) {
+            seenFillIdsRef.current.add(fillId);
+            trimSet(seenFillIdsRef.current, MAX_SEEN_FILL_IDS);
+            const fill: FillEvent = {
+              id: fillId, symbol: fillSymbol, action: fillAction, price: fillPrice, qty: fillQty,
+            };
+            setRecentFills((prev) => [fill, ...prev].slice(0, MAX_RECENT_FILLS));
+          }
+        } else if (data.type === 'ConnectionState' && data.data) {
+          // Item 11：後端 ↔ 券商連線狀態（WS accept 後的 hello frame 也走這裡）
+          const b = String(data.data.broker || '');
+          if (b === 'connected' || b === 'disconnected' || b === 'reconnecting') {
+            setBrokerState(b);
+          }
+        } else if (data.type === 'RiskStatusUpdate' && data.data) {
+          // Item 13：風控熔斷即時告警 — 不等 30s 輪詢，WS 到就跳
+          const level: RiskAlert['level'] = data.data.level === 'block' ? 'block' : 'warning';
+          const reason = String(data.data.reason || '風控觸發');
+          const at = Date.now();
+          setRiskAlert({ level, reason, at });
+          if (level === 'block') {
+            const last = lastRiskToastRef.current;
+            if (last.reason !== reason || at - last.at >= RISK_TOAST_DEDUPE_MS) {
+              lastRiskToastRef.current = { reason, at };
+              toast.error(`風控熔斷：${reason}`);
+              playSound('risk_halt');
+            }
+          }
         } else if (data.action === 'subscribe' && data.status === 'success') {
+          subscribeRetryCountRef.current = 0;
+          if (subscribeRetryTimerRef.current) {
+            clearTimeout(subscribeRetryTimerRef.current);
+            subscribeRetryTimerRef.current = null;
+          }
           if (data.symbol) setTargetSymbol(data.symbol);
+        } else if (data.action === 'subscribe' && data.status === 'error') {
+          // 開機競態：WS 比 Shioaji 登入先就緒，訂閱會先失敗。
+          // 不設次數上限 —— LIVE 模式使用者可能好幾分鐘後才手動登入，
+          // 用完就停會讓主報價永久空白。pending 旗標防重複排程，
+          // 延遲 2.5s 起每次 ×1.5 封頂 10s（登入成功的 ack 會重置）
+          if (!subscribeRetryTimerRef.current) {
+            const delay = Math.min(10000, 2500 * Math.pow(1.5, subscribeRetryCountRef.current));
+            subscribeRetryCountRef.current += 1;
+            subscribeRetryTimerRef.current = setTimeout(() => {
+              subscribeRetryTimerRef.current = null;
+              const wsNow = wsRef.current;
+              if (wsNow && wsNow.readyState === WebSocket.OPEN) {
+                wsNow.send(JSON.stringify({ action: 'subscribe', symbol: targetSymbolRef.current }));
+              }
+            }, delay);
+          }
         } else if (data.action === 'watch' && data.status === 'error') {
           // Sprint 12 R2：backend 還沒登入 → 3 秒後 retry 一次（最多 5 次）
           if (watchRetryCountRef.current < 5 && watchSymbolsRef.current.size > 0) {
@@ -447,6 +670,13 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         } else if (data.action === 'watch' && data.status === 'success') {
           // 成功了就重置 retry 計數
           watchRetryCountRef.current = 0;
+          // 記下 canonical → 使用者輸入 的別名（例如 TSE2330 → 2330），
+          // tick/bidask 進來時先映射回自選清單的 key
+          if (data.aliases && typeof data.aliases === 'object') {
+            for (const [requested, canonical] of Object.entries(data.aliases as Record<string, string>)) {
+              canonicalAliasRef.current[String(canonical).toUpperCase()] = String(requested).toUpperCase();
+            }
+          }
           // Sprint 12 R4：被拒絕的 symbol 提示使用者，但只在第一次警告
           // —— 重連、自動 retry、UI re-render 都不該重複跳 toast 騷擾。
           const rejected = Array.isArray(data.rejected) ? data.rejected as string[] : [];
@@ -463,48 +693,68 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       } catch (err) { console.error('[WS error]', err); }
     };
 
-    ws.onclose = () => {
+    ws.onclose = (ev?: CloseEvent) => {
       setIsConnected(false);
+      setBrokerState('unknown'); // Item 11：WS 斷了就不知道券商端狀態，重連後 hello frame 會補
       if (isUnmounted.current) return;
+      // 4401 = 後端 token 認證失敗。帶著同一個壞 token 重連只會無限 4401，
+      // 停止自動重連並明確告知使用者（設定頁存新 token 時會 forceReconnect）
+      if (ev?.code === 4401) {
+        toast.error('API Token 無效或已變更，請在設定 → 連線/安全 更新後重新連線');
+        return;
+      }
       const delay = reconnectDelayRef.current;
       reconnectDelayRef.current = Math.min(delay * 2, 30000);
-      setTimeout(() => connectWsRef.current(), delay);
+      // ±20% 隨機 jitter：多分頁 / 多視窗同時斷線時錯開重連風暴
+      const jitter = 0.8 + Math.random() * 0.4;
+      setTimeout(() => connectWsRef.current(), Math.round(delay * jitter));
     };
 
     wsRef.current = ws;
   };
+  });
 
   // 空依賴 useEffect — 只在 mount 時建立一次 WebSocket（StrictMode 安全）
   useEffect(() => {
     isUnmounted.current = false;
-    // 延遲 100ms 建立連線，讓 StrictMode 的第一次 cleanup 先執行完
+    // watchdog 基準時間補值（useRef 初始器不能呼叫 Date.now）
+    lastMessageTimeRef.current = Date.now();
+    lastTickTimeRef.current = Date.now();
+    // 延遲 50ms 建立連線，讓 StrictMode 的第一次 cleanup 先執行完
     const timerId = setTimeout(() => connectWsRef.current(), 50);
     return () => {
       clearTimeout(timerId);
       isUnmounted.current = true;
+      if (orderRefreshTimerRef.current) {
+        clearTimeout(orderRefreshTimerRef.current);
+        orderRefreshTimerRef.current = null;
+      }
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  }, []);
 
   useEffect(() => {
-    if (isConnected) {
-      apiClient.get('/accounts').then(res => {
-        setAccounts(res.data);
-        if (res.data.length > 0 && !activeAccount) {
-          setActiveAccount(`${res.data[0].broker_id}-${res.data[0].account_id}`);
-        }
-      }).catch(e => console.error(e));
-      // 連線成功後立即擷取現有活躍委託單
-      refreshOrders();
+    if (!isConnected) return;
+    apiClient.get('/accounts').then(res => {
+      setAccounts(res.data);
+      if (res.data.length > 0) {
+        const first = `${res.data[0].broker_id}-${res.data[0].account_id}`;
+        setActiveAccount(prev => prev ?? first);
+      }
+    }).catch(e => console.error(e));
+    // 連線成功後立即擷取現有活躍委託單（下一個 tick 執行，effect 本體不直接觸發 setState）
+    const kickoffTimer = setTimeout(scheduleOrderRefresh, 0);
 
-      // ★ 關鍵：Shioaji 原廠 API 不會主動推送「在其他平台下單」的 WebSocket 廣播。
-      // 為了做到「外部下單，此畫面亦能絕對同步」，必須加上定時輪詢。
-      // 每 2 秒強制去接一次 REST API，後端 API 內已經加上了 update_status 去強迫券商主機更新。
-      const orderSyncTimer = setInterval(refreshOrders, 2000);
-      return () => clearInterval(orderSyncTimer);
-    }
-  }, [isConnected, refreshOrders]); // eslint-disable-line react-hooks/exhaustive-deps
+    // ★ 關鍵：Shioaji 原廠 API 不會主動推送「在其他平台下單」的 WebSocket 廣播。
+    // 為了做到「外部下單，此畫面亦能絕對同步」，必須加上背景輪詢（5s 慢速；
+    // 即時性靠 OrderUpdate / TradeUpdate → scheduleOrderRefresh 補足）。
+    const orderSyncTimer = setInterval(scheduleOrderRefresh, ORDER_POLL_INTERVAL_MS);
+    return () => {
+      clearTimeout(kickoffTimer);
+      clearInterval(orderSyncTimer);
+    };
+  }, [isConnected, scheduleOrderRefresh]);
 
   const selectAccount = useCallback(async (fullId: string) => {
     setActiveAccount(fullId);
@@ -519,6 +769,14 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   // ref 是給 onmessage handler 過濾用；WS 訊息是給後端 subscribe_background
   const applyWatch = useCallback(() => {
     const union = new Set<string>([...primaryWatchRef.current, ...auxWatchRef.current]);
+    // UX 批次 4 Item 10：算出「不再 watch」的 symbol → 通知後端退訂背景串流，
+    // 否則移除自選後 Tick+BidAsk 訂閱會持續洩漏。
+    // 保護交給後端（canonical 比對才可靠）：/unwatch 對「當前 DOM 主商品」只移出
+    // 背景清單、不切串流；持倉商品則完全跳過（PnL 需要 tick）。
+    const removed = Array.from(watchSymbolsRef.current).filter((s) => !union.has(s));
+    if (removed.length > 0) {
+      apiClient.post('/unwatch', { symbols: removed }).catch(() => { /* 靜默；重連時後端不持久化訂閱，洩漏自然消失 */ });
+    }
     watchSymbolsRef.current = union;
     // 移除掉不再 watch 的 symbol（舊資料留著會佔記憶體 + UI 顯示舊價）
     setWatchlistQuotes((prev) => {
@@ -527,6 +785,17 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
         if (prev[s]) next[s] = prev[s];
       }
       watchlistQuotesRef.current = next;
+      return next;
+    });
+    // Sprint D：完整五檔表同步修剪（含 dirty 緩衝，避免下次 flush 又把舊 symbol 塞回來）
+    for (const s of Object.keys(bidAskBySymbolDirtyRef.current)) {
+      if (!union.has(s)) delete bidAskBySymbolDirtyRef.current[s];
+    }
+    setBidAskBySymbol((prev) => {
+      const next: Record<string, BidAskData> = {};
+      for (const s of union) {
+        if (prev[s]) next[s] = prev[s];
+      }
       return next;
     });
     const ws = wsRef.current;
@@ -576,7 +845,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     const ws = wsRef.current;
     if (ws && ws.readyState === WebSocket.OPEN) {
       ws.send(JSON.stringify({ action: 'subscribe', symbol: trimmed }));
-      console.log(`[WS] 訂閱 ${trimmed}`);
+      console.info(`[WS] 訂閱 ${trimmed}`);
     } else {
       console.warn('[WS] 未連線，嘗試重連...');
       connectWsRef.current();
@@ -604,30 +873,67 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const flattenPosition = useCallback(async (symbol: string, cancelPending: boolean = true) => {
     try {
       await apiClient.post('/flatten', { symbol, cancel_pending: cancelPending });
-      setTimeout(refreshOrders, 500);
+      scheduleOrderRefresh();
     } catch (err) {
       console.error('Flatten position failed:', err);
     }
-  }, [refreshOrders]);
+  }, [scheduleOrderRefresh]);
+
+  // ── Context values ──────────────────────────────────────────────
+  // 高頻：100ms flush 更新的 tick 資料
+  const quotesValue = useMemo<QuotesContextType>(() => ({
+    quote, bidAsk, quoteHistory, watchlistQuotes, bidAskBySymbol,
+    realtimePositions, totalRealtimePnl, totalRealizedPnl,
+  }), [quote, bidAsk, quoteHistory, watchlistQuotes, bidAskBySymbol, realtimePositions, totalRealtimePnl, totalRealizedPnl]);
+
+  // 低頻：連線 / 帳戶 / 委託 + 全部 action（action 皆 useCallback，value 很少換新）
+  const coreValue = useMemo<TradingCoreContextType>(() => ({
+    isConnected, isStale, isTickStale, brokerState, recentFills, riskAlert,
+    targetSymbol: targetSymbolState, setTargetSymbol,
+    watchSymbols, setAuxWatch,
+    accountSummary, accounts, activeAccount,
+    workingOrders, setWorkingOrders, refreshOrders, scheduleOrderRefresh, syncAll, forceReconnect,
+    subscribe, selectAccount, cancelOrder, flattenPosition,
+    smartOrders, refreshSmartOrders,
+  }), [
+    isConnected, isStale, isTickStale, brokerState, recentFills, riskAlert,
+    targetSymbolState, setTargetSymbol,
+    watchSymbols, setAuxWatch, accountSummary, accounts, activeAccount,
+    workingOrders, refreshOrders, scheduleOrderRefresh, syncAll, forceReconnect,
+    subscribe, selectAccount, cancelOrder, flattenPosition,
+    smartOrders, refreshSmartOrders,
+  ]);
 
   return (
-    <TradingContext.Provider value={{
-      isConnected, isStale, isTickStale, targetSymbol: targetSymbolState, setTargetSymbol,
-      quote, bidAsk, quoteHistory, accountSummary, accounts, activeAccount,
-      workingOrders, setWorkingOrders, refreshOrders, syncAll, forceReconnect,
-      subscribe, selectAccount,
-      cancelOrder, flattenPosition,
-      realtimePositions, totalRealtimePnl, totalRealizedPnl,
-      smartOrders, refreshSmartOrders,
-      watchlistQuotes, watchSymbols, setAuxWatch,
-    }}>
-      {children}
-    </TradingContext.Provider>
+    <TradingCoreContext.Provider value={coreValue}>
+      <QuotesContext.Provider value={quotesValue}>
+        {children}
+      </QuotesContext.Provider>
+    </TradingCoreContext.Provider>
   );
 };
 
-export const useTradingContext = () => {
-  const context = useContext(TradingContext);
-  if (!context) throw new Error('useTradingContext must be used within a TradingProvider');
+/** 高頻 hook：只給真的要吃 tick 的元件（DOM / Chart / 逐筆 / 報價看板…） */
+export const useQuotes = (): QuotesContextType => {
+  const context = useContext(QuotesContext);
+  if (!context) throw new Error('useQuotes must be used within a TradingProvider');
   return context;
+};
+
+/** 低頻 hook：連線狀態、帳戶、委託與 action 方法（不會被 100ms flush 掃到） */
+export const useTradingCore = (): TradingCoreContextType => {
+  const context = useContext(TradingCoreContext);
+  if (!context) throw new Error('useTradingCore must be used within a TradingProvider');
+  return context;
+};
+
+/**
+ * 向後相容 hook：合併高低頻兩個 context。
+ * 注意：訂閱本 hook 的元件會跟著每次 quote flush 重繪，
+ * 不需要 tick 資料的元件請改用 useTradingCore()（或 useQuotes()）。
+ */
+export const useTradingContext = (): TradingContextType => {
+  const core = useTradingCore();
+  const quotes = useQuotes();
+  return useMemo(() => ({ ...core, ...quotes }), [core, quotes]);
 };

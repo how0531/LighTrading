@@ -2,6 +2,8 @@ export interface QuoteData {
   Symbol: string;
   Price: number;
   Volume: number;
+  /** 交易所累計總量（選配）：後端 Tick / snapshot 會帶；單調遞增、可自癒 */
+  TotalVolume?: number;
   Open?: number;
   High?: number;
   Low?: number;
@@ -12,6 +14,8 @@ export interface QuoteData {
   TickTime: string;
   TickType?: number;
   Action: string;
+  /** 前端指派的單調序號（僅 quoteHistory 內的項目有）：tape 列的穩定 React key */
+  Seq?: number;
 }
 
 export interface BidAskData {

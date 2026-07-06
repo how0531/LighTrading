@@ -1,9 +1,10 @@
 import React, { useEffect, useState } from 'react';
-import { useTradingContext } from '../contexts/TradingContext';
-import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw } from 'lucide-react';
-import { getAccountBalance } from '../api/client';
+import { useQuotes, useTradingCore } from '../contexts/TradingContext';
+import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw, ShieldAlert, Zap } from 'lucide-react';
+import { apiClient, getAccountBalance } from '../api/client';
 import { SymbolPicker } from './SymbolPicker';
 import { PRESET_ORDER, presetLabel, LAYOUT_PRESETS, type LayoutPresetId } from '../utils/layoutPresets';
+import type { RiskStatus } from '../hooks/useRiskStatus';
 
 const QUICK_SYMBOLS = ['TXFR1', 'MXFR1', '2330', '2454'] as const;
 
@@ -29,10 +30,15 @@ interface HeaderProps {
   onToggleFocusMode?: () => void;
   layoutPreset?: LayoutPresetId;
   onSelectPreset?: (id: LayoutPresetId) => void;
+  /** UX 批次 4 Item 3：日虧損儀表（Dashboard 的 useRiskStatus 傳入，避免重複輪詢） */
+  riskStatus?: RiskStatus | null;
+  /** Sprint D：⚡全開多 DOM 宮格（自選前 N 檔各開一個 MiniDOM 的全螢幕 overlay） */
+  onOpenMultiDom?: () => void;
 }
 
-const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode, layoutPreset = 'custom', onSelectPreset }) => {
-  const { isConnected, isTickStale, targetSymbol, subscribe, totalRealtimePnl, forceReconnect } = useTradingContext();
+const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, onToggleLayoutLock, isFocusMode = false, onToggleFocusMode, layoutPreset = 'custom', onSelectPreset, riskStatus = null, onOpenMultiDom }) => {
+  const { isConnected, isTickStale, brokerState, targetSymbol, subscribe, forceReconnect } = useTradingCore();
+  const { totalRealtimePnl } = useQuotes(); // 即時 PnL 跟著 tick 走 → 高頻 context
   const [symInput, setSymInput] = React.useState(targetSymbol);
   const [balance, setBalance] = useState<BalanceState | null>(null);
   const [latency, setLatency] = useState<LatencyState | null>(null);
@@ -53,11 +59,10 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
   useEffect(() => {
     if (!isConnected) return;
     const fetchLat = () => {
-      // 用 fetch 而非 apiClient 以免循環引用；/api/metrics 不需登入
-      fetch('/api/metrics')
-        .then((r) => r.ok ? r.json() : null)
-        .then((d: { latency?: LatencyState } | null) => {
-          if (d?.latency) setLatency(d.latency);
+      // 走 apiClient：token 認證啟用時才會帶 X-API-Token（raw fetch 會 401）
+      apiClient.get<{ latency?: LatencyState }>('/metrics')
+        .then((r) => {
+          if (r.data?.latency) setLatency(r.data.latency);
         })
         .catch(() => { /* 靜默 */ });
     };
@@ -70,10 +75,43 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
     ? Math.min(100, Math.round((balance.margin_required / balance.equity) * 100))
     : 0;
 
+  // Item 3：日虧損儀表 — 當日損益 vs 日虧上限（max_daily_loss 為負值；>=0 視為未設定 → 隱藏）
+  const dailyPnl = riskStatus
+    ? riskStatus.daily_realized_pnl + riskStatus.daily_unrealized_pnl
+    : 0;
+  const hasLossLimit = riskStatus != null && riskStatus.max_daily_loss < 0;
+  const lossUsedPct = hasLossLimit
+    ? Math.min(100, Math.max(0, Math.round((Math.min(0, dailyPnl) / riskStatus!.max_daily_loss) * 100)))
+    : 0;
+  const riskLocked = riskStatus != null && riskStatus.trading_enabled === false;
+  const lossBarColor = riskLocked || lossUsedPct >= 80 ? 'bg-red-500'
+    : lossUsedPct >= 50 ? 'bg-amber-400'
+    : 'bg-emerald-500';
+
   const handleSub = (e: React.FormEvent) => {
     e.preventDefault();
     if (symInput) subscribe(symInput);
   };
+
+  // Item 11：四級連線狀態燈 — 優先序：WS 斷線 > 券商斷線/重連 > 無 TICK > 正常
+  const brokerTrouble = brokerState === 'reconnecting' || brokerState === 'disconnected';
+  const connLevel: 'offline' | 'broker' | 'notick' | 'online' =
+    !isConnected ? 'offline'
+    : brokerTrouble ? 'broker'
+    : isTickStale ? 'notick'
+    : 'online';
+  const connDotClass = {
+    offline: 'bg-[#EF4444]',
+    broker: 'bg-orange-400 shadow-[0_0_6px_rgba(251,146,60,0.5)]',
+    notick: 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)]',
+    online: 'bg-[#10B981] shadow-[0_0_6px_rgba(16,185,129,0.3)]',
+  }[connLevel];
+  const connLabel = {
+    offline: 'OFFLINE',
+    broker: brokerState === 'reconnecting' ? '券商重連中' : '券商斷線',
+    notick: '無TICK/盤後',
+    online: 'ONLINE',
+  }[connLevel];
 
   return (
     <div className="glass-panel w-full px-5 py-3 rounded-lg flex items-center justify-between border border-slate-700/50 mb-6 transition-all duration-300">
@@ -82,15 +120,11 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
         <div>
           <h2 className="text-lg font-black tracking-[0.2em] text-white italic transition-transform hover:scale-105 cursor-default font-mono">LIGHTRADE</h2>
           <div className="flex items-center gap-1.5 mt-0.5">
-            <div className={`w-1.5 h-1.5 rounded-full ${
-              !isConnected ? 'bg-[#EF4444]'
-              : isTickStale ? 'bg-amber-400 shadow-[0_0_6px_rgba(251,191,36,0.5)]'
-              : 'bg-[#10B981] shadow-[0_0_6px_rgba(16,185,129,0.3)]'
-            }`}></div>
+            <div className={`w-1.5 h-1.5 rounded-full ${connDotClass}`}></div>
             <span className="text-[10px] text-slate-400 font-mono tracking-widest uppercase font-bold">
-              {!isConnected ? 'OFFLINE' : isTickStale ? 'NO-TICK' : 'ONLINE'}
+              {connLabel}
             </span>
-            {(!isConnected || isTickStale) && (
+            {connLevel !== 'online' && (
               <button
                 type="button"
                 onClick={forceReconnect}
@@ -136,6 +170,34 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
             }`}>
               P50 {latency.p50_ms}ms · P95 {latency.p95_ms}ms
             </span>
+          </div>
+        )}
+
+        {/* Item 3：日虧損儀表 — 虧損越接近上限 綠→黃→紅；熔斷時顯示鎖定 */}
+        {hasLossLimit && (
+          <div
+            className="hidden md:flex flex-col items-end mr-2 min-w-[96px]"
+            title={`當日損益 ${Math.round(dailyPnl).toLocaleString()} / 日虧上限 ${Math.round(riskStatus!.max_daily_loss).toLocaleString()}`}
+            data-testid="daily-loss-gauge"
+          >
+            <span className="text-[10px] text-slate-500 font-bold tracking-widest uppercase mb-0.5 flex items-center gap-1">
+              {riskLocked && <ShieldAlert className="w-3 h-3 text-red-400" />}
+              日虧損
+            </span>
+            <span className={`text-xs font-black font-mono tabular-nums ${riskLocked ? 'text-red-400' : dailyPnl < 0 ? 'text-slate-200' : 'text-slate-400'}`}>
+              {riskLocked ? '已鎖定' : `${Math.round(dailyPnl).toLocaleString()}`}
+            </span>
+            <div className="flex items-center gap-1 mt-0.5 w-full">
+              <div className="flex-1 h-1 bg-slate-800 rounded overflow-hidden">
+                <div
+                  className={`h-full transition-all ${lossBarColor}`}
+                  style={{ width: `${riskLocked ? 100 : lossUsedPct}%` }}
+                />
+              </div>
+              <span className={`text-[9px] font-mono tabular-nums ${lossUsedPct >= 80 || riskLocked ? 'text-red-400' : 'text-slate-500'}`}>
+                {riskLocked ? '100' : lossUsedPct}%
+              </span>
+            </div>
           </div>
         )}
 
@@ -198,6 +260,19 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
             ))}
           </select>
         </div>
+
+        {/* Sprint D：⚡全開 — 自選前 N 檔各開一個 MiniDOM 的全螢幕宮格 */}
+        {onOpenMultiDom && (
+          <button
+            onClick={onOpenMultiDom}
+            className="flex items-center gap-1 px-2.5 py-2 rounded-lg transition-all border bg-slate-800 text-amber-300/90 border-slate-700 hover:border-amber-400/60 hover:text-amber-300 hover:shadow-[0_0_8px_rgba(251,191,36,0.25)] cursor-pointer"
+            title="⚡全開：自選清單前 N 檔各開一個迷你 DOM 宮格（點格下單；Esc 關閉）"
+            data-testid="open-multidom"
+          >
+            <Zap className="w-4 h-4" />
+            <span className="text-[11px] font-black tracking-wider hidden md:inline">全開</span>
+          </button>
+        )}
 
         <button
           onClick={onToggleFocusMode}

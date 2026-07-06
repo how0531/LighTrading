@@ -55,16 +55,11 @@ jobs:
           npm run build
 
       # --- Stage 2: Backend single-binary build (PyInstaller) ---
-      # pyqt5 is optional and headless CI cannot install it on every OS,
-      # so we strip it from requirements_backend.txt before installing
-      # (mirrors the Dockerfile pattern). The bundled backend does not
-      # need pyqt5.
-      - name: Install backend deps (strip pyqt5)
+      - name: Install backend deps
         shell: bash
         run: |
           cd lightning_trader/backend
-          grep -v -i "pyqt5" requirements_backend.txt > req-headless.txt
-          pip install -r req-headless.txt -r requirements_build.txt
+          pip install -r requirements_backend.txt -r requirements_build.txt
 
       - name: Build backend binary (PyInstaller)
         shell: bash

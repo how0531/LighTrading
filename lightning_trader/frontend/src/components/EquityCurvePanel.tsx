@@ -112,7 +112,7 @@ const EquityCurvePanel: React.FC = () => {
       seriesRef.current.setData(data);
       setLastPoint(pts.length > 0 ? pts[pts.length - 1] : null);
       chartRef.current?.timeScale().fitContent();
-    } catch (e) {
+    } catch {
       // 靜默：journal 為空時 backend 也是回 [] 不算錯
       seriesRef.current.setData([]);
       setLastPoint(null);

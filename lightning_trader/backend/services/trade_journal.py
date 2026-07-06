@@ -82,7 +82,7 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE fills ADD COLUMN notes TEXT")
 
 
-def _extract_fill(trade_data: dict) -> Optional[dict]:
+def extract_fill(trade_data: dict) -> Optional[dict]:
     """
     從 Shioaji order/trade callback dict 抽出我們關心的欄位。
     Shioaji 的 callback msg 沒有單一 schema，這裡盡量寬鬆。
@@ -118,8 +118,15 @@ def _extract_fill(trade_data: dict) -> Optional[dict]:
         trade_data.get("ordno") or trade_data.get("seqno")
         or order.get("ordno") or order.get("seqno") or ""
     )
-    # 唯一 id：order_id + 成交序 / 時間，避免重複寫入
-    deal_seq = trade_data.get("dealseq") or trade_data.get("seq") or int(time.time() * 1000)
+    # 唯一 id：order_id + 「每筆成交」的交易所序號。
+    # ★ 必須優先取 exchange_seq —— Shioaji Deal 回報的欄位是
+    #   trade_id/seqno/ordno/exchange_seq/ts（沒有 dealseq/seq），而
+    #   order_sync 對帳路徑用 list_trades 的 Deal.seq（= exchange_seq）產生 id。
+    #   之前這裡落到 wall-clock 時間戳，同一筆成交兩條路徑 id 不同 →
+    #   INSERT OR IGNORE 去重失效 → 成交重複入帳、日已實現損益翻倍。
+    #   注意不可用 seqno（那是「委託」序號，同一單的多筆部分成交會撞成一筆）。
+    deal_seq = (trade_data.get("exchange_seq") or trade_data.get("dealseq")
+                or trade_data.get("seq") or int(time.time() * 1000))
     fill_id = f"{order_id or 'noid'}#{deal_seq}"
 
     try:
@@ -145,7 +152,7 @@ def _extract_fill(trade_data: dict) -> Optional[dict]:
 
 def record_trade(trade_data: dict) -> bool:
     """從 bridge 呼叫；non-blocking 用法請呼叫端自行 wrap thread。回傳是否成功落地。"""
-    fill = _extract_fill(trade_data)
+    fill = extract_fill(trade_data)
     if fill is None:
         return False
     try:
@@ -159,6 +166,38 @@ def record_trade(trade_data: dict) -> bool:
         return True
     except Exception as e:
         logger.error(f"trade_journal.record_trade 失敗: {e}")
+        return False
+
+
+def insert_fill(fill: dict) -> bool:
+    """
+    對帳器（order_sync）用：直接寫入標準化 fill dict。
+    回傳是否為「新」列（journal 已有同 id 則 False，callback 路徑天然去重）。
+    """
+    row = {
+        "id": str(fill.get("id") or ""),
+        "ts": int(fill.get("ts") or time.time() * 1000),
+        "symbol": str(fill.get("symbol") or "").upper(),
+        "action": "Buy" if str(fill.get("action", "")).lower() in ("b", "buy") else "Sell",
+        "price": float(fill.get("price") or 0),
+        "qty": int(fill.get("qty") or 0),
+        "order_id": str(fill.get("order_id") or ""),
+        "raw": fill.get("raw") or "",
+        "created_at": int(time.time() * 1000),
+    }
+    if not row["id"] or not row["symbol"] or row["price"] <= 0 or row["qty"] <= 0:
+        return False
+    try:
+        with _DB_LOCK:
+            conn = _connect()
+            cur = conn.execute(
+                "INSERT OR IGNORE INTO fills (id, ts, symbol, action, price, qty, order_id, raw, created_at)"
+                " VALUES (:id, :ts, :symbol, :action, :price, :qty, :order_id, :raw, :created_at)",
+                row,
+            )
+        return cur.rowcount > 0
+    except Exception as e:
+        logger.error(f"trade_journal.insert_fill 失敗: {e}")
         return False
 
 

@@ -17,9 +17,7 @@ WORKDIR /app
 # 先複製 requirements 提升 layer cache 命中率
 COPY lightning_trader/backend/requirements_backend.txt /tmp/requirements.txt
 
-# 過濾掉 pyqt5（headless backend 不需要）後 install
-RUN grep -v "pyqt5" /tmp/requirements.txt > /tmp/req-headless.txt \
-    && pip install --no-cache-dir -r /tmp/req-headless.txt
+RUN pip install --no-cache-dir -r /tmp/requirements.txt
 
 # 複製程式碼（會被 .dockerignore 排除測試與 frontend）
 COPY lightning_trader/ /app/lightning_trader/

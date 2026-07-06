@@ -27,9 +27,14 @@ const MultiChartPanel       = lazy(() => import('./MultiChartPanel'));
 const TimeSalesPanel        = lazy(() => import('./TimeSalesPanel'));
 // Sprint 36：盤勢排行 / 漲跌幅榜 lazy
 const MoversPanel           = lazy(() => import('./MoversPanel'));
+// Sprint D：⚡全開多 DOM 宮格 lazy（只在使用者開啟 overlay 時載入）
+const MultiDOMGrid          = lazy(() => import('./MultiDOMGrid'));
 // Sprint 18：hotkey 速查表（非 lazy；很小、且 ? 觸發要永遠 mounted）
 import { HotkeyCheatSheet } from './HotkeyCheatSheet';
-import { TradingProvider, useTradingContext } from '../contexts/TradingContext';
+// UX 批次 4：盤後 / 斷線狀態細橫幅（非 lazy；要在首屏立即反映連線狀態）
+import { ConnectionBanner } from './ConnectionBanner';
+import { ErrorBoundary } from './ErrorBoundary';
+import { TradingProvider, useTradingCore } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
 import { LAYOUT_PRESETS, type LayoutPresetId } from '../utils/layoutPresets';
 import { useElectronUpdater } from '../hooks/useElectronUpdater';
@@ -116,11 +121,13 @@ const DashboardContent: React.FC = () => {
 
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
   const [isLayoutLocked, setIsLayoutLocked] = useState(true);
+  // Sprint D：⚡全開多 DOM 宮格 overlay
+  const [isMultiDomOpen, setIsMultiDomOpen] = useState(false);
   // Sprint 31：focus 預設依 preset；custom 維持原本「預設專注模式」
   const [isFocusMode, setIsFocusMode] = useState(presetDef ? presetDef.focusMode : true);
   // Sprint 11 R1：focus mode 內的 DOM / Chart tab 切換
   const [focusTab, setFocusTab] = useState<'dom' | 'chart'>('dom');
-  const { accountSummary } = useTradingContext();
+  const { accountSummary, riskAlert } = useTradingCore();
   const isLive = accountSummary.is_simulation === false;
   // 桌面版接 Electron auto-updater 事件→Toast；非 Electron 環境會自動 no-op。
   useElectronUpdater();
@@ -186,7 +193,10 @@ const DashboardContent: React.FC = () => {
         <div className="mb-2 -mx-4 px-4 py-1.5 bg-red-700/30 border-y border-red-500/60 flex items-center gap-2 text-red-200 text-xs font-bold">
           <ShieldAlert className="w-4 h-4 flex-shrink-0" />
           <span>
-            風控已停止交易：可能因日虧損達上限。
+            {/* Item 13：WS RiskStatusUpdate 帶真正的熔斷原因；沒有才 fallback 泛用文案 */}
+            {riskAlert?.reason
+              ? `風控已停止交易：${riskAlert.reason}。`
+              : '風控已停止交易：可能因日虧損達上限。'}
             {riskStatus && (
               <>
                 {' 目前損益 '}
@@ -203,6 +213,8 @@ const DashboardContent: React.FC = () => {
           </span>
         </div>
       )}
+      {/* UX 批次 4 Item 2：WS 斷線（紅）/ 券商重連（橘）/ 盤後無行情（灰）細橫幅 */}
+      <ConnectionBanner />
       <Header
         onOpenSettings={() => setIsSettingsOpen(true)}
         isLayoutLocked={isLayoutLocked}
@@ -211,6 +223,8 @@ const DashboardContent: React.FC = () => {
         onToggleFocusMode={() => setIsFocusMode(!isFocusMode)}
         layoutPreset={activePreset}
         onSelectPreset={applyPreset}
+        riskStatus={riskStatus}
+        onOpenMultiDom={() => setIsMultiDomOpen(true)}
       />
 
       {isFocusMode ? (
@@ -240,10 +254,10 @@ const DashboardContent: React.FC = () => {
           </div>
           <div className="flex-1 overflow-hidden flex flex-col rounded-lg bg-[#101623] border border-slate-700/50 shadow-2xl">
             {focusTab === 'dom' ? (
-              <DOMPanel />
+              <ErrorBoundary label="閃電下單" compact><DOMPanel /></ErrorBoundary>
             ) : (
               <Suspense fallback={<div className="flex-1 flex items-center justify-center text-slate-500 text-xs">載入 K 線中…</div>}>
-                <ChartPanel />
+                <ErrorBoundary label="K 線" compact><ChartPanel /></ErrorBoundary>
               </Suspense>
             )}
           </div>
@@ -265,76 +279,87 @@ const DashboardContent: React.FC = () => {
           >
             <div key="dom" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><DOMPanel /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="閃電下單" compact><DOMPanel /></ErrorBoundary></div>
             </div>
             <div key="bal" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_AccountBalance /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="帳戶餘額" compact><Panel_AccountBalance /></ErrorBoundary></div>
             </div>
             <div key="pos" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_Positions /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="持倉" compact><Panel_Positions /></ErrorBoundary></div>
             </div>
             <div key="hist" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_OrderHistory /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="委託紀錄" compact><Panel_OrderHistory /></ErrorBoundary></div>
             </div>
             <div key="trade" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><Panel_TradeHistory /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="成交明細" compact><Panel_TradeHistory /></ErrorBoundary></div>
             </div>
             <div key="chart" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><ChartPanel /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="K 線" compact><ChartPanel /></ErrorBoundary></div>
             </div>
             <div key="watch" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><WatchlistPanel /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="自選報價" compact><WatchlistPanel /></ErrorBoundary></div>
             </div>
             <div key="smart" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><SmartOrdersPanel /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="智慧單" compact><SmartOrdersPanel /></ErrorBoundary></div>
             </div>
             <div key="journal" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><JournalPanel /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="交易日誌" compact><JournalPanel /></ErrorBoundary></div>
             </div>
             <div key="equity" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><EquityCurvePanel /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="損益曲線" compact><EquityCurvePanel /></ErrorBoundary></div>
             </div>
             <div key="stats" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><StatsPanel /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="績效統計" compact><StatsPanel /></ErrorBoundary></div>
             </div>
             <div key="quotes" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><QuoteBoardPanel /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="報價看板" compact><QuoteBoardPanel /></ErrorBoundary></div>
             </div>
             <div key="mchart" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><MultiChartPanel /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="多圖看盤" compact><MultiChartPanel /></ErrorBoundary></div>
             </div>
             <div key="tape" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><TimeSalesPanel /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="逐筆成交" compact><TimeSalesPanel /></ErrorBoundary></div>
             </div>
             <div key="movers" className={itemClass(isLayoutLocked)}>
               {!isLayoutLocked && dragHandle}
-              <div className="flex-1 h-full overflow-hidden flex flex-col"><MoversPanel /></div>
+              <div className="flex-1 h-full overflow-hidden flex flex-col"><ErrorBoundary label="盤勢排行" compact><MoversPanel /></ErrorBoundary></div>
             </div>
           </ResponsiveGridLayout>
         </div>
         </Suspense>
       )}
 
+      {/* Sprint D：⚡全開多 DOM 宮格 — 全螢幕 overlay（Esc 關閉；lazy，開啟才載 chunk） */}
+      {isMultiDomOpen && (
+        <Suspense fallback={null}>
+          <ErrorBoundary label="全開宮格">
+            <MultiDOMGrid onClose={() => setIsMultiDomOpen(false)} />
+          </ErrorBoundary>
+        </Suspense>
+      )}
+
       {/* SettingsModal 也走 lazy；isOpen=false 時 lazy chunk 不會載 */}
       {isSettingsOpen && (
         <Suspense fallback={null}>
-          <SettingsModal
-            isOpen={isSettingsOpen}
-            onClose={() => setIsSettingsOpen(false)}
-          />
+          <ErrorBoundary label="系統設定">
+            <SettingsModal
+              isOpen={isSettingsOpen}
+              onClose={() => setIsSettingsOpen(false)}
+            />
+          </ErrorBoundary>
         </Suspense>
       )}
 
