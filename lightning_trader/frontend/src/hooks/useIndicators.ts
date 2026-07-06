@@ -83,6 +83,10 @@ const STROKE_TO_LINESTYLE: Record<LineStrokeStyle, LineStyle> = {
 const MAIN_PANE_STRETCH = 3;
 const SUB_PANE_STRETCH = 1;
 const CUSTOM_TICK_THROTTLE_MS = 800;
+// 內建指標 tick 節流：活躍期貨每秒數十 tick,若每 tick 都對全序列 safeCompute
+// （5000 根 × N 指標）會壓垮主執行緒。同一節流窗內的多次 tick 合併成一次重算,
+// 最後一點的視覺更新頻率仍達 ~8/s,足夠即時而不掉幀。
+const BUILTIN_TICK_THROTTLE_MS = 120;
 const CUSTOM_FALLBACK_COLORS = ['#60a5fa', '#fb923c', '#4ade80', '#e879f9', '#22d3ee', '#facc15'];
 
 function toLineData(points: IndicatorPoint[]): LineData<Time>[] {
@@ -134,6 +138,9 @@ export function useIndicators(opts: UseIndicatorsOptions): UseIndicatorsApi {
   const workerRef = useRef<IndicatorWorkerClient | null>(null);
   const customTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastCustomRunRef = useRef(0);
+  // 內建指標 tick 節流：合併同窗多 tick 為一次全量重算（見 BUILTIN_TICK_THROTTLE_MS）
+  const builtinTickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastBuiltinTickRef = useRef(0);
 
   // 結構 key：清單成員/順序/參數/自訂代碼 → 觸發全部重建
   const structureKey = useMemo(
@@ -470,8 +477,9 @@ export function useIndicators(opts: UseIndicatorsOptions): UseIndicatorsApi {
     }
   }, [barsRef, getWorker, customParams, applyCustomResult]);
 
-  /** 即時 tick：內建全量重算、只 update 最後一點（不整串 setData） */
-  const onBarsTick = useCallback(() => {
+  /** 內建指標的實際重算（節流窗到期才跑一次）：全量算、只 update 最後一點 */
+  const flushBuiltinTick = useCallback(() => {
+    lastBuiltinTickRef.current = Date.now();
     const bars = barsRef.current;
     if (!bars || bars.length === 0) return;
     const settings = settingsRef.current;
@@ -497,8 +505,26 @@ export function useIndicators(opts: UseIndicatorsOptions): UseIndicatorsApi {
         }
       }
     }
+  }, [barsRef]);
+
+  /**
+   * 即時 tick：合併同一節流窗內的多次 tick 為一次重算（leading + trailing）。
+   * 消除「每 tick × 全序列 × 全指標」的主執行緒風暴；自訂指標另走 800ms 節流。
+   */
+  const onBarsTick = useCallback(() => {
+    const bars = barsRef.current;
+    if (!bars || bars.length === 0) return;
+    const elapsed = Date.now() - lastBuiltinTickRef.current;
+    if (elapsed >= BUILTIN_TICK_THROTTLE_MS) {
+      flushBuiltinTick();
+    } else if (!builtinTickTimerRef.current) {
+      builtinTickTimerRef.current = setTimeout(() => {
+        builtinTickTimerRef.current = null;
+        flushBuiltinTick();
+      }, BUILTIN_TICK_THROTTLE_MS - elapsed);
+    }
     runCustomsThrottled();
-  }, [barsRef, runCustomsThrottled]);
+  }, [barsRef, flushBuiltinTick, runCustomsThrottled]);
 
   /** hover legend：crosshair 對到的各指標線當前值（直接寫 DOM） */
   useEffect(() => {
@@ -578,6 +604,10 @@ export function useIndicators(opts: UseIndicatorsOptions): UseIndicatorsApi {
       if (customTimerRef.current) {
         clearTimeout(customTimerRef.current);
         customTimerRef.current = null;
+      }
+      if (builtinTickTimerRef.current) {
+        clearTimeout(builtinTickTimerRef.current);
+        builtinTickTimerRef.current = null;
       }
       teardown();
       workerRef.current?.dispose();

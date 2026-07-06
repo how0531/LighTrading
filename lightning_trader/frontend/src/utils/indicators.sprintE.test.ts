@@ -15,7 +15,7 @@ import {
   computeWMA, computeDonchian, computeKeltner, computePSAR, computeSuperTrend,
   computeVWAPDaily, computeEnvelope, computeMACD, computeKD, computeATR,
   computeCCI, computeOBV, computeWilliamsR, computeMFI, computeROC, computeDMI,
-  computeVolumeMA, taipeiDayKey,
+  computeVolumeMA, taipeiDayKey, taifexTradingDayKey,
   TREND_UP_COLOR, TREND_DOWN_COLOR,
 } from './indicators';
 
@@ -338,6 +338,36 @@ describe('computeVWAPDaily（日內錨定,台北 UTC+8 日切）', () => {
     // unix 57600 = UTC 16:00 = 台北 00:00（隔日）
     expect(taipeiDayKey(57599)).toBe(0);
     expect(taipeiDayKey(57600)).toBe(1);
+  });
+});
+
+describe('taifexTradingDayKey（交易日錨定,台北 05:00 邊界；夜盤歸日盤同 session）', () => {
+  /** 台北 wall-clock → unix（h<8 自動回捲到前一 UTC 日） */
+  const tpe = (h: number, m = 0, day = 2) => Date.UTC(2024, 0, day, h - 8, m) / 1000;
+  const k = taifexTradingDayKey;
+
+  it('日盤 + 其後夜盤（含跨午夜到翌日 05:00 前）共用同一交易日 key', () => {
+    const dayKey = k(tpe(9)); // 日盤 09:00
+    expect(k(tpe(13))).toBe(dayKey); // 日盤尾
+    expect(k(tpe(15))).toBe(dayKey); // 夜盤開盤 15:00
+    expect(k(tpe(23))).toBe(dayKey); // 夜盤午夜前
+    expect(k(tpe(1, 0, 3))).toBe(dayKey); // 夜盤跨午夜（翌日 01:00）→ 不重置
+    expect(k(tpe(4, 30, 3))).toBe(dayKey); // 夜盤尾聲（翌日 04:30）→ 仍同交易日
+  });
+
+  it('翌日日盤（過 05:00 後）為新交易日', () => {
+    expect(k(tpe(9, 0, 3))).toBe(k(tpe(9)) + 1);
+  });
+
+  it('computeVWAPDaily：夜盤跨午夜不重置（連續累計）', () => {
+    const bars = [
+      B(tpe(23, 0, 2), 10, 1),
+      B(tpe(23, 30, 2), 20, 1),
+      B(tpe(0, 0, 3), 30, 1), // 跨午夜
+      B(tpe(0, 30, 3), 50, 1),
+    ];
+    // 若在 00:00 重置（舊 bug）→ 第 3 點會變 30、第 4 點 40；連續累計則為 20、27.5
+    expect(values(computeVWAPDaily(bars))).toEqual([10, 15, 20, 27.5]);
   });
 });
 

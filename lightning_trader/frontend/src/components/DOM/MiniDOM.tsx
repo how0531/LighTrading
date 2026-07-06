@@ -31,12 +31,14 @@ export interface MiniDOMProps {
   workingCount: number;
   /** 宮格開啟期間被移出自選 → 灰態鎖定（背景訂閱已退訂，資料不再更新） */
   removed: boolean;
+  /** P2：報價凍結（斷線 / 盤後無 tick / 該商品逾時未更新）→ 視覺標示，下單走 danger 確認 */
+  stale?: boolean;
   onPlace: (symbol: string, price: number, action: 'Buy' | 'Sell') => void;
   onSetPrimary: (symbol: string) => void;
 }
 
 const MiniDOMInner: React.FC<MiniDOMProps> = ({
-  symbol, quote, book, isTarget, workingCount, removed, onPlace, onSetPrimary,
+  symbol, quote, book, isTarget, workingCount, removed, stale = false, onPlace, onSetPrimary,
 }) => {
   // 5+5 檔：賣五…賣一（上）＋ 買一…買五（下）；同時算量能條分母
   const { rows, maxVol } = useMemo(() => {
@@ -81,6 +83,15 @@ const MiniDOMInner: React.FC<MiniDOMProps> = ({
             掛 {workingCount}
           </span>
         )}
+        {stale && (
+          <span
+            className="px-1 py-0.5 rounded bg-slate-500/25 text-slate-300 border border-slate-400/40 text-[9px] font-black leading-none animate-pulse"
+            title="報價已停止更新（可能斷線／盤後）—— 下單將需二次確認"
+            data-testid={`minidom-stale-${symbol}`}
+          >
+            凍結
+          </span>
+        )}
         <div className="ml-auto flex items-baseline gap-1.5 font-mono tabular-nums leading-none">
           <span className={`text-[13px] font-black ${changeCls}`}>
             {price > 0 ? formatPrice(price, symbol) : '—'}
@@ -99,8 +110,8 @@ const MiniDOMInner: React.FC<MiniDOMProps> = ({
         </button>
       </div>
 
-      {/* 迷你 ladder：買側（左，紅）｜價格｜賣側（右，綠） */}
-      <div className="flex-1 min-h-0 overflow-auto custom-scrollbar text-[11px] font-mono tabular-nums select-none">
+      {/* 迷你 ladder：買側（左，紅）｜價格｜賣側（右，綠）；stale 時降透明度標示凍結 */}
+      <div className={`flex-1 min-h-0 overflow-auto custom-scrollbar text-[11px] font-mono tabular-nums select-none transition-opacity ${stale ? 'opacity-50' : ''}`}>
         {rows.length === 0 ? (
           <div className="h-full flex items-center justify-center text-slate-600 text-[10px] animate-pulse py-6">
             等待五檔報價…

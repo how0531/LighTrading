@@ -22,9 +22,15 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import { X, Zap } from 'lucide-react';
 import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { useSettings } from '../contexts/SettingsContext';
+import { useToast } from '../contexts/ToastContext';
+import { useConfirm } from '../contexts/ConfirmContext';
 import { useMiniDomOrder } from '../hooks/useMiniDomOrder';
 import { symbolMatches } from '../utils/instrument';
 import { MiniDOM } from './DOM/MiniDOM';
+import { ConnectionBanner } from './ConnectionBanner';
+
+// 單一商品報價「凍結」判定：距最後更新超過此毫秒數視為 stale（與後端 tick-stale 口徑相近）
+const STALE_MS = 6_000;
 
 const GRID_OPTIONS = [
   { n: 4, label: '2×2' },
@@ -41,9 +47,20 @@ interface MultiDOMGridProps {
 
 const MultiDOMGrid: React.FC<MultiDOMGridProps> = ({ onClose }) => {
   const { watchlistQuotes, bidAskBySymbol } = useQuotes();
-  const { targetSymbol, subscribe, watchSymbols, workingOrders } = useTradingCore();
+  const { targetSymbol, subscribe, watchSymbols, workingOrders, isConnected, isTickStale, brokerState } = useTradingCore();
   const { settings } = useSettings();
+  const { toast } = useToast();
+  const { confirm } = useConfirm();
   const { placeFromGrid } = useMiniDomOrder();
+
+  // P2：報價凍結判定需要「現在時間」隨時間推進 —— 每 2s tick 一次，驅動 stale 重算/重繪。
+  const [nowTs, setNowTs] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowTs(Date.now()), 2000);
+    return () => clearInterval(t);
+  }, []);
+  // WS 斷線 / 券商重連中 → 全宮格資料不可信（硬擋下單）
+  const feedTrouble = !isConnected || brokerState === 'reconnecting' || brokerState === 'disconnected';
 
   const [gridN, setGridN] = useState<number>(4);
   const [qty, setQty] = useState<number>(1);
@@ -94,9 +111,32 @@ const MultiDOMGrid: React.FC<MultiDOMGridProps> = ({ onClose }) => {
 
   const liveList = settings.watchlist;
 
-  const handlePlace = useCallback((sym: string, price: number, action: 'Buy' | 'Sell') => {
+  // 單一商品是否 stale：連線層有問題（feedTrouble / 全域 tick-stale）或該商品報價逾時未更新
+  const isSymbolStale = useCallback((sym: string): boolean => {
+    if (feedTrouble || isTickStale) return true;
+    const q = watchlistQuotes[sym];
+    if (!q || !q.updatedAt) return false;
+    return nowTs - q.updatedAt > STALE_MS;
+  }, [feedTrouble, isTickStale, watchlistQuotes, nowTs]);
+
+  const handlePlace = useCallback(async (sym: string, price: number, action: 'Buy' | 'Sell') => {
+    // P2：斷線 / 券商重連中 → 宮格資料整體不可信，硬擋（避免對凍結盤口下單）
+    if (feedTrouble) {
+      toast.warn('連線異常（斷線／券商重連中），宮格暫停下單');
+      return;
+    }
+    // 報價凍結（該商品逾時未更新或全域盤後無 tick）→ 至少 danger 確認
+    if (isSymbolStale(sym)) {
+      const ok = await confirm({
+        title: '報價凍結',
+        message: `${sym} 報價已停止更新，可能不是最新價。仍要以 ${price} 下單？`,
+        confirmLabel: '仍要下單',
+        danger: true,
+      });
+      if (!ok) return;
+    }
     void placeFromGrid(sym, price, action, qty);
-  }, [placeFromGrid, qty]);
+  }, [placeFromGrid, qty, feedTrouble, isSymbolStale, toast, confirm]);
 
   const handleSetPrimary = useCallback((sym: string) => {
     subscribe(sym);   // 與自選列點擊同路徑：setTargetSymbol + WS subscribe
@@ -108,6 +148,10 @@ const MultiDOMGrid: React.FC<MultiDOMGridProps> = ({ onClose }) => {
       className="fixed inset-0 z-[120] bg-[#0b101b]/95 backdrop-blur-sm flex flex-col p-4 gap-3"
       data-testid="multidom-overlay"
     >
+      {/* P2：宮格頂部連線狀態列（複用 Dashboard 的 ConnectionBanner；正常時 return null 不佔位）。
+          宮格是全螢幕 overlay 蓋掉了主畫面的連線燈，這裡補回狀態可見性。 */}
+      <ConnectionBanner />
+
       {/* 工具列：標題 / 宮格尺寸 / 每筆口數 / 模式提示 / 關閉 */}
       <div className="shrink-0 flex flex-wrap items-center gap-3 px-3 py-2 rounded-lg border border-slate-700/60 bg-[#151b26]">
         <h2 className="flex items-center gap-1.5 text-sm font-black tracking-widest text-[#D4AF37]">
@@ -192,6 +236,7 @@ const MultiDOMGrid: React.FC<MultiDOMGridProps> = ({ onClose }) => {
               isTarget={sym === targetSymbol}
               workingCount={workingCounts[sym] || 0}
               removed={!liveList.includes(sym)}
+              stale={isSymbolStale(sym)}
               onPlace={handlePlace}
               onSetPrimary={handleSetPrimary}
             />

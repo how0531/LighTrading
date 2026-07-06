@@ -4,7 +4,22 @@
     <meta charset="UTF-8" />
     <link rel="icon" type="image/svg+xml" href="/vite.svg" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>frontend</title>
+    <!--
+      自訂 JS 指標沙箱的網路兜底（縱深防禦，非唯一防線）：
+        worker-src/child-src 'self' → 封死惡意指標 new Worker(blob:/data:) 開新
+          未清空的巢狀 worker 來復活 fetch/XHR/WebSocket 的逃逸路徑；本 app 的
+          指標 worker 由 Vite 打包成 same-origin chunk,'self' 允許。
+        object-src 'none' / base-uri 'self' → 一般硬化。
+      刻意「不設」connect-src：本 app 的 REST client 連 http://<host>:8000（相對頁面
+      多為跨來源,且 host 為執行期動態值）,靜態 meta connect-src 無法在不誤殺自身
+      API/WS 的前提下精確列舉;連線層的收斂應由部署端於伺服器以 CSP header 針對
+      真實後端 origin 設定。詳見 workers/indicatorWorker.ts 檔頭殘餘風險說明。
+    -->
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="worker-src 'self'; child-src 'self'; object-src 'none'; base-uri 'self'"
+    />
+    <title>LighTrading</title>
   </head>
   <body>
     <div id="root"></div>

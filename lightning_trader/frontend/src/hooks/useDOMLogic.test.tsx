@@ -47,6 +47,15 @@ vi.mock('../contexts/ConfirmContext', () => ({
   useConfirm: () => ({ confirm: mockConfirm, confirmWithInput: mockConfirmWithInput }),
 }));
 
+// mock useToast：驗證刪單消費後端回傳的實際撤單數（cancelled）
+const { mockToast } = vi.hoisted(() => ({
+  mockToast: { success: vi.fn(), error: vi.fn(), warn: vi.fn(), info: vi.fn() },
+}));
+vi.mock('../contexts/ToastContext', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../contexts/ToastContext')>();
+  return { ...actual, useToast: () => ({ toast: mockToast }) };
+});
+
 // 取得 mock 後的 apiClient（vi.mock hoisting 保證這裡拿到的是 mock）
 import { apiClient } from '../api/client';
 const mockedPost = vi.mocked(apiClient.post);
@@ -195,7 +204,9 @@ describe('useDOMLogic 下單', () => {
     expect(result.current.orderFeedback).toBeNull();
   });
 
-  it('刪單：POST /cancel_all 帶 symbol/action/price', async () => {
+  it('刪單：POST /cancel_all 帶 symbol/action/price，且消費後端回傳的實際撤單數', async () => {
+    // 後端精確價位撤單回傳 cancelled=2 → toast 應反映實際撤單數（非「一律 200 當成功」）
+    mockedPost.mockResolvedValueOnce({ data: { cancelled: 2 } });
     const { result } = renderHook(() => useDOMLogic(), { wrapper });
 
     await act(async () => {
@@ -204,6 +215,19 @@ describe('useDOMLogic 下單', () => {
 
     expect(mockedPost).toHaveBeenCalledWith('/cancel_all', { symbol: '2330', action: 'Sell', price: 101.5 });
     expect(coreValue.scheduleOrderRefresh).toHaveBeenCalled();
+    expect(mockToast.success).toHaveBeenCalledWith(expect.stringContaining('2'));
+  });
+
+  it('刪單：指定價位撤到 0 筆（單已不在）→ 據實回報，不當成功', async () => {
+    mockedPost.mockResolvedValueOnce({ data: { cancelled: 0 } });
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+
+    await act(async () => {
+      await result.current.handleCancelOrder('Sell', 101.5);
+    });
+
+    expect(mockToast.success).not.toHaveBeenCalled();
+    expect(mockToast.info).toHaveBeenCalledWith(expect.stringContaining('無'));
   });
 });
 

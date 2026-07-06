@@ -491,16 +491,38 @@ describe('TradingContext WS 訊息路由', () => {
       });
     });
     expect(probe.ctx?.recentFills).toHaveLength(2);
-    // 新的在前
-    expect(probe.ctx?.recentFills[0]).toMatchObject({
-      id: 'B001#601#1', symbol: '2330', action: 'Sell', price: 601, qty: 1,
-    });
+    // 新的在前；P2：無 id 時 fallback 帶單調序號後綴（order_id#price#qty#seq）
+    const firstFill = probe.ctx?.recentFills[0];
+    expect(firstFill).toMatchObject({ symbol: '2330', action: 'Sell', price: 601, qty: 1 });
+    expect(firstFill?.id).toMatch(/^B001#601#1#\d+$/);
 
     // 純狀態回報（無 symbol / qty）不進 recentFills
     await act(async () => {
       ws.message({ type: 'TradeUpdate', data: { status: 'Filled' } });
     });
     expect(probe.ctx?.recentFills).toHaveLength(2);
+  });
+
+  it('P2：同單同價同量的兩筆 id-less 部分成交 → 序號後綴使其不撞鍵、兩筆都收', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    const partial = { symbol: '2330', action: 'Buy', price: 600, qty: 2, order_id: 'X9' };
+    await act(async () => { ws.message({ type: 'TradeUpdate', data: { ...partial } }); });
+    await act(async () => { ws.message({ type: 'TradeUpdate', data: { ...partial } }); });
+
+    // 兩筆「2口@600」不同鍵 → 都進 recentFills（修正前第二筆會被 compound key 吞掉）
+    expect(probe.ctx?.recentFills).toHaveLength(2);
+    expect(probe.ctx?.recentFills[0].id).not.toBe(probe.ctx?.recentFills[1].id);
+  });
+
+  it('P2：TradeUpdate 缺 action → 方向為 Unknown（不臆測成 Buy）', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+    await act(async () => {
+      ws.message({ type: 'TradeUpdate', data: { id: 'NOACT', symbol: '2330', price: 600, qty: 1 } });
+    });
+    expect(probe.ctx?.recentFills[0]).toMatchObject({ id: 'NOACT', action: 'Unknown' });
   });
 
   it('ConnectionState → brokerState 更新；WS 斷線重設為 unknown', async () => {

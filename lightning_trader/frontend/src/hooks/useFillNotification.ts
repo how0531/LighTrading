@@ -127,7 +127,8 @@ export function useFillNotification(): void {
       const f = recentFills[i];
       if (announcedIdsRef.current.has(f.id)) continue;
       rememberAnnounced(f.id);
-      const sideZh = f.action === 'Buy' ? '買進' : '賣出';
+      // action 'Unknown'（payload 缺方向）→ 中性文案「成交」，不臆測買/賣
+      const sideZh = f.action === 'Buy' ? '買進' : f.action === 'Sell' ? '賣出' : '成交';
       announce(`已成交 ${f.qty} 口 ${f.symbol}`, `${sideZh} @${f.price}`, f.id);
     }
   }, [recentFills, announce, rememberAnnounced]);
@@ -140,15 +141,20 @@ export function useFillNotification(): void {
     }
 
     const { deltas, nextFilled } = diffFills(workingOrders as SimpleOrder[], lastFilledRef.current);
+    // P2：統一去重口徑 —— diff 路徑是 TradeUpdate 的後援。TradeUpdate（recentFills）帶真 id
+    // 時，diff 路徑的 compoundId（order_id#price#qty）永遠對不上真 id → 同筆會雙播
+    // （市價單/優價成交最容易踩）。改為：若 recentFills 已涵蓋同 symbol|action|price，
+    // 視為主路徑已播、diff 路徑不再重播；仍更新 lastFilled 避免之後重算成 delta。
+    const coveredSig = new Set<string>();
+    for (const f of recentFills) coveredSig.add(`${f.symbol}|${f.action}|${f.price}`);
     for (const { order: o, newFills, key: k } of deltas) {
-      // 去重（best-effort）：
-      //  - diffKey 保證同一筆 diff 絕不重播（含 StrictMode / re-render）
-      //  - compoundId 對齊 TradeUpdate 缺 id 時的 fallback key（order_id#price#qty），
-      //    TradeUpdate 已播過的部分成交就不再重播；帶真 id 的 TradeUpdate 對不上
-      //    → 最多多播一次，可接受
       const diffKey = `diff:${k}#${o.filled_qty}`;
-      const compoundId = `${o.order_id ?? ''}#${o.price}#${newFills}`;
-      if (announcedIdsRef.current.has(diffKey) || announcedIdsRef.current.has(compoundId)) continue;
+      if (announcedIdsRef.current.has(diffKey)) continue;
+      if (coveredSig.has(`${o.symbol}|${o.action}|${o.price}`)) {
+        // TradeUpdate 主路徑已涵蓋此成交 → 記下 diffKey 防日後重播，但不再發第二次通知
+        rememberAnnounced(diffKey);
+        continue;
+      }
       rememberAnnounced(diffKey);
       const sideZh = o.action === 'Buy' ? '買進' : '賣出';
       const title = `已成交 ${newFills} 口 ${o.symbol}`;
@@ -156,5 +162,5 @@ export function useFillNotification(): void {
       announce(title, body, k);
     }
     lastFilledRef.current = nextFilled;
-  }, [workingOrders, announce, rememberAnnounced]);
+  }, [workingOrders, recentFills, announce, rememberAnnounced]);
 }

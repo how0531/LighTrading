@@ -61,6 +61,11 @@ export interface ChartIndicatorSettings {
 
 export const CUSTOM_ID_PREFIX = 'custom_';
 
+/** 單一自訂指標 code 長度上限（16KB）：避免超大字串灌爆 localStorage/後端同步 */
+export const MAX_CUSTOM_CODE_LEN = 16 * 1024;
+/** 自訂指標數量上限：避免無限累積撐爆持久化配額 */
+export const MAX_CUSTOM_INDICATORS = 50;
+
 export function isCustomIndicatorId(id: string): boolean {
   return id.startsWith(CUSTOM_ID_PREFIX);
 }
@@ -231,11 +236,13 @@ export function normalizeChartIndicatorSettings(raw: unknown): ChartIndicatorSet
   if (Array.isArray(rec.custom)) {
     const seenIds = new Set<string>();
     for (const item of rec.custom) {
+      if (custom.length >= MAX_CUSTOM_INDICATORS) break; // 數量上限：多的丟棄
       if (!item || typeof item !== 'object') continue;
       const c = item as Record<string, unknown>;
       if (typeof c.id !== 'string' || !isCustomIndicatorId(c.id) || seenIds.has(c.id)) continue;
       if (typeof c.name !== 'string' || !c.name.trim()) continue;
       if (typeof c.code !== 'string') continue;
+      if (c.code.length > MAX_CUSTOM_CODE_LEN) continue; // code 過長 → 丟棄（防灌爆配額）
       seenIds.add(c.id);
       custom.push({
         id: c.id,

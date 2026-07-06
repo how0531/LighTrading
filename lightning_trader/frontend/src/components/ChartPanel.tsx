@@ -120,6 +120,9 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
   const lastBarRef = useRef<CandlestickData<Time> | null>(null);
   // 保留最近的聚合 bars,給指標計算用（tick 時就地更新最後一根）
   const aggregatedBarsRef = useRef<KBarApi[]>([]);
+  // 目前 K 棒快取所屬的商品：/kbars async 回來前 live-update 不得套用新商品 tick,
+  // 否則會把新商品價寫進舊商品的 bars/series（Frankenstein 閃現）。
+  const loadedSymbolRef = useRef<string | null>(null);
   // Sprint B：圖上委託/持倉價格線 + 成交標記
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const markersPluginRef = useRef<ISeriesMarkersPluginApi<Time> | null>(null);
@@ -189,6 +192,11 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
   useEffect(() => {
     if (!effSymbol || !candleSeriesRef.current) return;
     let cancelled = false;
+    // 切商品/週期：先作廢舊快取,標記「尚無已載入商品」,live-update 在 /kbars
+    // 回來前不會誤把新商品 tick 套到舊 bars（見 loadedSymbolRef 守門）。
+    loadedSymbolRef.current = null;
+    lastBarRef.current = null;
+    aggregatedBarsRef.current = [];
 
     apiClient.get<KBarApi[]>('/kbars', { params: { symbol: effSymbol, days: tfMeta.days } })
       .then((res) => {
@@ -201,14 +209,17 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
         candleSeriesRef.current!.setData(candles);
         lastBarRef.current = candles[candles.length - 1] ?? null;
         aggregatedBarsRef.current = bars;
+        loadedSymbolRef.current = effSymbol; // 標記快取已屬此商品 → live-update 可套用
         setBarsVersion((v) => v + 1); // 通知成交標記/指標 effect：bars 已就緒
         chartRef.current?.timeScale().fitContent();
       })
       .catch(() => {
+        if (cancelled) return;
         // 沒登入或拉不到就清空；避免顯示其他商品殘留
         candleSeriesRef.current!.setData([]);
         aggregatedBarsRef.current = [];
         lastBarRef.current = null;
+        loadedSymbolRef.current = effSymbol; // 已知為空,tick 從空狀態接續（仍屬此商品）
         setBarsVersion((v) => v + 1); // 指標同步清空
       });
 
@@ -218,6 +229,8 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
   // Live update：把最新成交價更新到當前 timeframe 的 K 棒
   // 來源依 isPinned 決定：pinned 用 MiniQuote（close-only），否則用主 quote（含量）
   useEffect(() => {
+    // /kbars 尚未為當前商品載入完成 → 不套用 tick,避免污染舊商品 K 棒
+    if (!effSymbol || loadedSymbolRef.current !== effSymbol) return;
     let price = 0;
     let tickTimeSec = Date.now() / 1000;
     let tickVol = 0;
@@ -278,7 +291,7 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
     }
     // 指標增量更新最後一點（內建 series.update；自訂走 worker 節流）
     onBarsTick();
-  }, [quote, mini, isPinned, tfMeta.seconds, onBarsTick]);
+  }, [quote, mini, isPinned, tfMeta.seconds, effSymbol, onBarsTick]);
 
   // ── Sprint B：圖上委託單/持倉均價 價格線 ─────────────────
   useEffect(() => {
@@ -477,7 +490,7 @@ const ChartPanel: React.FC<ChartPanelProps> = ({ symbol, compact = false }) => {
           <button
             onClick={() => setPickerOpen(true)}
             className="px-2 py-0.5 text-[10px] font-bold rounded border bg-slate-900 text-slate-400 border-slate-700 hover:text-[#D4AF37] hover:border-[#D4AF37]/60 transition-colors"
-            title="技術指標（選擇 / 參數 / 樣式 / 自訂 JS）"
+            title="技術指標（選擇 / 參數 / 樣式 / 自訂 JS）— 設定為所有圖表共用"
           >
             ƒ 指標{activeCount > 0 ? ` ${activeCount}` : ''}
           </button>

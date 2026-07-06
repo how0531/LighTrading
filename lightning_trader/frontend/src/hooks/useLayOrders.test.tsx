@@ -107,7 +107,7 @@ describe('useLayOrders 鋪單', () => {
     vi.restoreAllMocks();
   });
 
-  it('普通鋪單：總確認一次 + 逐檔 POST /place_order（買往下、tick 對齊、confirm:true）', async () => {
+  it('普通鋪單：總確認一次 + 逐檔 POST /place_order（買往下、tick 對齊、不帶 confirm 靜默跳風控）', async () => {
     const { result } = renderHook(() => useLayOrders(), { wrapper });
 
     let ok = false;
@@ -123,7 +123,7 @@ describe('useLayOrders 鋪單', () => {
     expect(opts.message).toContain('99.00');
     expect(opts.danger).toBe(false); // 非戰鬥模式
 
-    // 逐檔送單：99 / 98.9 / 98.8，每檔 qty=2、LMT、confirm:true
+    // 逐檔送單：99 / 98.9 / 98.8，每檔 qty=2、LMT
     expect(mockedPost).toHaveBeenCalledTimes(3);
     const prices = mockedPost.mock.calls.map((c) => (c[1] as { price: number }).price);
     expect(prices).toEqual([99, 98.9, 98.8]);
@@ -132,11 +132,58 @@ describe('useLayOrders 鋪單', () => {
       expect(call[1]).toMatchObject({
         symbol: '2330', action: 'Buy', qty: 2,
         order_type: 'ROD', price_type: 'LMT', order_cond: 'Cash', order_lot: 'Common',
-        confirm: true,
       });
+      // P1-1：不再無條件 confirm:true（否則後端 skip_warnings 會靜默跳過價格偏離等風控 WARNING）
+      expect(call[1]).not.toHaveProperty('confirm');
     }
     expect(result.current.laidOrders).toHaveLength(3);
     expect(coreValue.scheduleOrderRefresh).toHaveBeenCalled();
+  });
+
+  it('P1-1：某檔 409 CONFIRM_REQUIRED → 彈一次 danger 確認，接受後本批後續帶 confirm:true', async () => {
+    const err409 = Object.assign(new Error('conflict'), {
+      isAxiosError: true,
+      response: { status: 409, data: { detail: { code: 'CONFIRM_REQUIRED', user_msg: '價格偏離', warnings: ['偏離參考價'] } } },
+    });
+    // 第 1 檔先 409、確認後重送成功；第 2、3 檔（batchConfirmed）直接成功
+    mockedPost
+      .mockRejectedValueOnce(err409)   // 檔1 首發 → 409
+      .mockResolvedValueOnce({ data: {} }) // 檔1 重送（confirm:true）
+      .mockResolvedValueOnce({ data: {} }) // 檔2
+      .mockResolvedValueOnce({ data: {} }); // 檔3
+    const { result } = renderHook(() => useLayOrders(), { wrapper });
+
+    await act(async () => { await result.current.submitLay(BASE_PARAMS); });
+
+    // 總確認 1 次 + 風控 danger 確認 1 次
+    expect(mockConfirm).toHaveBeenCalledTimes(2);
+    const riskOpts = mockConfirm.mock.calls[1][0] as ConfirmOptions;
+    expect(riskOpts.danger).toBe(true);
+    expect(riskOpts.message).toContain('偏離參考價');
+
+    // 檔1 首發(無confirm) + 檔1 重送(confirm:true) + 檔2 + 檔3 = 4 次 POST
+    expect(mockedPost).toHaveBeenCalledTimes(4);
+    expect(mockedPost.mock.calls[0][1]).not.toHaveProperty('confirm');
+    expect(mockedPost.mock.calls[1][1]).toMatchObject({ confirm: true });
+    expect(mockedPost.mock.calls[2][1]).toMatchObject({ confirm: true });
+    expect(mockedPost.mock.calls[3][1]).toMatchObject({ confirm: true });
+    expect(result.current.laidOrders).toHaveLength(3);
+  });
+
+  it('P1-1：409 風控 danger 確認被拒 → 停止該批（僅送出已成功檔）', async () => {
+    const err409 = Object.assign(new Error('conflict'), {
+      isAxiosError: true,
+      response: { status: 409, data: { detail: { code: 'CONFIRM_REQUIRED', user_msg: '價格偏離', warnings: [] } } },
+    });
+    mockedPost.mockRejectedValueOnce(err409); // 檔1 首發 → 409
+    // 總確認 true、風控確認 false
+    mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+    const { result } = renderHook(() => useLayOrders(), { wrapper });
+
+    await act(async () => { await result.current.submitLay(BASE_PARAMS); });
+
+    expect(mockedPost).toHaveBeenCalledTimes(1); // 檔1 首發後被拒，不再送
+    expect(result.current.laidOrders).toHaveLength(0);
   });
 
   it('總確認拒絕 → 完全不送單', async () => {
@@ -199,19 +246,41 @@ describe('useLayOrders 鋪單', () => {
     expect(result.current.laidOrders).toHaveLength(1);
   });
 
-  it('撤鋪單（普通單）：逐檔走 /cancel_all（symbol/action/price）後清空記憶', async () => {
+  it('撤鋪單（普通單）：danger 確認 → 逐檔走精確價位 /cancel_all（symbol/action/price）後清空記憶', async () => {
     const { result } = renderHook(() => useLayOrders(), { wrapper });
     await act(async () => { await result.current.submitLay({ ...BASE_PARAMS, levels: 2 }); });
     expect(result.current.laidOrders).toHaveLength(2);
     mockedPost.mockClear();
+    mockConfirm.mockClear();
+    // 後端回傳實際撤單數 → cancelLaid 應消費它（此處各撤 1 筆）
+    mockedPost.mockResolvedValue({ data: { cancelled: 1 } });
 
     await act(async () => { await result.current.cancelLaid(); });
+
+    // P1-1：撤鋪單前先 danger 確認（列出將撤數量與商品）
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
+    const opts = mockConfirm.mock.calls[0][0] as ConfirmOptions;
+    expect(opts.danger).toBe(true);
+    expect(opts.message).toContain('2 筆');
 
     expect(mockedPost).toHaveBeenCalledTimes(2);
     expect(mockedPost.mock.calls[0]).toEqual(['/cancel_all', { symbol: '2330', action: 'Buy', price: 99 }]);
     expect(mockedPost.mock.calls[1]).toEqual(['/cancel_all', { symbol: '2330', action: 'Buy', price: 98.9 }]);
     expect(result.current.laidOrders).toHaveLength(0);
     expect(coreValue.scheduleOrderRefresh).toHaveBeenCalled();
+  });
+
+  it('撤鋪單：danger 確認被拒 → 完全不撤、記憶保留', async () => {
+    const { result } = renderHook(() => useLayOrders(), { wrapper });
+    await act(async () => { await result.current.submitLay({ ...BASE_PARAMS, levels: 2 }); });
+    mockedPost.mockClear();
+    mockConfirm.mockClear();
+    mockConfirm.mockResolvedValueOnce(false);
+
+    await act(async () => { await result.current.cancelLaid(); });
+
+    expect(mockedPost).not.toHaveBeenCalled();
+    expect(result.current.laidOrders).toHaveLength(2); // 記憶保留
   });
 
   it('撤鋪單（追價單）：走 DELETE /smart_orders/{id}', async () => {

@@ -292,7 +292,11 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
+    } catch {
+      // quota 爆掉 / 隱私模式不可寫 → 降級：僅記憶體 + 後端同步,不要 throw 進 effect
+    }
     if (settings.theme === 'dark') {
       document.documentElement.classList.add('dark');
     } else {

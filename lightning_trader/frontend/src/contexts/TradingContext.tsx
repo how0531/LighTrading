@@ -8,6 +8,7 @@ import { computeLocalPnL } from '../utils/pnl';
 import { isActiveOrderStatus } from '../utils/orderStatus';
 import { useToast } from './ToastContext';
 import { playSound } from '../utils/sound';
+import { riskHaltToastedRecently, markRiskHaltToasted } from '../utils/riskToastDedupe';
 
 export interface AccountPosition {
   symbol: string; qty: number; direction: 'Buy' | 'Sell'; price: number; pnl: number; account?: string; raw_qty?: number;
@@ -47,8 +48,9 @@ export interface SmartOrderData {
 // Item 11：券商端連線狀態（後端 ConnectionState 推播；WS 斷線時重設為 unknown）
 export type BrokerState = 'connected' | 'disconnected' | 'reconnecting' | 'unknown';
 // Item 12：正規化後的成交事件（TradeUpdate 驅動的全成通知資料源）
+// action 'Unknown'：payload 缺 action 時不臆測方向（顯示中性），避免把賣單誤標成買。
 export interface FillEvent {
-  id: string; symbol: string; action: 'Buy' | 'Sell'; price: number; qty: number;
+  id: string; symbol: string; action: 'Buy' | 'Sell' | 'Unknown'; price: number; qty: number;
 }
 // Item 13：風控熔斷即時告警（後端 RiskStatusUpdate 推播）
 export interface RiskAlert {
@@ -182,6 +184,8 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [brokerState, setBrokerState] = useState<BrokerState>('unknown');
   // Item 12：最近成交事件（TradeUpdate 正規化後，新的在前）
   const [recentFills, setRecentFills] = useState<FillEvent[]>([]);
+  // 每筆 id-less 成交遞增序號 → fallback id 才不會讓「兩筆 2口@同價」撞成同鍵被吞
+  const fillSeqRef = useRef(0);
   const seenFillIdsRef = useRef<Set<string>>(new Set());
   // Item 13：風控熔斷即時告警 + toast 去重（相同原因 5 秒內只跳一次）
   const [riskAlert, setRiskAlert] = useState<RiskAlert | null>(null);
@@ -594,14 +598,18 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           // symbol/code、quantity/qty、order_id/ordno、id 有時缺 → compound fallback。
           const d = data.data as Record<string, unknown>;
           const fillSymbol = String(d.symbol ?? d.code ?? '').trim().toUpperCase();
-          const fillAction: 'Buy' | 'Sell' =
-            String(d.action ?? '').toLowerCase() === 'sell' ? 'Sell' : 'Buy';
+          // P2：缺 action 時不臆測方向（原本一律當 'Buy'，會把賣單標成買）→ 'Unknown' 顯示中性
+          const actionRaw = String(d.action ?? '').toLowerCase();
+          const fillAction: 'Buy' | 'Sell' | 'Unknown' =
+            actionRaw === 'sell' ? 'Sell' : actionRaw === 'buy' ? 'Buy' : 'Unknown';
           const fillPrice = Number(d.price ?? 0);
           const fillQty = Number(d.quantity ?? d.qty ?? 0);
           const fillOrderId = String(d.order_id ?? d.ordno ?? '');
+          // P2：fallback id 加單調序號 —— 同單同價同量的第二筆部分成交才不會撞鍵被吞。
+          // 有真 id 時仍以真 id 去重（WS 重送不重複計入）。
           const fillId = d.id != null && String(d.id) !== ''
             ? String(d.id)
-            : `${fillOrderId}#${fillPrice}#${fillQty}`;
+            : `${fillOrderId}#${fillPrice}#${fillQty}#${(fillSeqRef.current += 1)}`;
           if (fillSymbol && fillQty > 0 && !seenFillIdsRef.current.has(fillId)) {
             seenFillIdsRef.current.add(fillId);
             trimSet(seenFillIdsRef.current, MAX_SEEN_FILL_IDS);
@@ -624,8 +632,10 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           setRiskAlert({ level, reason, at });
           if (level === 'block') {
             const last = lastRiskToastRef.current;
-            if (last.reason !== reason || at - last.at >= RISK_TOAST_DEDUPE_MS) {
+            // 本通道自身去重 + 跨通道去重（useRiskStatus 輪詢轉場不再重複同一熔斷）
+            if ((last.reason !== reason || at - last.at >= RISK_TOAST_DEDUPE_MS) && !riskHaltToastedRecently(at)) {
               lastRiskToastRef.current = { reason, at };
+              markRiskHaltToasted(at);
               toast.error(`風控熔斷：${reason}`);
               playSound('risk_halt');
             }

@@ -146,6 +146,10 @@ describe('runUserIndicator — 沙箱遮蔽（defense-in-depth）', () => {
     'fetch', 'XMLHttpRequest', 'WebSocket', 'EventSource', 'importScripts',
     'indexedDB', 'localStorage', 'sessionStorage', 'caches',
     'globalThis', 'self', 'window', 'document', 'navigator', 'postMessage',
+    // 新增遮蔽：直接執行任意碼的建構子 + 巢狀 worker/blob/url 逃逸面
+    'Function', 'Worker', 'SharedWorker', 'Blob', 'URL',
+    'MessageChannel', 'BroadcastChannel', 'WebAssembly', 'SharedArrayBuffer',
+    'location', 'onmessage',
   ])('使用者代碼內 typeof %s === "undefined"', (name) => {
     const res = runUserIndicator(
       `plot('probe', close.map(() => typeof ${name} === 'undefined' ? 1 : 0));`,

@@ -20,6 +20,7 @@ import { apiClient } from '../api/client';
 import { useTradingCore } from '../contexts/TradingContext';
 import { useToast } from '../contexts/ToastContext';
 import { playSound } from '../utils/sound';
+import { riskHaltToastedRecently, markRiskHaltToasted } from '../utils/riskToastDedupe';
 
 export interface RiskStatus {
   trading_enabled: boolean;
@@ -52,14 +53,18 @@ export function useRiskStatus(): RiskStatus | null {
         prevEnabledRef.current = enabled;
         if (prev !== null && prev !== enabled) {
           if (!enabled) {
-            const pnl = Math.round(res.data.daily_realized_pnl + res.data.daily_unrealized_pnl);
-            const reason = `風控已停止交易：日損益 ${pnl.toLocaleString()} / 上限 ${Math.round(res.data.max_daily_loss).toLocaleString()}`;
-            toast.error(reason);
-            playSound('risk_halt');
-            if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
-              try {
-                new Notification('風控熔斷', { body: reason, tag: 'risk-halt' });
-              } catch { /* iOS Safari 某些情境會拋；toast 已涵蓋 */ }
+            // 跨通道去重：WS RiskStatusUpdate（TradingContext）若剛提示過同一熔斷，這裡不重複吵
+            if (!riskHaltToastedRecently()) {
+              markRiskHaltToasted();
+              const pnl = Math.round(res.data.daily_realized_pnl + res.data.daily_unrealized_pnl);
+              const reason = `風控已停止交易：日損益 ${pnl.toLocaleString()} / 上限 ${Math.round(res.data.max_daily_loss).toLocaleString()}`;
+              toast.error(reason);
+              playSound('risk_halt');
+              if (typeof Notification !== 'undefined' && Notification.permission === 'granted') {
+                try {
+                  new Notification('風控熔斷', { body: reason, tag: 'risk-halt' });
+                } catch { /* iOS Safari 某些情境會拋；toast 已涵蓋 */ }
+              }
             }
           } else {
             toast.success('風控已恢復，可繼續交易');
