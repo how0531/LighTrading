@@ -63,15 +63,14 @@ class ShioajiClient:
         self.check_connection()
         self._start_reconnect_timer()
 
-    def _in_quote_session(self, now: Optional[datetime] = None) -> bool:
-        """判斷 current_contract 此刻是否在行情時段內。
+    def _contract_in_session(self, contract, now: Optional[datetime] = None) -> bool:
+        """判斷「單一合約」此刻是否在其行情時段內。
 
         - 'STK' → TSE 日盤；其餘（期貨/選擇權）→ TAIFEX 日盤+夜盤
           （與 place_order 選帳號用同一個 security_type 判別）
         - 夜盤 15:00–05:00 跨午夜：start > end 時，now >= start 或 now <= end 即在盤中
-        - 沒有訂閱合約 → False（沒有行情可等，watchdog 不該觸發）
+        - contract=None → False
         """
-        contract = self.current_contract
         if contract is None:
             return False
         sec_type = getattr(contract, "security_type", None)
@@ -86,6 +85,28 @@ class ShioajiClient:
             else:  # 跨午夜（例如 15:00 → 翌日 05:00）
                 if now_t >= start or now_t <= end:
                     return True
+        return False
+
+    def _in_quote_session(self, now: Optional[datetime] = None) -> bool:
+        """current_contract 此刻是否在行情時段內（沒有合約 → False）。"""
+        return self._contract_in_session(self.current_contract, now)
+
+    def _any_subscribed_in_session(self, now: Optional[datetime] = None) -> bool:
+        """#11：只要「任一訂閱商品（主 current_contract + 所有背景訂閱）」在其
+        交易時段內，就該有行情、否則視為靜默斷線。
+
+        修正前只看 current_contract 單一商品時段：current_contract=None 但有
+        背景訂閱（持倉/自選）在盤中時，watchdog 不會觸發、靜默斷線抓不到。
+        """
+        if self._contract_in_session(self.current_contract, now):
+            return True
+        for sym in list(getattr(self, "_background_symbols", set()) or ()):
+            try:
+                contract = self.get_contract(sym)
+            except Exception:
+                contract = None
+            if self._contract_in_session(contract, now):
+                return True
         return False
 
     def check_connection(self):
@@ -107,7 +128,9 @@ class ShioajiClient:
         #   真正的 session 死亡在盤後一樣抓得到。
         watchdog_timeout = 15
         is_stale = False
-        if api_ok and self.current_contract and self._is_connected and self._in_quote_session():
+        # #11：對「所有訂閱商品（主 + 背景）的時段聯集」判斷 —— 只要有任一
+        #   訂閱商品在盤中就該有行情；current_contract=None 但有背景訂閱也能觸發
+        if api_ok and self._is_connected and self._any_subscribed_in_session():
             elapsed = time.time() - getattr(self, 'last_message_time', time.time())
             if elapsed > watchdog_timeout:
                 logger.warning(f"Watchdog 觸發：超過 {watchdog_timeout} 秒未收到報價，疑似靜默斷線 (elapsed={elapsed:.1f}s)")
@@ -367,37 +390,63 @@ class ShioajiClient:
         return False
 
     def list_positions(self) -> List[Dict[str, Any]]:
-        all_pos = []
+        """回傳所有支援帳號的持倉（寬鬆版）：查詢失敗回 []（best-effort）。
+
+        多數呼叫端（帳務廣播 / PnL / 面板）要的是 best-effort 快照，失敗回 []
+        即可。需要「區分查詢失敗與真無倉」的關鍵路徑（退訂前的持倉保護）改用
+        list_positions_strict()。
+        """
         try:
-            accounts = self.api.list_accounts()
-            # 過濾掉不支援 list_positions 的帳號類型 (H=海外期貨)
-            UNSUPPORTED_TYPES = {'H'}
-            for acc in accounts:
-                acc_type = getattr(acc, 'account_type', None) or getattr(acc, 'category', '')
-                if str(acc_type).upper() in UNSUPPORTED_TYPES:
-                    continue
-                try:
-                    self.api.update_status(acc)
-                    positions = self.api.list_positions(acc)
-                    for p in positions:
-                        qty = int(p.quantity)
-                        raw_code = str(p.code).strip().upper()
-                        # canonical：若 resolver 有 alias 就用 user-facing symbol，否則保留 raw
-                        canonical = self.symbol_resolver.canonical(raw_code) or raw_code
-                        all_pos.append({
-                            "symbol": canonical,
-                            "qty": qty,
-                            "direction": "Buy" if p.direction == Action.Buy else "Sell",
-                            "price": float(p.price),
-                            "pnl": float(p.pnl),
-                            "account": f"{acc.broker_id}-{acc.account_id}"
-                        })
-                except Exception as e:
-                    logger.warning(f"查詢帳號 {acc.account_id} 持倉失敗: {e}")
-            return all_pos
+            return self.list_positions_strict()
         except Exception as e:
             logger.error(f"list_positions 總體錯誤: {e}")
             return []
+
+    def list_positions_strict(self) -> List[Dict[str, Any]]:
+        """回傳所有支援帳號的持倉（嚴格版，#12）。
+
+        必須能區分「查詢失敗」與「真的無倉」——
+          - 查詢成功但無倉 → 回 []（真無倉）
+          - 所有帳號查詢都失敗（或 list_accounts 失敗）→ raise，
+            讓呼叫端（退訂前查倉保護等）能保守處理，而非把失敗當成空倉。
+        之前 list_positions 一律吞例外回 []，使 unsubscribe_background 的持倉
+        保護變成死碼：查倉失敗被當「無倉」→ 錯誤退訂持倉商品，PnL 串流無聲中斷。
+        """
+        all_pos: List[Dict[str, Any]] = []
+        # list_accounts 失敗 → 直接往外拋（整體查詢失敗）
+        accounts = self.api.list_accounts()
+        # 過濾掉不支援 list_positions 的帳號類型 (H=海外期貨)
+        UNSUPPORTED_TYPES = {'H'}
+        queried = 0
+        failed = 0
+        for acc in accounts:
+            acc_type = getattr(acc, 'account_type', None) or getattr(acc, 'category', '')
+            if str(acc_type).upper() in UNSUPPORTED_TYPES:
+                continue
+            try:
+                self.api.update_status(acc)
+                positions = self.api.list_positions(acc)
+                queried += 1
+                for p in positions:
+                    qty = int(p.quantity)
+                    raw_code = str(p.code).strip().upper()
+                    # canonical：若 resolver 有 alias 就用 user-facing symbol，否則保留 raw
+                    canonical = self.symbol_resolver.canonical(raw_code) or raw_code
+                    all_pos.append({
+                        "symbol": canonical,
+                        "qty": qty,
+                        "direction": "Buy" if p.direction == Action.Buy else "Sell",
+                        "price": float(p.price),
+                        "pnl": float(p.pnl),
+                        "account": f"{acc.broker_id}-{acc.account_id}"
+                    })
+            except Exception as e:
+                failed += 1
+                logger.warning(f"查詢帳號 {acc.account_id} 持倉失敗: {e}")
+        # 有支援帳號但「全部」查詢失敗 → 這是查詢失敗、不是無倉
+        if queried == 0 and failed > 0:
+            raise RuntimeError(f"list_positions: 所有帳號持倉查詢失敗（{failed} 個帳號）")
+        return all_pos
 
     def trigger_account_update(self):
         try:
@@ -614,9 +663,13 @@ class ShioajiClient:
             logger.warning(f"subscribe_background {symbol} 失敗: {e}")
             return ""
 
-    def unsubscribe_background(self, symbol: str) -> bool:
+    def unsubscribe_background(self, symbol: str, held_canonicals=None) -> bool:
         """
         退訂背景商品報價（UX 批次 4 Item 10：自選清單移除後不再洩漏 Tick+BidAsk 訂閱）。
+
+        held_canonicals（#13）：已持倉的 canonical symbol 集合。若呼叫端已「一次抓好」
+        持倉集合（批次退訂避免每個 symbol 各查一次 list_positions 串行阻塞下單），
+        就傳進來直接判斷；None 時才自己 strict 查倉。
 
         保護規則：
           1. 持倉商品不退訂 —— PnL 廣播依賴其 tick（回 False，保留在 _background_symbols）
@@ -634,10 +687,17 @@ class ShioajiClient:
         if canonical not in self._background_symbols:
             return False
 
-        # 持倉商品：PnL 需要這條 tick 串流，絕不能退訂
+        # 持倉商品：PnL 需要這條 tick 串流，絕不能退訂。
+        # #12：用 strict 版 —— 查倉失敗會 raise（而非回 []），此時保守跳過退訂，
+        # 不讓「查詢失敗」被當成「無倉」而錯誤退掉持倉商品的背景報價。
+        # #13：呼叫端可先一次抓好持倉集合傳入（held_canonicals），避免逐 symbol 查。
         try:
-            positions = self.list_positions()
-            if any((p.get("symbol") or "") == canonical for p in positions):
+            if held_canonicals is None:
+                positions = self.list_positions_strict()
+                held = {(p.get("symbol") or "") for p in positions}
+            else:
+                held = set(held_canonicals)
+            if canonical in held:
                 logger.info(f"unsubscribe_background 跳過 {canonical}：持倉中，PnL 需要背景報價")
                 return False
         except Exception as e:
@@ -940,6 +1000,61 @@ class ShioajiClient:
         except Exception as e:
             logger.error(f"cancel_order_by_ids 失敗: {e}")
             return False
+
+    def confirm_order_cancelled(self, order_ids, timeout_s: float = 1.0,
+                                poll_interval_s: float = 0.1):
+        """
+        P0-1：CHASE cancel-replace 專用 —— 確認一張委託已離開活躍集合，
+        並回報其「實際累計成交量」。撤單非同步：舊單可能在撤單在途時於
+        交易所端部分/全部成交，必須先確認終態再以實際剩量掛新單，否則超額。
+
+        在 order executor 執行緒上呼叫（阻塞輪詢 OK，不在行情執行緒）。
+
+        回傳：
+          {"cancelled": True,  "filled_qty": n} = 已離開活躍集合（撤成/已成/消失）
+          {"cancelled": False, "filled_qty": n} = 逾時仍活躍（呼叫端本輪放棄）
+          None                                   = 查詢失敗（呼叫端本輪放棄）
+        """
+        ids = {str(i) for i in (order_ids or []) if i}
+        if not ids:
+            return {"cancelled": True, "filled_qty": 0}
+        deadline = time.time() + max(timeout_s, 0.0)
+        last_filled = 0
+        active = {"PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"}
+        while True:
+            try:
+                for acc in self.api.list_accounts():
+                    try:
+                        self.api.update_status(acc)
+                    except Exception:
+                        pass
+                trades = self.api.list_trades()
+            except Exception as e:
+                logger.warning(f"confirm_order_cancelled 查詢失敗: {e}")
+                return None
+            found = None
+            for trade in trades or []:
+                order = getattr(trade, "order", None)
+                cands = {str(getattr(order, a, "") or "")
+                         for a in ("id", "seqno", "ordno")}
+                cands.discard("")
+                if cands & ids:
+                    found = trade
+                    break
+            if found is None:
+                # 委託已不在清單 → 已離開活躍集合
+                return {"cancelled": True, "filled_qty": last_filled}
+            status_name = (found.status.status.name if hasattr(found.status, "status")
+                           else getattr(found.status, "name", ""))
+            filled = int(getattr(found.status, "deal_quantity",
+                                 getattr(found.status, "filled_quantity", 0)) or 0)
+            last_filled = max(last_filled, filled)
+            if status_name not in active:
+                # Cancelled / Filled / Failed → 撤單終態確認
+                return {"cancelled": True, "filled_qty": last_filled}
+            if time.time() >= deadline:
+                return {"cancelled": False, "filled_qty": last_filled}
+            time.sleep(poll_interval_s)
 
     def cancel_all(self, symbol: str, action: Action) -> int:
         """批次刪單：取消指定標的與方向的所有未完成委託"""

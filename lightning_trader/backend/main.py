@@ -107,6 +107,8 @@ engine.smart_order_engine.set_dispatch(shared.submit_order_task)
 engine.smart_order_engine.set_chase_helpers(
     cancel_order_fn=engine.client.cancel_order_by_ids,
     tick_size_fn=get_tick_size,
+    # P0-1：cancel-replace 前先確認撤單終態 + 讀實際成交量，避免超額建倉
+    confirm_cancel_fn=engine.client.confirm_order_cancelled,
 )
 
 

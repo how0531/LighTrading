@@ -888,6 +888,85 @@ def test_chase_external_cancel_detected_by_order_sync():
         eng._external_cancel_grace_ms = old_grace
 
 
+def test_confirm_order_cancelled_reports_inflight_fill():
+    """P0-1 生產路徑：撤單非同步 + 撤單在途舊單部分成交 →
+    ShioajiClient.confirm_order_cancelled 回報實際累計成交量，
+    CHASE 才能以真正剩量掛新腿、不超額。"""
+    api = _fake_api()
+    sj = shared.shioaji_client
+    api.async_cancel = True
+    try:
+        trade = sj.place_order("2330", 500.0, Action.Buy, 3)
+        ordno = trade.order.ordno
+        # 撤單送出當下，舊單在交易所端成交 2 口（撤單在途競速）
+        api.cancel_race_hook = lambda t: api.fill_trade(t, 2, 500.0, "d1")
+        assert sj.cancel_order_by_ids([ordno]) is True     # 引擎精準撤單路徑
+        api.flush_cancels()                                # 撤單非同步生效（剩 1 口 → Cancelled）
+        info = sj.confirm_order_cancelled([ordno])
+        assert info is not None
+        assert info["cancelled"] is True
+        assert info["filled_qty"] == 2                     # 實際已成 2 → 剩量應為 1
+    finally:
+        api.async_cancel = False
+        api.cancel_race_hook = None
+        api._pending_cancels.clear()
+
+
+def test_confirm_order_cancelled_timeout_when_still_active():
+    """撤單未生效（仍活躍）→ confirm 回 cancelled=False，CHASE 本輪放棄不送新單。"""
+    api = _fake_api()
+    sj = shared.shioaji_client
+    trade = sj.place_order("2330", 500.0, Action.Buy, 2)
+    ordno = trade.order.ordno
+    # 委託仍在活躍狀態、未撤 → 逾時未確認
+    info = sj.confirm_order_cancelled([ordno], timeout_s=0.05, poll_interval_s=0.01)
+    assert info is not None and info["cancelled"] is False
+
+
+def test_cancel_orders_by_action_price_still_sync():
+    """協調保障：前端 /cancel_all price 分支用的 cancel_orders_by_action_price
+    在 fake 上仍為同步生效（撤單即標 Cancelled）。"""
+    api = _fake_api()
+    sj = shared.shioaji_client
+    t = sj.place_order("2330", 500.0, Action.Buy, 1)
+    n = sj.cancel_orders_by_action_price("2330", Action.Buy, 500.0)
+    assert n == 1
+    assert t.status.status.name == "Cancelled"
+
+
+def test_watchdog_session_union_over_background_subscriptions():
+    """#11：只有背景訂閱、current_contract=None 時，watchdog 也要能依背景商品
+    時段判斷（時段聯集），而非因為沒有主商品就永遠不觸發。"""
+    from datetime import datetime as _dt
+    sj = shared.shioaji_client
+    old_cur, old_bg = sj.current_contract, set(sj._background_symbols)
+    try:
+        sj.current_contract = None
+        sj._background_symbols = set()
+        # 完全沒有訂閱 → 不觸發（沒有行情可等）
+        assert sj._any_subscribed_in_session(now=_dt(2026, 7, 3, 10, 0)) is False
+        # 只有背景訂閱一檔股票（無主商品）→ 日盤中仍算「該有行情」
+        sj._background_symbols = {"2330"}
+        assert sj._any_subscribed_in_session(now=_dt(2026, 7, 3, 10, 0)) is True
+        assert sj._any_subscribed_in_session(now=_dt(2026, 7, 3, 3, 0)) is False
+    finally:
+        sj.current_contract, sj._background_symbols = old_cur, old_bg
+
+
+def test_list_positions_strict_distinguishes_failure_from_empty(monkeypatch):
+    """#12：真無倉 → []；所有帳號查詢失敗 → strict 版 raise（寬鬆版仍回 []）。"""
+    api = _fake_api()
+    sj = shared.shioaji_client
+    api.positions = []
+    assert sj.list_positions_strict() == []          # 真無倉
+    def _boom(acc=None):
+        raise RuntimeError("broker down")
+    monkeypatch.setattr(api, "list_positions", _boom)
+    with pytest.raises(Exception):
+        sj.list_positions_strict()                   # 查詢失敗 → 可辨識
+    assert sj.list_positions() == []                 # 寬鬆版仍 best-effort
+
+
 # ─── 12. API Token 認證（最後執行：會 reload main） ──────────
 
 def test_zz_api_token_auth():

@@ -47,8 +47,12 @@ class ChaseBroker:
     def __init__(self):
         self.placed = []
         self.cancelled = []          # 每次撤單收到的 id 清單
-        self.place_mode = "ok"       # ok | fail | blocked
+        self.place_mode = "ok"       # ok | fail | blocked | rate_limited
         self.cancel_result = True
+        # 撤單確認（P0-1）：測試設定 confirm(ids) 回傳值。
+        #   dict {"cancelled": bool, "filled_qty": int} 或 None（逾時未確認）
+        self.confirm_result = {"cancelled": True, "filled_qty": 0}
+        self.on_cancel = None        # 撤單瞬間的競速鉤子（模擬撤單在途成交/使用者取消）
         self._seq = 0
 
     def place(self, symbol, price, action, qty):
@@ -56,6 +60,8 @@ class ChaseBroker:
                             "action": action, "qty": qty})
         if self.place_mode == "blocked":
             return engine_mod.RISK_BLOCKED
+        if self.place_mode == "rate_limited":
+            return engine_mod.RATE_LIMITED
         if self.place_mode == "fail":
             return None
         self._seq += 1
@@ -64,15 +70,23 @@ class ChaseBroker:
 
     def cancel(self, ids):
         self.cancelled.append(list(ids))
+        if self.on_cancel is not None:
+            self.on_cancel(ids)
         return self.cancel_result
 
+    def confirm(self, ids):
+        return self.confirm_result
 
-def _make(store=None, tick=1.0):
+
+def _make(store=None, tick=1.0, confirm=False):
     bus = EventBus()
     broker = ChaseBroker()
     eng = SmartOrderEngine(bus, place_order_fn=broker.place, store=store,
                            cancel_order_fn=broker.cancel,
                            tick_size_fn=lambda p, s, t=tick: t)
+    if confirm:
+        # P0-1：注入撤單終態確認函數（cancel-replace 前先確認撤單 + 實際成交）
+        eng.set_chase_helpers(confirm_cancel_fn=broker.confirm)
     return bus, broker, eng
 
 
@@ -376,13 +390,43 @@ def test_chase_missing_order_within_grace_not_flagged():
 
 
 def test_chase_missing_order_after_grace_marked_external():
+    """P1-4：掛單在「完整快照」中缺席，需連續 N 輪才判外部撤單（避免單輪劣化誤判）。"""
     bus, broker, eng = _make()
     _quote(bus, "TXFA5", 21000, 21001)
     order = eng.add_chase("TXFA5", "Buy", 1)
     eng._external_cancel_grace_ms = 0.0
-    eng.sync_broker_orders([])  # 掛單消失且非我方動作
+    # 第一輪缺席：尚未達 N 輪 → 仍 CHASING（不誤判）
+    eng.sync_broker_orders([])
+    assert _order_dict(eng, order.id)["chase_status"] == ChaseStatus.CHASING
+    # 第二輪仍缺席（連續 2 輪完整快照）→ 判外部撤單
+    eng.sync_broker_orders([])
     d = _order_dict(eng, order.id)
     assert d["chase_status"] == ChaseStatus.CANCELLED_EXTERNAL
+
+
+def test_chase_incomplete_snapshot_never_flags_external():
+    """P1-4a：快照不完整（某帳號 update_status 失敗）時，掛單缺席不得判外部撤單，
+    即使連續多輪。"""
+    bus, broker, eng = _make()
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 1)
+    eng._external_cancel_grace_ms = 0.0
+    for _ in range(5):
+        eng.sync_broker_orders([], snapshot_complete=False)
+    assert _order_dict(eng, order.id)["chase_status"] == ChaseStatus.CHASING
+    assert _order_dict(eng, order.id)["is_active"] is True
+
+
+def test_chase_missing_then_reappears_resets_round_counter():
+    """P1-4b：缺席計數在掛單重新出現時歸零，不會累積跨越間歇缺席而誤判。"""
+    bus, broker, eng = _make()
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 1)
+    eng._external_cancel_grace_ms = 0.0
+    eng.sync_broker_orders([])  # 缺席 1 輪
+    eng.sync_broker_orders([{"ids": ["NO1"], "status": "Submitted", "filled_qty": 0}])  # 又出現
+    eng.sync_broker_orders([])  # 再缺席 1 輪（計數已歸零 → 未達 N）
+    assert _order_dict(eng, order.id)["chase_status"] == ChaseStatus.CHASING
 
 
 def test_chase_sync_filled_compensation():
@@ -436,7 +480,10 @@ def test_chase_restart_marks_terminal_when_order_gone(tmp_path):
     bus2, broker2, eng2 = _make(store=SmartOrderStore(Path(db)))
     updates = []
     bus2.on_smart_order_updated.connect(updates.append)
-    eng2.sync_broker_orders([])  # 對不上任何 working order
+    # re-attach 對不上任何 working order；同樣需連續 N 輪完整快照才判死（P1-4）
+    eng2.sync_broker_orders([])
+    assert eng2.get_active_orders() and eng2.get_active_orders()[0]["chase_status"] == ChaseStatus.CHASING
+    eng2.sync_broker_orders([])  # 第二輪仍對不上 → 判死
     assert eng2.get_active_orders() == []
     d = _order_dict(eng2, order.id)
     assert d["chase_status"] == ChaseStatus.CANCELLED_EXTERNAL
@@ -476,3 +523,189 @@ def test_chase_update_broadcast_contains_progress_fields():
     assert last["remaining_qty"] == 1        # 剩量
     assert last["max_chase_ticks"] == 10
     assert last["chase_status"] == ChaseStatus.CHASING
+
+
+# ─── P0-1：cancel-replace 撤單確認，撤單在途部分成交不超額 ──────────
+
+def test_chase_reprice_confirms_cancel_and_uses_real_remaining():
+    """撤單在途時舊單於交易所端部分成交 → 撤單確認回填實際已成，
+    新腿只掛真正剩量，總量不超過 qty（P0-1 不變量）。"""
+    bus, broker, eng = _make(confirm=True)
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 3)
+    # 改價撤舊單時，舊單已在交易所端成交 2 口（撤單確認回報）
+    broker.confirm_result = {"cancelled": True, "filled_qty": 2}
+    _quote(bus, "TXFA5", 21002, 21003)  # 不利 → cancel-replace
+    # 新腿只掛剩量 1（= 3 - 已成 2），不是盲送 3
+    assert broker.placed[-1] == {"symbol": "TXFA5", "price": 21003,
+                                 "action": "Buy", "qty": 1}
+    d = _order_dict(eng, order.id)
+    assert d["filled_qty"] == 2 and d["remaining_qty"] == 1
+    # 不變量：活躍掛單量(1) + 已成(2) = 3 = qty，未超額建倉
+
+
+def test_chase_reprice_fills_completely_during_cancel_no_new_leg():
+    """撤單在途舊單全部成交 → 剩量 0，不再掛新單，標 FILLED。"""
+    bus, broker, eng = _make(confirm=True)
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 2)
+    broker.confirm_result = {"cancelled": True, "filled_qty": 2}
+    n_before = len(broker.placed)
+    _quote(bus, "TXFA5", 21002, 21003)
+    assert len(broker.placed) == n_before   # 剩量 0 → 不掛新腿
+    d = _order_dict(eng, order.id)
+    assert d["chase_status"] == ChaseStatus.FILLED
+    assert d["filled_qty"] == 2
+
+
+def test_chase_reprice_aborts_when_cancel_unconfirmed():
+    """撤單未確認終態（逾時 / 仍在途）→ 不得送新單，保留舊單、下輪再試。"""
+    bus, broker, eng = _make(confirm=True)
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 2)
+    broker.confirm_result = None   # 撤單未確認
+    n_before = len(broker.placed)
+    _quote(bus, "TXFA5", 21002, 21003)
+    assert len(broker.placed) == n_before          # 沒送新單
+    d = _order_dict(eng, order.id)
+    assert d["chase_status"] == ChaseStatus.CHASING  # 仍在追、未終結
+    assert order.broker_order_ids.startswith("ORD1")  # 舊單仍被追蹤
+
+
+def test_chase_reprice_aborts_when_cancel_not_yet_terminal():
+    """撤單確認回報「尚未撤掉」（cancelled=False）→ 同樣不送新單。"""
+    bus, broker, eng = _make(confirm=True)
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 2)
+    broker.confirm_result = {"cancelled": False, "filled_qty": 0}
+    n_before = len(broker.placed)
+    _quote(bus, "TXFA5", 21002, 21003)
+    assert len(broker.placed) == n_before
+    assert _order_dict(eng, order.id)["chase_status"] == ChaseStatus.CHASING
+
+
+def test_chase_finalize_market_confirms_cancel_before_market():
+    """MARKET 收尾也要先確認撤單 + 實際剩量再轉市價（P0-1）。"""
+    bus, broker, eng = _make(confirm=True)
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 3, max_chase_ticks=2,
+                          final_action="MARKET")
+    broker.confirm_result = {"cancelled": True, "filled_qty": 2}  # 撤單時已成 2
+    _quote(bus, "TXFA5", 21004, 21005)  # 超限 → 收尾
+    # 剩量 1（3-2）轉市價，不是 3
+    assert broker.placed[-1] == {"symbol": "TXFA5", "price": 0,
+                                 "action": "Buy", "qty": 1}
+    d = _order_dict(eng, order.id)
+    assert d["chase_status"] == ChaseStatus.COMPLETED
+    assert d["filled_qty"] == 2
+
+
+# ─── P1-2：跨腿漏接成交補償 ────────────────────────────────────
+
+def test_chase_cross_leg_fill_compensation_via_sync():
+    """改價後第二腿的漏接成交要能由對帳補回（不是拿當前腿量跟跨腿累計比大小）。"""
+    bus, broker, eng = _make()
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 3)     # 腿1 = NO1
+    # 腿1 成交 1 口（callback）
+    bus.on_fill.emit({"id": "F1", "order_id": "NO1", "qty": 1,
+                      "symbol": "TXFA5", "action": "Buy", "price": 21001})
+    _quote(bus, "TXFA5", 21001, 21002)           # 改價 → 腿2 = NO2（剩量 2）
+    assert _order_dict(eng, order.id)["filled_qty"] == 1
+    # 腿2 成交 1 口，callback 漏接、只有對帳看到（腿2 券商 deal_quantity=1）
+    eng.sync_broker_orders([{"ids": ["NO2"], "status": "PartFilled", "filled_qty": 1}])
+    d = _order_dict(eng, order.id)
+    # 腿1(1) + 腿2(1) = 2；舊 bug（跨腿比大小）會卡在 1
+    assert d["filled_qty"] == 2 and d["remaining_qty"] == 1
+
+
+def test_chase_sync_does_not_inflate_filled_on_status_filled():
+    """#9/P1-2：券商 status=Filled 但實際成交 < qty（熔斷 reduce-only 縮量）→
+    filled_qty 以實際成交為準，不無條件抹平成 qty。"""
+    bus, broker, eng = _make()
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 3)
+    # 券商回報此腿 Filled 但只成交 1 口（縮量）
+    eng.sync_broker_orders([{"ids": ["NO1"], "status": "Filled", "filled_qty": 1}])
+    d = _order_dict(eng, order.id)
+    assert d["chase_status"] == ChaseStatus.FILLED   # 委託鏈了結
+    assert d["filled_qty"] == 1                       # 不虛報成 3
+
+
+# ─── P1-3：ordno 後到仍能對帳 ──────────────────────────────────
+
+def test_chase_late_ordno_backfilled_enables_match():
+    """下單當下 ordno 常為空、成交回報才帶真 ordno：對帳把真 ordno 回填
+    known-ids，之後 callback 用真 ordno 也對得上（P1-3）。"""
+    bus, broker, eng = _make()
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 2)   # 腿1 ids: ORD1/SEQ1/NO1
+    # 對帳帶來真 ordno "REALNO"（透過 SEQ1 對上同一腿）→ 回填
+    eng.sync_broker_orders([{"ids": ["SEQ1", "REALNO"],
+                             "status": "Submitted", "filled_qty": 0}])
+    # 之後成交回報只帶真 ordno → 仍對得上並入帳
+    bus.on_fill.emit({"id": "F1", "order_id": "REALNO", "qty": 2,
+                      "symbol": "TXFA5", "action": "Buy", "price": 21001})
+    d = _order_dict(eng, order.id)
+    assert d["chase_status"] == ChaseStatus.FILLED
+    assert d["filled_qty"] == 2
+
+
+# ─── #6：取消與改價重疊 ────────────────────────────────────────
+
+def test_chase_reprice_aborts_if_cancelled_during_replace():
+    """撤舊單後、送新單前 chase 被取消 → 不掛新單（check-then-act 二次驗證）。"""
+    bus, broker, eng = _make()
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 1)
+
+    def _racing_cancel(ids):
+        # 模擬撤舊單瞬間使用者取消整張 chase
+        order.is_active = False
+        order.chase_status = ChaseStatus.CANCELLED
+    broker.on_cancel = _racing_cancel
+
+    n_before = len(broker.placed)
+    _quote(bus, "TXFA5", 21002, 21003)
+    assert len(broker.placed) == n_before   # 已取消 → 不掛新單
+    assert _order_dict(eng, order.id)["chase_status"] == ChaseStatus.CANCELLED
+
+
+# ─── #7：撤單失敗告警 ──────────────────────────────────────────
+
+def test_chase_cancel_failure_emits_alert():
+    """取消 chase 時撤單失敗 → 發 on_error 告警（券商端孤兒單不可無人管理）。"""
+    bus, broker, eng = _make()
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 1)
+    broker.cancel_result = False   # 撤單失敗
+    errors = []
+    bus.on_error.connect(lambda level, msg: errors.append((level, msg)))
+    assert eng.cancel(order.id) is True
+    assert errors and any("撤單失敗" in m for _, m in errors)
+
+
+# ─── #8：暫態頻率限制不終結整張 chase ──────────────────────────
+
+def test_chase_rate_limited_reprice_is_not_terminal():
+    """改價時遇頻率限制（暫態 BLOCK）→ 不終結整張 chase，下輪重試。"""
+    bus, broker, eng = _make()
+    _quote(bus, "TXFA5", 21000, 21001)
+    order = eng.add_chase("TXFA5", "Buy", 1, reprice_interval_ms=0)
+    broker.place_mode = "rate_limited"
+    _quote(bus, "TXFA5", 21002, 21003)   # 改價 → 撤舊單、新單遇頻率限制
+    d = _order_dict(eng, order.id)
+    assert d["chase_status"] == ChaseStatus.CHASING   # 未終結（非 RISK_BLOCKED）
+    assert d["is_active"] is True
+    assert order.broker_order_ids == ""               # 無 working 單，待重掛
+    # 對帳此時也不得把「無 working 單」誤判為外部撤單
+    eng._external_cancel_grace_ms = 0.0
+    eng.sync_broker_orders([])
+    eng.sync_broker_orders([])
+    assert _order_dict(eng, order.id)["chase_status"] == ChaseStatus.CHASING
+    # 下輪頻率恢復，價格續不利 → 重掛（不再重撤，因為本就無 working 單）
+    broker.place_mode = "ok"
+    n_cancel = len(broker.cancelled)
+    _quote(bus, "TXFA5", 21004, 21005)
+    assert order.broker_order_ids.startswith("ORD")   # 已重掛
+    assert len(broker.cancelled) == n_cancel          # 沒有多餘撤單

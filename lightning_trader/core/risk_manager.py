@@ -69,6 +69,9 @@ class CheckResult:
     level: CheckLevel
     reason: str = ""
     warnings: List[str] = field(default_factory=list)
+    # 暫態 BLOCK（如頻率限制）：呼叫端（智慧單觸發 / CHASE 改價）應「本次放棄、
+    # 下輪重試」，而非把整張單終結。與真正的風控封鎖（部位/日虧損/交易停止）區分。
+    transient: bool = False
 
     @property
     def passed(self) -> bool:
@@ -81,6 +84,11 @@ class CheckResult:
     @staticmethod
     def block(reason: str):
         return CheckResult(CheckLevel.BLOCK, reason)
+
+    @staticmethod
+    def block_transient(reason: str):
+        """暫態封鎖（頻率限制）：可重試，不應終結整張智慧單。"""
+        return CheckResult(CheckLevel.BLOCK, reason, transient=True)
 
     @staticmethod
     def warn(reason: str, warnings: Optional[List[str]] = None):
@@ -342,7 +350,8 @@ class RiskManager:
         now = time.time()
         self._order_timestamps = [t for t in self._order_timestamps if now - t < 1.0]
         if len(self._order_timestamps) >= self.config.max_order_rate:
-            return CheckResult.block(
+            # 頻率超限是「暫態」封鎖：智慧單/CHASE 應本輪放棄、下輪重試（#8）
+            return CheckResult.block_transient(
                 f"下單頻率超限: {len(self._order_timestamps)}/{self.config.max_order_rate} 筆/秒"
             )
         return CheckResult.ok()

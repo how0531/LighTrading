@@ -65,7 +65,7 @@ def _net_position(symbol: str) -> Optional[int]:
 # 哨兵單一定義在 core（引擎的契約），backend 直接 import ——
 # 之前兩邊各自定義字串常數、只靠字面相等耦合，分歧時 bracket 會把
 # 被攔下的進場當成功、掛出沒有母單的幽靈 OCO
-from core.smart_order_engine import RISK_BLOCKED  # noqa: E402
+from core.smart_order_engine import RISK_BLOCKED, RATE_LIMITED  # noqa: E402
 
 
 def smart_place_order(symbol: str, price: float, action: str, qty: int):
@@ -122,7 +122,9 @@ def smart_place_order(symbol: str, price: float, action: str, qty: int):
                 shared.engine.event_bus.on_risk_breach.emit("block", msg)
             except Exception:
                 pass
-            return RISK_BLOCKED
+            # #8：暫態封鎖（頻率限制）回 RATE_LIMITED（CHASE 本輪放棄、下輪重試），
+            # 真正的風控封鎖才回 RISK_BLOCKED（終態）
+            return RATE_LIMITED if getattr(result, "transient", False) else RISK_BLOCKED
 
     action_enum = action if isinstance(action, Action) else (
         Action.Buy if str(action).lower() == "buy" else Action.Sell
