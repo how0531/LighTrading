@@ -48,6 +48,19 @@ def _rm():
     return shared.engine.risk_manager
 
 
+def _drain_executors():
+    """抽乾三個單 worker executor：submit 哨兵並等它完成，FIFO 保證
+    先前排入的背景工作（智慧單觸發的下單、cancel_all 的撤單、成交副作用
+    排的重算）全部落地。避免前一測試遲到的 place_order 在下一測試
+    clear 之後才寫進 placed_orders，造成 test_create_bracket_via_rest
+    這類「多看到一筆」的 flaky。"""
+    for ex in (shared.broker_executor, shared.order_executor, shared.sync_executor):
+        try:
+            ex.submit(lambda: None).result(timeout=5)
+        except Exception:
+            pass
+
+
 @pytest.fixture(autouse=True)
 def _reset_state():
     """每個測試前重置：登入狀態、風控、rate limit、假下單紀錄。"""
@@ -55,13 +68,17 @@ def _reset_state():
     sj_client._is_connected = True
     sj_client.active_stock_account = _fake_api()._accounts[0]
     sj_client.active_futopt_account = _fake_api()._accounts[1]
+    eng = getattr(shared.engine, "smart_order_engine", None)
+    if eng is not None:
+        eng.cancel_all()
+    # 先抽乾背景 executor，再清假下單紀錄 —— 順序關鍵：確保前一測試
+    # 在背景執行緒上 dispatch 的下單/撤單都已落地後才 clear，之後不再有
+    # 遲到的寫入污染下一測試。
+    _drain_executors()
     _fake_api().positions = []
     _fake_api().trades = []
     _fake_api().placed_orders.clear()
     _fake_api().cancelled_orders.clear()
-    eng = getattr(shared.engine, "smart_order_engine", None)
-    if eng is not None:
-        eng.cancel_all()
     rm = _rm()
     rm.reset_daily()
     rm.update_config(max_position_per_symbol=10, max_daily_loss=-50000.0)
