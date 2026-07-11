@@ -243,13 +243,25 @@ async def unwatch(req: UnwatchRequest):
         ]}
     removed: list[str] = []
     skipped: list[str] = []
-    for s in req.symbols[:30]:   # 與 watch 相同上限
-        if not isinstance(s, str) or not s.strip():
-            continue
-        sym = s.strip().upper()
+    symbols = [s.strip().upper() for s in req.symbols[:30]
+               if isinstance(s, str) and s.strip()]
+
+    # #13：先「一次」在 sync executor 上抓好持倉集合，不在 broker 佇列上逐 symbol
+    #   查 list_positions（那會串行阻塞手動下單）。查失敗 → held=None：保守全部
+    #   跳過退訂（持倉保護寧可多留訂閱，不誤退持倉商品的 PnL 串流）。
+    held: set | None
+    try:
+        positions = await shared.run_in_sync_thread(
+            shared.shioaji_client.list_positions_strict)
+        held = {(p.get("symbol") or "") for p in positions}
+    except Exception as e:
+        logger.warning(f"unwatch 批次查持倉失敗，保守跳過所有退訂: {e}")
+        return {"status": "success", "removed": [], "skipped": symbols}
+
+    for sym in symbols:
         try:
             ok = await shared.run_in_broker_thread(
-                shared.shioaji_client.unsubscribe_background, sym)
+                shared.shioaji_client.unsubscribe_background, sym, held)
         except Exception as e:
             logger.warning(f"unwatch 退訂 {sym} 失敗: {e}")
             ok = False

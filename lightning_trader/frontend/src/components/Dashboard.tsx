@@ -1,4 +1,4 @@
-import React, { useState, Suspense, lazy } from 'react';
+import React, { useState, useEffect, Suspense, lazy } from 'react';
 import Header from './Header';
 import DOMPanel from './DOMPanel';
 // Focus mode 預設為 true → 以下 panels 在首載時不會顯示，懶載入掉
@@ -138,6 +138,19 @@ const DashboardContent: React.FC = () => {
   // Sprint 26：本地價格穿越警報
   usePriceAlerts();
   const tradingDisabled = riskStatus !== null && riskStatus.trading_enabled === false;
+  // P3：只在 block 級且新鮮（60s 內）時採用 riskAlert.reason 當熔斷原因；否則 fallback 泛用文案。
+  // riskAlert 永不清除 → 舊的 warning 級或過期原因不該被當成本次停止交易的理由顯示。
+  // nowTick 用 state（每 30s tick）取代 render 期 Date.now()，保持 render 純函式。
+  const RISK_REASON_FRESH_MS = 60_000;
+  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  const freshBlockReason = riskAlert && riskAlert.level === 'block'
+    && (nowTick - riskAlert.at) < RISK_REASON_FRESH_MS
+    ? riskAlert.reason
+    : null;
 
   const [layouts, setLayouts] = useState(() => {
     // preset 模式：lg 用 preset，md/sm 沿用既有預設（行動端不差異化）
@@ -193,9 +206,9 @@ const DashboardContent: React.FC = () => {
         <div className="mb-2 -mx-4 px-4 py-1.5 bg-red-700/30 border-y border-red-500/60 flex items-center gap-2 text-red-200 text-xs font-bold">
           <ShieldAlert className="w-4 h-4 flex-shrink-0" />
           <span>
-            {/* Item 13：WS RiskStatusUpdate 帶真正的熔斷原因；沒有才 fallback 泛用文案 */}
-            {riskAlert?.reason
-              ? `風控已停止交易：${riskAlert.reason}。`
+            {/* Item 13 / P3：僅 block 級且新鮮的 riskAlert 才當熔斷原因；否則 fallback 泛用文案 */}
+            {freshBlockReason
+              ? `風控已停止交易：${freshBlockReason}。`
               : '風控已停止交易：可能因日虧損達上限。'}
             {riskStatus && (
               <>

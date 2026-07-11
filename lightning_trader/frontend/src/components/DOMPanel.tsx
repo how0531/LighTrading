@@ -16,6 +16,7 @@ import type { AccountPosition } from '../contexts/TradingContext';
 import { getMultiplier } from '../types';
 import type { SizingMode } from '../utils/sizing';
 import { nearestLadderPrice, resolveAnchorTarget, type DomAnchor } from '../utils/domAnchor';
+import { areOrderHotkeysBlocked } from '../utils/hotkeyGate';
 
 // 精確四捨五入避免浮點漂移
 const round2 = (n: number): number => Math.round(n * 100) / 100;
@@ -233,6 +234,9 @@ export const DOMPanel: React.FC = () => {
     const onKeyDown = async (e: KeyboardEvent) => {
       const tag = (e.target as HTMLElement).tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      // P0-1：設定 / 速查表等 modal 開啟時，全域下單熱鍵一律停用（不 preventDefault，
+      // 讓 modal 內的重綁按鍵捕捉 / Enter 送出照常）。ConfirmDialog / 宮格另有 capture 攔截。
+      if (areOrderHotkeysBlocked()) return;
 
       // ★ R6b + Sprint 28: 數字鍵 1–9 隨 sizing.mode 切換語意
       //   - lots:       N = N 張/口
@@ -261,6 +265,11 @@ export const DOMPanel: React.FC = () => {
 
       const matched = hotkeys.find((hk) => hk.key === e.key);
       if (!matched) return;
+
+      // P0-1：帶 Ctrl/Cmd/Alt 修飾鍵 → 放行瀏覽器原生快捷（Ctrl+S 存檔、Cmd+A 全選…），
+      //       不觸發下單熱鍵（避免戰鬥模式下 Ctrl+S=市價賣、Cmd+A=市價買 誤觸）。
+      //       e.repeat（長按）不觸發，防止按住連射市價單。Shift 不擋（? 速查表、大寫需要）。
+      if (e.ctrlKey || e.metaKey || e.altKey || e.repeat) return;
 
       e.preventDefault();
       const cp = currentPrice || refPrice;
@@ -363,7 +372,7 @@ export const DOMPanel: React.FC = () => {
         />
       )}
 
-      {/* 拆單進度列：大單連送時顯示進度 + 中止按鈕 */}
+      {/* 拆單進度列：大單連送時顯示進度 + 中止按鈕；中止後短暫顯示「已中止 x/y」（唯讀，無中止鈕） */}
       {splitProgress && !splitProgress.aborted && (
         <div className="flex-shrink-0 px-3 py-1.5 bg-sky-500/10 border-t border-sky-500/40 flex items-center justify-between gap-3">
           <div className="flex items-center gap-2 min-w-0">
@@ -384,6 +393,14 @@ export const DOMPanel: React.FC = () => {
           >
             中止
           </button>
+        </div>
+      )}
+      {splitProgress && splitProgress.aborted && (
+        <div className="flex-shrink-0 px-3 py-1.5 bg-amber-500/10 border-t border-amber-500/40 flex items-center gap-2">
+          <span className="text-[11px] font-black text-amber-300 tabular-nums whitespace-nowrap">
+            已中止拆單 {splitProgress.sent}/{splitProgress.total}
+          </span>
+          <span className="text-[10px] text-amber-400/80">（已送出的不受影響）</span>
         </div>
       )}
 

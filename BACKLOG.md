@@ -25,6 +25,26 @@
 
 - **選項 3：官方 Shioaji HTTP API / SSE（`shioaji server`）**：Shioaji Pro 整套架構即為此路（前端零後端直連 localhost:8080 + SSE）。若未來想讓前端脫離自建 FastAPI 獨立運行、或雙軌並存，此為官方支援路徑。待調研：功能覆蓋度（智慧單需自行實作——我們的伺服器端 SmartOrderEngine 是差異化優勢，不可放棄）、認證模型、與現有 WS 協定的遷移成本。
 
+## 🛡️ 對抗式審查延後項（2026-07-06，三方審查後）
+
+三份對抗式審查修掉了跨後端/前端/沙箱的多個 P0（CHASE 超額建倉、熱鍵誤觸、按價位刪單假契約、沙箱逃逸）與一批 P1/P2，已入庫。以下為當時判定「需實盤驗證」或「純架構競態、風險高於收益」而延後者：
+
+| 項目 | 說明 | 延後原因 |
+|---|---|---|
+| MARKET final leg ROD/IOC 拒單時序 | CHASE 收尾轉市價用 MKT+ROD，TAIFEX 市價須 IOC，是否必被拒需實盤確認 | 需真實 SDK/擬真環境驗證；目前「送出成功才標終態」已符合，成交走 journal/order_sync |
+| 下單回傳 ordno 時序 | 真 SDK place_order 回傳當下 ordno 是否為空，決定即時對帳鏈的實際行為 | 已用 sync 對帳回填 ordno 兜底，但上線前應以實盤驗證回傳時序 |
+| CHASE unwatch TOCTOU | 查持倉與退訂之間持倉可能變動（極窄窗，有成交後補訂兜底） | 純競態、罕見；硬修需跨模組鎖，風險高於收益 |
+| `_background_symbols` 鎖粒度 / 重連 Timer 執行緒競態 | 極窄窗可能留下「集合有但串流已退」或反向 | 同上，需審慎重構鎖模型 |
+| 關機窗口 `_chase_busy` 洩漏 | executor 關閉中 dispatch 例外可能不釋放 busy | 僅程序關閉瞬間，影響面極小 |
+
+## 🔒 自訂指標沙箱殘餘風險（誠實揭示）
+
+沙箱已大幅提高逃逸門檻（毒化 constructor chain、清空 worker 網路/儲存能力、CSP `worker-src 'self'` 擋 blob/data 巢狀 worker、誠實 UI 文案與警告），但：
+- 瀏覽器內對任意使用者 JS 的黑名單/能力清空沙箱，在**沒有真正解譯器（如 quickjs-wasm）**下不可證明不可破。
+- `import()` 為語法無法移除，靠 CSP + 能力清空兜底，非硬保證。
+- `connect-src` 未在 meta CSP 設定（會斷掉 app 自己的跨源後端），真正的連線層封鎖應改為部署時**伺服器端 CSP header** 針對後端 origin 設定。
+- **建議**：若要開放「載入第三方指標」情境，未來評估改用 quickjs-wasm 真解譯器沙箱。目前定位為「使用者自寫指標」，UI 已警告勿貼不信任代碼。
+
 ## ⚖️ 授權紅線（永久有效）
 
 - Shioaji Pro（Sinotrade/shioaji-pro-app）為 **AGPL-3.0**：功能只能依公開文件/行為描述重新實作，**禁止讀取或引用其原始碼**。LighTrade 維持專有授權。

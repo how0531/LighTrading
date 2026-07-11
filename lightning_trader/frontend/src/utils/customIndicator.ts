@@ -7,12 +7,21 @@
  *   - 蒐集 plot()/hline() 呼叫 → 輸出線自動偵測。
  *   - throw → {error, errorLine?}，不外拋。
  *
- * 沙箱分層：
- *   1. 真正的隔離在 workers/indicatorWorker.ts（獨立執行緒、全域網路/儲存
- *      能力清空、主執行緒 2s timeout → terminate）。
- *   2. 本 harness 另以函式作用域 var 遮蔽（fetch/XMLHttpRequest/WebSocket/
- *      importScripts/indexedDB/...）做 defense-in-depth——即使在主執行緒
- *      跑測試，使用者代碼也拿不到這些全域。
+ * 沙箱分層（誠實聲明：瀏覽器內對任意使用者 JS 做「完美」沙箱在沒有真正
+ * 解譯器（quickjs-wasm 等）下並不可能。以下是「大幅提高逃逸門檻 + 網路兜底
+ * + 明確警告」的縱深防禦，不宣稱牢不可破）：
+ *   1. 真正的隔離在 workers/indicatorWorker.ts（獨立執行緒、全域能力白名單
+ *      清空、constructor chain 毒化、主執行緒 2s timeout → terminate）。
+ *   2. 本 harness 以函式作用域 var 遮蔽危險裸名（fetch/XMLHttpRequest/
+ *      WebSocket/Function/Worker/Blob/URL/...）——使用者代碼與遮蔽宣告在
+ *      「同一個函式體」內（PRELUDE + code concatenated），var 遮蔽對裸名
+ *      才有效。
+ *   3. poisonConstructorChain()（worker 載入時、跑任何使用者代碼前呼叫）把
+ *      Function / async / generator / asyncGenerator 的 prototype.constructor
+ *      全部改成 throw，封死 `(function(){}).constructor('return this')()`、
+ *      `[].constructor.constructor` 這類拿回真實全域的路徑。
+ * harness 自身用 import 時捕獲的 RealFunction 建構使用者函式，因此毒化
+ * constructor chain 不影響 harness（new RealFunction 不經過 .constructor）。
  * 絕不在主執行緒 eval 使用者代碼（僅測試 harness 純邏輯時例外）。
  */
 import {
@@ -129,19 +138,81 @@ const ARG_NAMES = [
 ] as const;
 
 /**
+ * 在 module 載入時捕獲真正的 Function 建構子。harness 用 `new RealFunction`
+ * 建構使用者函式——即使之後 poisonConstructorChain() 把 Function.prototype
+ * .constructor 換成 throw，這個直接參照仍可用（[[Construct]] 不經過
+ * .constructor 屬性查找）。
+ */
+const RealFunction = Function;
+
+/**
  * 遮蔽危險全域（函式作用域 var → 覆蓋為 undefined）。
- * 這是 defense-in-depth：worker 端已把全域清空，這裡再擋一層，
- * 讓主執行緒測試環境下的行為與 worker 一致。
+ * 這是 defense-in-depth：worker 端已把全域清空並毒化 constructor chain，
+ * 這裡再擋一層裸名，讓主執行緒測試環境下的行為與 worker 一致。
+ * 注意：strict mode 下不能把 `eval` / `arguments` 當繫結名，故不列入；
+ * eval 由 worker 全域清空 + constructor 毒化涵蓋。整串維持「單行、無 \n」，
+ * 以免改動 LINE_OFFSET（錯誤行號 hint 依賴之）。
  */
 const SANDBOX_SHADOW =
   'var fetch, XMLHttpRequest, WebSocket, EventSource, importScripts, indexedDB, ' +
   'localStorage, sessionStorage, caches, cookieStore, ' +
   'globalThis, self, window, document, navigator, location, ' +
-  'postMessage, onmessage, close;';
+  'postMessage, onmessage, close, ' +
+  'Function, Worker, SharedWorker, Blob, URL, MessageChannel, BroadcastChannel, ' +
+  'WebAssembly, SharedArrayBuffer;';
 
 const PRELUDE = `"use strict";\n${SANDBOX_SHADOW}\n`;
 // new Function 產生的原始碼在 body 前有 2 行（function anonymous(args\n) {\n）
 const LINE_OFFSET = 2 + (PRELUDE.match(/\n/g)?.length ?? 0);
+
+let chainPoisoned = false;
+/**
+ * 毒化 constructor chain：把 Function / AsyncFunction / GeneratorFunction /
+ * AsyncGeneratorFunction 的 prototype.constructor 全部改成 throw，並設
+ * configurable:false 釘死。這封死 `(function(){}).constructor`、
+ * `[].constructor.constructor`、`(async function(){}).constructor` 等取回
+ * 真實 Function 建構子 → `('return this')()` 拿回全域的路徑。
+ *
+ * 必須在「捕獲 RealFunction 之後、跑任何使用者代碼之前」呼叫（worker 載入時）。
+ * 對主執行緒 realm 是不可逆且全域的操作，故僅由 worker 與專屬沙箱測試呼叫，
+ * 不在共用測試流程中呼叫（vitest forks 逐檔隔離）。冪等。
+ *
+ * 注意：只改各 prototype 的 `constructor` 屬性，不動全域 `Function` 繫結，
+ * 因此 `new Function()`（直接繫結）與依賴 `x.constructor === Function` 之外的
+ * 一般程式不受影響；harness 亦使用捕獲的 RealFunction。
+ */
+export function poisonConstructorChain(): void {
+  if (chainPoisoned) return;
+  chainPoisoned = true;
+  const thrower = function sandboxDisabled(): never {
+    throw new Error('sandbox: Function constructor 已停用（自訂指標沙箱）');
+  };
+  const protos: object[] = [Function.prototype];
+  // async / generator / asyncGenerator function 的 [[Prototype]]（其上有 constructor）
+  const capture = (fn: unknown): void => {
+    try {
+      const proto = Object.getPrototypeOf(fn as object);
+      if (proto && proto !== Function.prototype) protos.push(proto);
+    } catch {
+      /* 引擎不支援 → 略過 */
+    }
+  };
+  try { capture(Object.getPrototypeOf(function* () {})); } catch { /* no generators */ }
+  try { capture(Object.getPrototypeOf(async function () {})); } catch { /* no async */ }
+  try { capture(Object.getPrototypeOf(async function* () {})); } catch { /* no async gen */ }
+  for (const proto of protos) {
+    try {
+      Object.defineProperty(proto, 'constructor', {
+        value: thrower,
+        writable: false,
+        enumerable: false,
+        configurable: false,
+      });
+    } catch {
+      /* 已 frozen / non-configurable → 盡力而為 */
+    }
+  }
+}
 
 function extractErrorLine(err: unknown): number | undefined {
   if (!(err instanceof Error) || !err.stack) return undefined;
@@ -235,8 +306,9 @@ export function runUserIndicator(
   const times = candles.map((c) => c.time);
 
   try {
-    // new Function：只在 worker 內執行（見檔頭沙箱分層說明）;測試環境例外
-    const fn = new Function(...ARG_NAMES, PRELUDE + code) as (
+    // 用捕獲的 RealFunction 建構（見檔頭沙箱分層說明）：即使 constructor chain
+    // 已毒化,harness 仍能建構使用者函式。只在 worker 內執行;測試環境例外。
+    const fn = new RealFunction(...ARG_NAMES, PRELUDE + code) as (
       ...args: unknown[]
     ) => unknown;
     fn(candles, params, ta, plot, hline, closes, opens, highs, lows, volumes, times);

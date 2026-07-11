@@ -39,6 +39,9 @@ class PlaceOrderRequest(BaseModel):
 class CancelAllRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=12)
     action: str
+    # None = 撤該側全部（cancel_all）；有值 = 只撤該精確價位（cancel_orders_by_action_price）。
+    # 前端「按價位刪單」/ 撤鋪單走精確價位，避免誤刪整側含手動單。
+    price: Optional[float] = Field(default=None, ge=0)
 
 class UpdateOrderRequest(BaseModel):
     symbol: str = Field(min_length=2, max_length=12)
@@ -186,12 +189,31 @@ async def update_order(req: UpdateOrderRequest):
 
 @router.post("/cancel_all")
 async def cancel_all(req: CancelAllRequest):
-    """刪單後回傳已確認的活躍委託快照"""
+    """
+    刪單後回傳已確認的活躍委託快照 + 實際撤單數（cancelled）。
+
+    price 有值 → 只撤該精確價位（cancel_orders_by_action_price）；撤 0 筆代表
+                 該價位已無委託（可能已成交／已被撤），據實回報 cancelled=0。
+    price 為 None → 維持整側撤單（cancel_all）。
+    """
     action_val = Action.Buy if req.action.lower() == "buy" else Action.Sell
     try:
-        cancel_count = await shared.run_in_broker_thread(shared.shioaji_client.cancel_all, req.symbol, action_val)
+        if req.price is not None:
+            cancel_count = await shared.run_in_broker_thread(
+                shared.shioaji_client.cancel_orders_by_action_price,
+                req.symbol, action_val, req.price,
+            )
+        else:
+            cancel_count = await shared.run_in_broker_thread(
+                shared.shioaji_client.cancel_all, req.symbol, action_val,
+            )
         snapshot = await _get_working_orders_snapshot()
-        return {"status": "success", "message": f"成功送出 {cancel_count} 筆刪單指令", "data": snapshot}
+        return {
+            "status": "success",
+            "message": f"成功送出 {cancel_count} 筆刪單指令",
+            "cancelled": cancel_count,
+            "data": snapshot,
+        }
     except Exception as e:
         logger.error(f"批次刪單失敗: {e}")
         raise HTTPException(status_code=500, detail={

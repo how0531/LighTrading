@@ -569,14 +569,30 @@ export function computeSuperTrend(bars: Candle[], period: number = 10, mult: num
   return out;
 }
 
-/** 台北時區（UTC+8）日切 key：作為 VWAP 日內錨定的重置邊界。 */
+/** 台北時區（UTC+8）曆日切 key（午夜對午夜）。一般曆日用途保留。 */
 export function taipeiDayKey(unixSec: number): number {
   return Math.floor((unixSec + 8 * 3600) / 86400);
 }
 
 /**
- * VWAP（日內錨定版）：跨日（台北時間 00:00）重置累計。
- * 舊版 computeVWAP 為全段累計，保留相容；圖表指標採本函式。
+ * TAIFEX「交易日」錨定 key（給 VWAP 用）：邊界改在台北 05:00，而非午夜。
+ *
+ * 動機：TAIFEX 夜盤 15:00 → 翌日 05:00 與其「日盤」同屬一個交易日。用午夜
+ * 切（taipeiDayKey）會把連續的夜盤在 00:00 硬切成兩段、VWAP 於半夜重置——
+ * 錯誤。改以 05:00 為邊界後：
+ *   - 日盤 08:45–13:45 與其後夜盤 15:00–翌日 05:00 共用同一 key（連續累計）,
+ *   - 夜盤跨過午夜（00:00）不會重置,
+ *   - 新錨點落在 05:00 之後（下一個日盤開盤前的空窗），符合交易日語意。
+ * 位移量 = +8h(tz) − 5h(session) = +3h。
+ */
+export function taifexTradingDayKey(unixSec: number): number {
+  return Math.floor((unixSec + 3 * 3600) / 86400);
+}
+
+/**
+ * VWAP（日內錨定版）：以 TAIFEX 交易日（台北 05:00 邊界）重置累計，使日盤 +
+ * 其後夜盤（含跨午夜段）連續。舊版 computeVWAP 為全段累計，保留相容；
+ * 圖表指標採本函式。
  */
 export function computeVWAPDaily(bars: Candle[]): IndicatorPoint[] {
   const out: IndicatorPoint[] = [];
@@ -584,7 +600,7 @@ export function computeVWAPDaily(bars: Candle[]): IndicatorPoint[] {
   let cumPV = 0;
   let cumV = 0;
   for (const b of bars) {
-    const key = taipeiDayKey(b.time);
+    const key = taifexTradingDayKey(b.time);
     if (key !== dayKey) {
       dayKey = key;
       cumPV = 0;

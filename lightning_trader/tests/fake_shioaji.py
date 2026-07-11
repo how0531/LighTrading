@@ -190,6 +190,17 @@ class FakeShioaji:
         self.trades: list = []                     # 測試自行注入（make_trade）+ place_order 自動加入
         self._order_seq = 0
         self._order_callback = None
+        # ── #18：更貼近真 SDK 的可選行為（預設關閉 → 既有測試不受影響） ──
+        # deferred_ordno：True 時 place_order 回傳當下 ordno 留空（模擬交易所回報後
+        #   才補 ordno），需呼叫 reveal_ordno(trade) 才補上真 ordno。
+        self.deferred_ordno = False
+        # async_cancel：True 時 cancel_order 不立即生效（真 SDK 撤單非同步），
+        #   需呼叫 flush_cancels() 才把待撤單標成 Cancelled。
+        self.async_cancel = False
+        self._pending_cancels: list = []
+        # cancel_race_hook(trade)：撤單「送出當下」呼叫，模擬撤單在途時舊單
+        #   於交易所端先部分/全部成交（P0-1 競速）。
+        self.cancel_race_hook = None
 
     # ── session ──
     def login(self, api_key: str = "", secret_key: str = "", **kw):
@@ -225,9 +236,12 @@ class FakeShioaji:
             "order_cond": str(getattr(order, "order_cond", "")),
         }
         self.placed_orders.append(record)
+        real_ordno = f"ORD{self._order_seq:04d}"
+        # deferred_ordno：模擬真 SDK —— 下單當下 ordno 常為空，成交回報才帶 ordno
+        shown_ordno = "" if self.deferred_ordno else real_ordno
         trade = SimpleNamespace(
             order=SimpleNamespace(id=f"ORD{self._order_seq:04d}", seqno=f"{self._order_seq:06d}",
-                                  ordno=f"ORD{self._order_seq:04d}",
+                                  ordno=shown_ordno,
                                   action=getattr(order, "action", None),
                                   price=getattr(order, "price", 0),
                                   quantity=getattr(order, "quantity", 0)),
@@ -235,17 +249,72 @@ class FakeShioaji:
                                    deal_quantity=0, deals=[], modified_at=None),
             contract=contract,
         )
+        trade._real_ordno = real_ordno   # reveal_ordno 用
         # 本 session 下的單也要出現在 list_trades()（真實 SDK 行為）——
         # CHASE cancel-replace / order_sync 對帳都靠 list_trades 找委託
         self.trades.append(trade)
         return trade
 
+    def reveal_ordno(self, trade):
+        """模擬交易所回報後補上真 ordno（deferred_ordno 模式用）。"""
+        trade.order.ordno = getattr(trade, "_real_ordno",
+                                    getattr(trade.order, "id", ""))
+        return trade.order.ordno
+
     def cancel_order(self, trade):
-        """撤單：把該 trade 標成 Cancelled（真實 SDK 是非同步，這裡直接生效）。"""
-        trade.status.status = SimpleNamespace(name="Cancelled")
+        """撤單。真 SDK 為非同步：
+
+        - 預設（async_cancel=False）：直接生效標 Cancelled（維持既有測試 /
+          cancel_orders_by_action_price 的同步語意）。
+        - async_cancel=True：只登記待撤，需 flush_cancels() 才生效，期間可與
+          成交競速（cancel_race_hook 模擬撤單在途的部分成交）。
+        """
+        # 撤單送出當下的競速鉤子（模擬撤單在途舊單先成交）
+        if self.cancel_race_hook is not None:
+            try:
+                self.cancel_race_hook(trade)
+            except Exception:
+                pass
         self.cancelled_orders.append(getattr(trade.order, "ordno",
                                              getattr(trade.order, "id", "")))
+        if self.async_cancel:
+            # 若競速鉤子已把單全部成交 → 該單已 Filled，不再標 Cancelled
+            cur = (trade.status.status.name if hasattr(trade.status, "status")
+                   else getattr(trade.status, "name", ""))
+            if cur != "Filled":
+                self._pending_cancels.append(trade)
+            return trade
+        # 同步生效
+        if (trade.status.status.name if hasattr(trade.status, "status")
+                else getattr(trade.status, "name", "")) != "Filled":
+            trade.status.status = SimpleNamespace(name="Cancelled")
         return trade
+
+    def fill_trade(self, trade, qty: int, price: float = 0.0, seq: str = ""):
+        """模擬一筆成交：累加 deal_quantity + 新增 Deal；全成 → status=Filled。
+        撤單競速鉤子與 order_sync 對帳測試共用。"""
+        st = trade.status
+        st.deal_quantity = int(getattr(st, "deal_quantity", 0) or 0) + int(qty)
+        deals = list(getattr(st, "deals", None) or [])
+        deals.append(SimpleNamespace(price=price or float(trade.order.price or 0),
+                                     quantity=int(qty), seq=seq or str(len(deals) + 1),
+                                     ts=0))
+        st.deals = deals
+        ordered = int(getattr(trade.order, "quantity", 0) or 0)
+        if st.deal_quantity >= ordered and ordered > 0:
+            st.status = SimpleNamespace(name="Filled")
+        else:
+            st.status = SimpleNamespace(name="PartFilled")
+        return trade
+
+    def flush_cancels(self):
+        """把待撤委託標成 Cancelled（async_cancel 模式；已 Filled 者不改）。"""
+        for trade in self._pending_cancels:
+            cur = (trade.status.status.name if hasattr(trade.status, "status")
+                   else getattr(trade.status, "name", ""))
+            if cur != "Filled":
+                trade.status.status = SimpleNamespace(name="Cancelled")
+        self._pending_cancels.clear()
 
     # ── 查詢 ──
     def update_status(self, *args, **kwargs):

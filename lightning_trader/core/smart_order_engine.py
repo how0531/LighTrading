@@ -40,6 +40,10 @@ logger = logging.getLogger(__name__)
 #:   RISK_BLOCKED = 被風控攔下（觸發視為已消耗，不重試）
 #:   None / 例外  = 下單失敗（re-arm 重試，上限 _MAX_TRIGGER_RETRIES）
 RISK_BLOCKED = "RISK_BLOCKED"
+#: place_order_fn 的暫態哨兵：被「頻率限制」這類暫態風控 BLOCK 擋下。
+#: 與 RISK_BLOCKED（真正的風控封鎖，終態）不同 —— RATE_LIMITED 不終結
+#: 整張 CHASE，本次動作放棄、下輪重試。
+RATE_LIMITED = "RATE_LIMITED"
 _MAX_TRIGGER_RETRIES = 3
 
 #: 券商端仍算「活躍」的委託狀態（與 order_sync.ACTIVE_STATUSES 對齊）
@@ -84,11 +88,30 @@ def default_tick_size(price: float, symbol: str) -> float:
     """未注入 tick_size_fn 時的保底（backend 會注入 contract_specs.get_tick_size，
     兩者邏輯一致；這份 fallback 讓 core 可獨立運作、不反向依賴 backend）。"""
     sym = (symbol or "").upper()
-    if sym.startswith(("TXF", "MXF", "TX", "MX", "UD", "MYM", "GTF", "EXF")):
+    p = float(price or 0)
+    # ── 選擇權（TXO 台指選擇權 / TFO 個股選擇權）：權利金級距 ──
+    #   ★ 必須在 TX/TF 前綴判斷之前，否則 "TXO" 被 "TX" 吞成 1.0，
+    #     權利金 5 點的選擇權用 1.0 級距，chase 追一格就跳 20% → 永遠追不上。
+    if sym.startswith(("TXO", "TFO")):
+        if p < 10: return 0.1
+        if p < 50: return 0.5
+        if p < 500: return 1.0
+        if p < 1000: return 5.0
+        return 10.0
+    # ── 電子期(EXF) / 櫃買期(GTF)：0.05 點（之前誤設 1.0，chase 追不上） ──
+    if sym.startswith(("EXF", "GTF")):
+        return 0.05
+    # ── 金融期(FXF)：0.2 點 ──
+    if sym.startswith(("FXF",)):
+        return 0.2
+    # ── 股價指數期貨（大台/小台/微型）：1 點 ──
+    if sym.startswith(("TXF", "MXF", "TX", "MX", "UD", "MYM")):
         return 1.0
     if sym.startswith(("NQ", "MNQ", "ES", "MES")):
         return 0.25
-    p = float(price or 0)
+    # ── 台灣 ETF（00 開頭，如 0050/006208）：0.01 / 0.05，與個股不同 ──
+    if sym.startswith("00"):
+        return 0.01 if p < 50 else 0.05
     if p < 10: return 0.01
     if p < 50: return 0.05
     if p < 100: return 0.10
@@ -240,6 +263,10 @@ class SmartOrderEngine:
         self.event_bus = event_bus
         self._place_order = place_order_fn
         self._cancel_order = cancel_order_fn
+        #: 撤單終態確認函數（P0-1）：(order_ids: list[str]) -> dict | None
+        #:   回 {"cancelled": bool, "filled_qty": int}（該單累計成交量），
+        #:   None = 無法確認（逾時 / 例外）。未注入時退回舊行為（信任 remaining）。
+        self._confirm_cancel = None
         self._tick_size = tick_size_fn or default_tick_size
         self._store = store
         self._smart_orders: List[SmartOrder] = []
@@ -258,6 +285,12 @@ class SmartOrderEngine:
         self._chase_reattach_pending: set = set()  # 重啟後等第一輪對帳 re-attach 的 chase id
         self._chase_fill_seen: dict = {}        # id -> 已入帳的 fill id（去重）
         self._chase_all_ids: dict = {}          # id -> 歷來所有 broker 單號（改價前的舊單成交也要對得上）
+        # 每個 chase 的「腿」：每次進場/改價各一腿。每腿記自己的 broker 單號與
+        # 已成量；order.filled_qty = Σ 各腿已成量（P1-2：跨腿漏帳修正）。
+        self._chase_legs: dict = {}             # id -> [{"ids": set, "filled": int}, ...]
+        # 完整快照中「連續看不到該單」的輪數；達 _external_cancel_rounds 才判外部撤單（P1-4）
+        self._chase_missing_rounds: dict = {}   # id -> int
+        self._external_cancel_rounds = 2        # 需連續 N 輪完整快照缺席才判死
         # 掛單消失視為外部撤單前的寬限期：剛送出的單在下一輪對帳快照裡
         # 可能還沒出現（快照先拉、下單後至），寬限期內不誤判
         self._external_cancel_grace_ms = 10_000.0
@@ -282,12 +315,15 @@ class SmartOrderEngine:
         self._dispatch = dispatch
 
     def set_chase_helpers(self, cancel_order_fn: Optional[Callable] = None,
-                          tick_size_fn: Optional[Callable] = None):
-        """注入 CHASE 需要的撤單 / tick 級距函數（backend 開機時呼叫）。"""
+                          tick_size_fn: Optional[Callable] = None,
+                          confirm_cancel_fn: Optional[Callable] = None):
+        """注入 CHASE 需要的撤單 / tick 級距 / 撤單確認函數（backend 開機時呼叫）。"""
         if cancel_order_fn is not None:
             self._cancel_order = cancel_order_fn
         if tick_size_fn is not None:
             self._tick_size = tick_size_fn
+        if confirm_cancel_fn is not None:
+            self._confirm_cancel = confirm_cancel_fn
 
     def _restore_from_store(self):
         if not (self._store and getattr(self._store, "enabled", False)):
@@ -305,8 +341,11 @@ class SmartOrderEngine:
                 # 重啟後不知道掛單是否還在：標記待 re-attach，
                 # 第一輪 sync_broker_orders 對上 → 續追；對不上 → 標終態
                 self._chase_reattach_pending.add(order.id)
-                self._chase_all_ids[order.id] = set(
-                    x for x in (order.broker_order_ids or "").split(",") if x)
+                ids = set(x for x in (order.broker_order_ids or "").split(",") if x)
+                self._chase_all_ids[order.id] = set(ids)
+                # 還原成單一腿（已成量 = 落地的 filled_qty），續追以此為基準
+                self._chase_legs[order.id] = (
+                    [{"ids": ids, "filled": int(order.filled_qty or 0)}] if ids else [])
             self._smart_orders.append(order)
             restored += 1
         # id counter 必須跳過「所有」歷史編號（含已觸發/已取消），
@@ -486,35 +525,50 @@ class SmartOrderEngine:
             chase_price=entry,
         )
 
-        # 進場：走注入的統一下單路徑（order_guard.smart_place_order —— 風控 /
-        # RISK_BLOCKED 處理比照 MIT 觸發）。add_chase 由 REST 在 broker 執行緒
-        # 上呼叫，同步阻塞 OK。
-        result = self._safe_place(sym, entry, action, qty)
-        if result == RISK_BLOCKED:
-            order.is_active = False
-            order.chase_status = ChaseStatus.RISK_BLOCKED
-            logger.warning(f"[SmartOrder] CHASE {order.id} 進場被風控攔下")
-        elif result:
-            ids = self._trade_id_candidates(result)
-            order.broker_order_ids = ",".join(ids)
-            logger.info(f"[SmartOrder] 新增 CHASE {order.id}: {action} {sym} {qty}口 "
-                        f"@ {entry}（max={max_chase_ticks}t, reprice≥{reprice_ticks}t, "
-                        f"interval={reprice_interval_ms}ms, final={order.final_action}）")
-        else:
-            order.is_active = False
-            order.chase_status = ChaseStatus.FAILED
-            logger.warning(f"[SmartOrder] CHASE {order.id} 進場下單失敗")
-
+        # #5：先在鎖內註冊（進 _smart_orders + 建 runtime/腿/all_ids）再送單，
+        # 讓「進場立即成交」的回報有單可對；送單期間先佔 _chase_busy，
+        # 避免行情執行緒在 broker_order_ids 尚未回填前就對這張單排改價（否則
+        # 會在進場單仍在途時另掛一腿 → 超量）。
         with self._lock:
             self._smart_orders.append(order)
-            self._persist(order)
-            if order.is_active:
-                self._chase_runtime[order.id] = {
-                    "last_reprice_ms": None,           # 尚未改過價 → 第一次改價不受 interval 限制
-                    "last_place_ms": self._now_ms(),
-                }
-                self._chase_all_ids[order.id] = set(
-                    x for x in order.broker_order_ids.split(",") if x)
+            self._chase_runtime[order.id] = {
+                "last_reprice_ms": None,           # 尚未改過價 → 第一次改價不受 interval 限制
+                "last_place_ms": self._now_ms(),
+            }
+            self._chase_legs[order.id] = []
+            self._chase_all_ids[order.id] = set()
+            self._chase_busy.add(order.id)
+
+        # 進場：走注入的統一下單路徑（order_guard.smart_place_order —— 風控 /
+        # RISK_BLOCKED 處理比照 MIT 觸發）。add_chase 由 REST 在 broker 執行緒
+        # 上呼叫，同步阻塞 OK。_safe_place 內部已吞例外（回 None），不會拋出；
+        # 仍以 finally 保證 busy 一定被清掉。
+        result = None
+        try:
+            result = self._safe_place(sym, entry, action, qty)
+        finally:
+            with self._lock:
+                if result == RISK_BLOCKED:
+                    order.is_active = False
+                    order.chase_status = ChaseStatus.RISK_BLOCKED
+                    self._chase_runtime.pop(order.id, None)
+                    logger.warning(f"[SmartOrder] CHASE {order.id} 進場被風控攔下")
+                elif result:
+                    ids = self._trade_id_candidates(result)
+                    order.broker_order_ids = ",".join(ids)
+                    self._chase_all_ids[order.id].update(ids)
+                    self._add_leg_nolock(order, ids)
+                    logger.info(f"[SmartOrder] 新增 CHASE {order.id}: {action} {sym} {qty}口 "
+                                f"@ {entry}（max={max_chase_ticks}t, reprice≥{reprice_ticks}t, "
+                                f"interval={reprice_interval_ms}ms, final={order.final_action}）")
+                else:
+                    order.is_active = False
+                    order.chase_status = ChaseStatus.FAILED
+                    self._chase_runtime.pop(order.id, None)
+                    logger.warning(f"[SmartOrder] CHASE {order.id} 進場下單失敗")
+                self._chase_busy.discard(order.id)
+                # 最終狀態落地（不在送單前先 persist，避免送單前當機留下無單號殭屍）
+                self._persist(order)
         self.event_bus.on_smart_order_added.emit(order.to_dict())
         return order
 
@@ -570,6 +624,49 @@ class SmartOrderEngine:
             self._dispatch(fn)
         else:
             fn()
+
+    # ──── CHASE 腿（leg）記帳：filled_qty = Σ 各腿已成量（P1-2） ────
+
+    def _add_leg_nolock(self, order: SmartOrder, ids) -> None:
+        """為 chase 新增一腿（進場 / 每次改價各一腿）。呼叫者持鎖。"""
+        legs = self._chase_legs.setdefault(order.id, [])
+        legs.append({"ids": set(str(i) for i in ids if i), "filled": 0})
+
+    def _recompute_filled_nolock(self, order: SmartOrder) -> None:
+        """order.filled_qty = Σ 各腿已成量（去重，跨腿累加）。呼叫者持鎖。"""
+        legs = self._chase_legs.get(order.id)
+        if legs is None:
+            return
+        order.filled_qty = min(order.qty, sum(int(l["filled"]) for l in legs))
+
+    def _leg_for_id_nolock(self, order: SmartOrder, match_id: str) -> Optional[dict]:
+        for leg in self._chase_legs.get(order.id, []):
+            if match_id in leg["ids"]:
+                return leg
+        return None
+
+    def _apply_leg_cumulative_nolock(self, order: SmartOrder, entry_ids: set,
+                                     cumulative) -> bool:
+        """對帳/撤單確認路徑：以「該腿的券商累計成交量」更新該腿（取 max，
+        不跨腿比較 → 修正 P1-2）；並把對到的所有識別碼回填該腿（P1-3）。
+        呼叫者持鎖。回傳是否對到腿。"""
+        match = None
+        for leg in self._chase_legs.get(order.id, []):
+            if leg["ids"] & entry_ids:
+                match = leg
+                break
+        if match is None:
+            return False
+        match["ids"] |= entry_ids                       # P1-3：回填真 ordno 等識別碼
+        self._chase_all_ids.setdefault(order.id, set()).update(entry_ids)
+        if cumulative is not None:
+            try:
+                match["filled"] = max(int(match["filled"]),
+                                      min(int(cumulative), order.qty))
+            except (TypeError, ValueError):
+                pass
+        self._recompute_filled_nolock(order)
+        return True
 
     def _emit_update(self, order: SmartOrder):
         """廣播智慧單狀態變更（SmartOrderUpdate：含目前掛價/改價次數/剩量）。"""
@@ -651,6 +748,34 @@ class SmartOrderEngine:
             logger.error(f"[SmartOrder] CHASE {order.id} 撤單例外: {e}", exc_info=True)
             return False
 
+    def _confirm_and_settle_cancel(self, order: SmartOrder) -> Optional[bool]:
+        """P0-1：撤單後確認終態並回填該腿實際成交量。
+
+        回傳：
+          True  = 已確認撤單終態（掛單已離開活躍集合）→ 可安全以實際剩量掛新單
+          False = 撤單未確認 / 逾時 → 本輪放棄（保留舊單，下輪再試）
+          None  = 未注入 confirm_cancel_fn → 退回舊行為（信任 remaining_qty）
+
+        撤單未確認前不得送新單：真 SDK 撤單非同步，舊單可能在撤單在途時
+        於交易所端部分成交，若此時盲送剩量新腿會超量建倉。
+        """
+        if self._confirm_cancel is None:
+            return None
+        ids = [x for x in (order.broker_order_ids or "").split(",") if x]
+        if not ids:
+            return True  # 沒有 working 單可撤（視為已離開活躍集合）
+        try:
+            info = self._confirm_cancel(ids)
+        except Exception as e:
+            logger.error(f"[SmartOrder] CHASE {order.id} 撤單確認例外: {e}", exc_info=True)
+            return False
+        if not info:
+            return False
+        with self._lock:
+            self._apply_leg_cumulative_nolock(
+                order, set(str(i) for i in ids), info.get("filled_qty"))
+        return bool(info.get("cancelled"))
+
     def _chase_terminal(self, order: SmartOrder, status: str):
         """標記 chase 終態 + 落地 + 廣播。"""
         with self._lock:
@@ -665,21 +790,45 @@ class SmartOrderEngine:
                     f"repriced {order.reprice_count}次)")
 
     def _reprice_chase(self, order: SmartOrder, new_price: float):
-        """改價（order executor）：cancel-replace 到新的最佳對手價，數量=剩量。"""
+        """改價（order executor）：cancel-replace 到新的最佳對手價，數量=剩量。
+
+        P0-1 不變量：活躍掛單量 + 已成量 ≤ qty。撤單 → 確認撤單終態 + 回填實際
+        成交 → 以 (qty - 實際已成) 為剩量 → 再掛新單。撤單未確認前不送新單。
+        """
         try:
             if not order.is_active or order.chase_status != ChaseStatus.CHASING:
                 return
-            if not self._cancel_broker_order(order):
-                # 撤單失敗（可能剛好全成/已被撤）→ 這輪放棄，
-                # 成交/對帳路徑會把最終狀態補上
-                logger.warning(f"[SmartOrder] CHASE {order.id} 改價前撤單失敗，略過本輪")
-                return
+            has_working = bool([x for x in (order.broker_order_ids or "").split(",") if x])
+            if has_working:
+                if not self._cancel_broker_order(order):
+                    # 撤單失敗（可能剛好全成/已被撤）→ 這輪放棄，
+                    # 成交/對帳路徑會把最終狀態補上
+                    logger.warning(f"[SmartOrder] CHASE {order.id} 改價前撤單失敗，略過本輪")
+                    return
+                confirmed = self._confirm_and_settle_cancel(order)
+                if confirmed is False:
+                    # 撤單未確認終態 → 不得送新單（否則舊單在途成交會超量）。
+                    # 保留舊單，下輪再試。
+                    logger.warning(f"[SmartOrder] CHASE {order.id} 撤單未確認，"
+                                   f"保留舊單、本輪不改價")
+                    return
+            # #6：撤舊單後、送新單前二次驗證 —— 期間可能被使用者取消 → 不掛新單
             with self._lock:
+                if not order.is_active or order.chase_status != ChaseStatus.CHASING:
+                    return
                 remaining = order.remaining_qty
             if remaining <= 0:
                 self._chase_terminal(order, ChaseStatus.FILLED)
                 return
             result = self._safe_place(order.symbol, new_price, order.action, remaining)
+            if result == RATE_LIMITED:
+                # #8：暫態頻率限制，不終結整張 chase。舊腿已撤、尚無新 working 單 →
+                # 清空單號，下輪 _check_chase_orders 觸發時直接重掛（不再重撤）。
+                with self._lock:
+                    order.broker_order_ids = ""
+                logger.warning(f"[SmartOrder] CHASE {order.id} 改價遇頻率限制，"
+                               f"本輪放棄、下輪重試")
+                return
             if result == RISK_BLOCKED:
                 # 舊單已撤、新單被風控攔 → 終態（比照 MIT 觸發被攔：已消耗不重試）
                 self._chase_terminal(order, ChaseStatus.RISK_BLOCKED)
@@ -700,6 +849,7 @@ class SmartOrderEngine:
                 if ids:
                     order.broker_order_ids = ",".join(ids)
                     self._chase_all_ids.setdefault(order.id, set()).update(ids)
+                    self._add_leg_nolock(order, ids)   # 新腿：各腿獨立記帳（P1-2）
                 rt = self._chase_runtime.setdefault(order.id, {})
                 rt["last_reprice_ms"] = self._now_ms()
                 rt["last_place_ms"] = self._now_ms()
@@ -711,14 +861,26 @@ class SmartOrderEngine:
             self._chase_busy.discard(order.id)
 
     def _finalize_chase(self, order: SmartOrder):
-        """追到上限（order executor）：撤單後依 final_action 收尾。"""
+        """追到上限（order executor）：撤單後依 final_action 收尾。
+
+        P0-1 同 _reprice_chase：MARKET 剩量轉市價前，先確認撤單終態與實際剩量。
+        """
         try:
             if not order.is_active or order.chase_status != ChaseStatus.CHASING:
                 return
-            if not self._cancel_broker_order(order):
-                logger.warning(f"[SmartOrder] CHASE {order.id} 收尾撤單失敗，略過本輪")
-                return
+            has_working = bool([x for x in (order.broker_order_ids or "").split(",") if x])
+            if has_working:
+                if not self._cancel_broker_order(order):
+                    logger.warning(f"[SmartOrder] CHASE {order.id} 收尾撤單失敗，略過本輪")
+                    return
+                confirmed = self._confirm_and_settle_cancel(order)
+                if confirmed is False:
+                    logger.warning(f"[SmartOrder] CHASE {order.id} 收尾撤單未確認，本輪略過")
+                    return
+            # 撤舊單後、送市價前二次驗證（可能已被取消）
             with self._lock:
+                if not order.is_active or order.chase_status != ChaseStatus.CHASING:
+                    return
                 remaining = order.remaining_qty
             if remaining <= 0:
                 self._chase_terminal(order, ChaseStatus.FILLED)
@@ -726,6 +888,13 @@ class SmartOrderEngine:
             if order.final_action == "MARKET":
                 # 剩量轉市價（仍走統一下單路徑；price=0 表市價）
                 result = self._safe_place(order.symbol, 0, order.action, remaining)
+                if result == RATE_LIMITED:
+                    # #8：暫態頻率限制不終結；舊單已撤、剩量待轉市價 → 下輪重試
+                    with self._lock:
+                        order.broker_order_ids = ""
+                    logger.warning(f"[SmartOrder] CHASE {order.id} 收尾轉市價遇頻率限制，"
+                                   f"下輪重試")
+                    return
                 if result == RISK_BLOCKED:
                     self._chase_terminal(order, ChaseStatus.RISK_BLOCKED)
                 elif result:
@@ -772,7 +941,18 @@ class SmartOrderEngine:
                     if dedupe_key in seen:
                         continue  # callback 與對帳路徑重複回報同一筆成交
                     seen.add(dedupe_key)
-                order.filled_qty = min(order.qty, order.filled_qty + fqty)
+                # 累加到「這筆成交所屬的腿」（P1-2：各腿獨立記帳）
+                leg = self._leg_for_id_nolock(order, fill_order_id)
+                if leg is None:
+                    legs = self._chase_legs.setdefault(order.id, [])
+                    if legs:
+                        leg = legs[-1]
+                        leg["ids"].add(fill_order_id)
+                    else:
+                        leg = {"ids": {fill_order_id}, "filled": 0}
+                        legs.append(leg)
+                leg["filled"] += fqty
+                self._recompute_filled_nolock(order)
                 if order.filled_qty >= order.qty:
                     order.chase_status = ChaseStatus.FILLED
                     order.is_active = False
@@ -784,21 +964,28 @@ class SmartOrderEngine:
             if not order.is_active:
                 logger.info(f"[SmartOrder] CHASE {order.id} 全部成交 → FILLED")
 
-    def sync_broker_orders(self, broker_orders: List[dict]):
+    def sync_broker_orders(self, broker_orders: List[dict],
+                           snapshot_complete: bool = True):
         """
         委託對帳掛鉤（order_sync 每輪呼叫）+ 重啟 re-attach：
 
         broker_orders: [{"ids": [id/seqno/ordno...], "status": 狀態名, "filled_qty": n}]
         （來自 list_trades 的「全部」委託，不只活躍的）
+        snapshot_complete: 本輪快照是否完整可信（任一帳號 update_status 失敗 →
+            False）。不完整時不得據「掛單消失」把 chase 判為外部撤單（P1-4a），
+            但正常 fill 補償仍保留。
 
         - 待 re-attach 的 chase：ordno 對得上活躍掛單 → 續追；
-          對不上 → CANCELLED_EXTERNAL 終態並廣播，不留殭屍
-        - 追價中的 chase：掛單消失/被撤且非我方動作 → CANCELLED_EXTERNAL；
-          券商回報已全成 → FILLED（callback 漏接時的補償）
+          連續 N 輪完整快照都對不上 → CANCELLED_EXTERNAL 終態並廣播（P1-4b）
+        - 追價中的 chase：連續 N 輪完整快照掛單消失 → CANCELLED_EXTERNAL；
+          明確 Cancelled/Failed 狀態 → 外部撤單；券商回報已全成 → FILLED
+          （callback 漏接時的補償）；成交量以「該腿」累計對帳（P1-2/P1-3）
         """
         now = self._now_ms()
         terminal: List[tuple] = []   # (order, status)
         reattached: List[SmartOrder] = []
+        changed: List[SmartOrder] = []
+        orphan_cancel: List[SmartOrder] = []  # 判死前嘗試撤單（防券商端孤兒單）
         with self._lock:
             for order in self._smart_orders:
                 if (order.order_type != SmartOrderType.CHASE
@@ -808,37 +995,54 @@ class SmartOrderEngine:
                     continue
                 my_ids = set(x for x in (order.broker_order_ids or "").split(",") if x)
                 entry = None
-                for bo in broker_orders or []:
-                    if my_ids & {str(i) for i in (bo.get("ids") or ())}:
-                        entry = bo
-                        break
+                if my_ids:
+                    for bo in broker_orders or []:
+                        if my_ids & {str(i) for i in (bo.get("ids") or ())}:
+                            entry = bo
+                            break
                 reattach = order.id in self._chase_reattach_pending
 
                 if entry is None:
+                    # 無 working 單（剛因暫態頻率限制清空、待下輪重掛）→ 不判外部撤單
+                    if not my_ids:
+                        continue
+                    # (P1-4a) 快照不完整 → 不能據缺席判死；也不累計缺席輪數
+                    if not snapshot_complete:
+                        continue
                     if not reattach:
                         rt = self._chase_runtime.get(order.id) or {}
                         last_place = rt.get("last_place_ms")
                         if last_place is not None and \
                                 (now - last_place) < self._external_cancel_grace_ms:
-                            continue  # 剛送出，快照可能還沒看到 → 寬限
-                    # 重啟後對不上任何委託 / 掛單消失 → 終態，不留殭屍
+                            continue  # 剛送出，快照可能還沒看到 → 時間寬限
+                    # (P1-4b) 完整快照中缺席 → 累計輪數，連續 N 輪才判死
+                    cnt = self._chase_missing_rounds.get(order.id, 0) + 1
+                    self._chase_missing_rounds[order.id] = cnt
+                    if cnt < self._external_cancel_rounds:
+                        continue
                     # （先佔 busy：行情執行緒不得在終態落地前再排改價）
                     self._chase_busy.add(order.id)
+                    orphan_cancel.append(order)   # (P1-4c) 判死前嘗試撤單
                     terminal.append((order, ChaseStatus.CANCELLED_EXTERNAL))
                     continue
 
+                # 對到委託 → 清除缺席計數
+                self._chase_missing_rounds.pop(order.id, None)
+                entry_ids = {str(i) for i in (entry.get("ids") or ())}
                 status = str(entry.get("status") or "")
-                try:
-                    broker_filled = int(entry.get("filled_qty") or 0)
-                except (TypeError, ValueError):
-                    broker_filled = 0
-                if broker_filled > order.filled_qty:
-                    # 對帳補償（callback 漏接的成交）；fill 事件路徑用累加 +
-                    # 去重，這裡用券商累計量取 max，不會重複計
-                    order.filled_qty = min(broker_filled, order.qty)
+                broker_filled = entry.get("filled_qty")
+                before = order.filled_qty
+                # P1-2/P1-3：以「該腿」券商累計成交量對帳（不跨腿比較），
+                # 並回填對到的所有識別碼；不再無條件把 filled_qty 抹平成 qty
+                self._apply_leg_cumulative_nolock(order, entry_ids, broker_filled)
 
-                if status == "Filled" or order.filled_qty >= order.qty:
+                if order.filled_qty >= order.qty:
                     order.filled_qty = order.qty
+                    self._chase_busy.add(order.id)
+                    terminal.append((order, ChaseStatus.FILLED))
+                elif status == "Filled":
+                    # 券商回報此腿全部成交、但我方累計 < qty（例如熔斷 reduce-only
+                    # 縮量 #9）：以實際成交回報為準（不灌水到 qty），標 FILLED 終態
                     self._chase_busy.add(order.id)
                     terminal.append((order, ChaseStatus.FILLED))
                 elif status in _BROKER_ACTIVE_STATUSES:
@@ -848,13 +1052,20 @@ class SmartOrderEngine:
                             "last_reprice_ms": None,
                             "last_place_ms": now,
                         }
-                        self._chase_all_ids.setdefault(order.id, set()).update(my_ids)
+                        self._chase_all_ids.setdefault(order.id, set()).update(
+                            my_ids | entry_ids)
                         reattached.append(order)
+                    elif order.filled_qty != before:
+                        changed.append(order)   # 成交量有更新 → 廣播
                 else:
-                    # Cancelled / Failed 等，且非我方動作（我方撤單會先把狀態
-                    # 標成 CANCELLED/GAVE_UP，不會再走到這裡）→ 外部撤單
+                    # Cancelled / Failed 等明確終態（狀態是權威的，單輪即判）→ 外部撤單
                     self._chase_busy.add(order.id)
                     terminal.append((order, ChaseStatus.CANCELLED_EXTERNAL))
+        for order in orphan_cancel:
+            try:
+                self._dispatch_task(lambda o=order: self._cancel_broker_order(o))
+            except Exception:
+                pass
         for order, status in terminal:
             try:
                 self._chase_terminal(order, status)
@@ -864,6 +1075,9 @@ class SmartOrderEngine:
             self._emit_update(order)
             logger.info(f"[SmartOrder] CHASE {order.id} 重啟 re-attach 成功，繼續追價 "
                         f"(掛價 {order.chase_price}, filled {order.filled_qty}/{order.qty})")
+        for order in changed:
+            self._persist(order)
+            self._emit_update(order)
 
     # ──── 取消智慧單 ────
 
@@ -888,10 +1102,26 @@ class SmartOrderEngine:
         if cancelled is None:
             return False
         if cancelled.order_type == SmartOrderType.CHASE:
-            # 撤掛單是 broker I/O：丟 order executor，REST 路徑不阻塞
-            self._dispatch_task(lambda o=cancelled: self._cancel_broker_order(o))
+            # 撤掛單是 broker I/O：丟 order executor，REST 路徑不阻塞。
+            # #7：撤單失敗要告警（券商端可能仍有活著的孤兒單需人工處理）
+            self._dispatch_task(lambda o=cancelled: self._cancel_with_alert(o))
             self._emit_update(cancelled)
         return True
+
+    def _cancel_with_alert(self, order: SmartOrder) -> bool:
+        """撤 chase 掛單；失敗時發 on_error 告警（避免券商端孤兒單無人管理，#7）。"""
+        ok = self._cancel_broker_order(order)
+        if not ok:
+            logger.error(f"[SmartOrder] CHASE {order.id} 掛單撤單失敗，"
+                         f"券商端可能殘留孤兒單！")
+            try:
+                self.event_bus.on_error.emit(
+                    "critical",
+                    f"追價單 {order.id} 取消時撤單失敗，券商端可能仍有活躍掛單，"
+                    f"請至券商 App 確認！")
+            except Exception:
+                pass
+        return ok
 
     def cancel_all(self, symbol: Optional[str] = None) -> int:
         """批次取消所有智慧單，回傳取消數量。"""
@@ -910,7 +1140,7 @@ class SmartOrderEngine:
                         self._persist(order)
                         count += 1
         for order in chase_cancelled:
-            self._dispatch_task(lambda o=order: self._cancel_broker_order(o))
+            self._dispatch_task(lambda o=order: self._cancel_with_alert(o))
             self._emit_update(order)
         if count > 0:
             logger.info(f"[SmartOrder] 批次取消 {count} 張智慧單" +
@@ -1031,8 +1261,10 @@ class SmartOrderEngine:
                 result = None
 
             # RISK_BLOCKED 是 truthy 字串 —— result 為任何非 None/非空值
-            # 都代表「已消耗」（成功送出，或被風控攔下不重試）
-            if result:
+            # 都代表「已消耗」（成功送出，或被風控攔下不重試）。
+            # 例外：RATE_LIMITED（暫態頻率限制）視同下單失敗 → re-arm 重試，
+            # 不可讓保護性停損因暫態限制無聲消失（#8）。
+            if result and result != RATE_LIMITED:
                 self._persist(order)
                 for leg in legs:
                     self._persist(leg)

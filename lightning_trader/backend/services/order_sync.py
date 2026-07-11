@@ -170,20 +170,24 @@ async def sync_once() -> dict:
     def _pull():
         # 只做 per-account update_status（不走 client.update_status —— 那會
         # 順便 trigger_account_update，每輪都廣播帳務太吵）
+        # ★ P1-4a：任一帳號 update_status 失敗 → 本輪快照「不完整」，
+        #   list_trades 可能只涵蓋部分帳號、缺席不可信 → 標記給對帳路徑，
+        #   避免據不完整快照把 chase 誤判為外部撤單。
+        complete = True
         try:
             for acc in client.api.list_accounts():
                 try:
                     client.api.update_status(acc)
                 except Exception:
-                    pass
-            return client.api.list_trades()
+                    complete = False
+            return client.api.list_trades(), complete
         except Exception as e:
             logger.warning(f"order_sync 向券商同步失敗: {e}")
-            return None
+            return None, False
 
     # ★ 走專用 sync executor —— update_status×N + list_trades 每 2.5 秒
     #   一輪，若與手動下單共用 broker 佇列會造成 head-of-line 延遲尖峰
-    trades = await shared.run_in_sync_thread(_pull)
+    trades, snapshot_complete = await shared.run_in_sync_thread(_pull)
     if trades is None:
         return {"changed": False, "new_fills": 0}
 
@@ -225,7 +229,8 @@ async def sync_once() -> dict:
     try:
         smart_eng = getattr(shared.engine, "smart_order_engine", None) if shared.engine else None
         if smart_eng is not None and hasattr(smart_eng, "sync_broker_orders"):
-            smart_eng.sync_broker_orders(build_broker_order_index(trades))
+            smart_eng.sync_broker_orders(build_broker_order_index(trades),
+                                         snapshot_complete=snapshot_complete)
     except Exception as e:
         logger.warning(f"order_sync 智慧單對帳失敗: {e}")
 

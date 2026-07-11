@@ -103,6 +103,10 @@ export function useLayOrders() {
     const placed: LaidOrderRef[] = [];
     let abortedByUser = false;
     let errored = false;
+    // P1-1：鋪單不再無條件帶 confirm:true（那會讓後端 skip_warnings 靜默跳過價格偏離等
+    // WARNING，深檔鋪單最會踩）。改為正常送單；第一次遇到 409 CONFIRM_REQUIRED 時彈一次
+    // danger 確認，接受後 batchConfirmed=true，套用到本批後續各檔（避免每檔都彈）。
+    let batchConfirmed = false;
     try {
       for (let i = 0; i < prices.length; i++) {
         // 每檔送出前檢查中止旗標（UI 的「中止」按鈕）
@@ -123,12 +127,32 @@ export function useLayOrders() {
               smartId: rawId != null && String(rawId) !== '' ? String(rawId) : undefined,
             });
           } else {
-            // 已做過前端總確認 → 帶 confirm:true，避免後端風控 WARNING 對每檔再問一次
-            await apiClient.post('/place_order', {
+            const basePayload = {
               symbol: targetSymbol, price, action: side, qty: qtyPerLevel,
               order_type: 'ROD', price_type: 'LMT', order_cond: orderCond, order_lot: orderLot,
-              confirm: true,
-            });
+            };
+            try {
+              await apiClient.post('/place_order', batchConfirmed ? { ...basePayload, confirm: true } : basePayload);
+            } catch (e) {
+              const err = normalizeApiError(e);
+              if (err.status === 409 && err.code === 'CONFIRM_REQUIRED') {
+                if (!batchConfirmed) {
+                  const warns = [err.user_msg, ...(err.warnings ?? [])].filter(Boolean).join('\n');
+                  const ok = await confirm({
+                    title: '鋪單風控警告',
+                    message: `此批鋪單觸發後端風控警告：\n${warns}\n\n確認後本批其餘檔位一併以「已確認」送出。`,
+                    confirmLabel: '確認整批送出',
+                    danger: true,
+                  });
+                  if (!ok) { abortedByUser = true; break; }
+                  batchConfirmed = true;
+                }
+                // 帶 confirm:true 重送本檔
+                await apiClient.post('/place_order', { ...basePayload, confirm: true });
+              } else {
+                throw e;
+              }
+            }
             placed.push({ kind: 'normal', symbol: targetSymbol, action: side, price, qty: qtyPerLevel });
           }
           setLayProgress({ sent: placed.length, total: prices.length, aborted: false });
@@ -162,11 +186,26 @@ export function useLayOrders() {
     }
   }, [targetSymbol, settings.chase, settings.isCombatMode, confirm, toast, scheduleOrderRefresh, refreshSmartOrders]);
 
-  /** 撤鋪單：一鍵全撤本次鋪出的委託（普通單走刪單 API、CHASE 走智慧單取消） */
+  /** 撤鋪單：一鍵全撤本次鋪出的委託（普通單走精確價位刪單、CHASE 走智慧單取消） */
   const cancelLaid = useCallback(async () => {
     if (laidOrders.length === 0) return;
     const targets = laidOrders;
-    let okCount = 0;
+
+    // P1-1：cancelLaid 之前完全無確認、且會跨 symbol 全撤 —— 補一個 danger 確認框，
+    // 列出將撤數量與涉及商品（鋪單可能跨商品，記憶體內累積多次鋪單）。
+    const symbolsInvolved = Array.from(new Set(targets.map((o) => o.symbol)));
+    const ok = await confirm({
+      title: '撤鋪單確認',
+      message: `確認撤掉本次鋪出的 ${targets.length} 筆委託？`
+        + `\n涉及商品：${symbolsInvolved.join('、')}`
+        + `\n（普通單依精確價位撤、追價單走智慧單取消）`,
+      confirmLabel: `確認撤 ${targets.length} 筆`,
+      danger: true,
+    });
+    if (!ok) return;
+
+    let normalCancelled = 0;   // 後端實際撤掉的普通掛單數（精確價位）
+    let chaseOk = 0;           // 成功送出取消的追價智慧單數
     let failCount = 0;
     let hasChase = false;
     for (const o of targets) {
@@ -175,10 +214,13 @@ export function useLayOrders() {
           hasChase = true;
           if (!o.smartId) { failCount++; continue; }
           await apiClient.delete(`/smart_orders/${encodeURIComponent(o.smartId)}`);
+          chaseOk++;
         } else {
-          await apiClient.post('/cancel_all', { symbol: o.symbol, action: o.action, price: o.price });
+          // 精確價位撤單 → 讀後端實際撤單數（該檔可能已成交 → 撤 0，不灌水成功數）
+          const res = await apiClient.post('/cancel_all', { symbol: o.symbol, action: o.action, price: o.price });
+          const n = Number((res?.data as { cancelled?: number } | undefined)?.cancelled ?? 0);
+          normalCancelled += Number.isFinite(n) ? n : 0;
         }
-        okCount++;
       } catch {
         failCount++;
       }
@@ -187,12 +229,13 @@ export function useLayOrders() {
     scheduleOrderRefresh();
     if (hasChase) setTimeout(() => refreshSmartOrders(targetSymbol), 200);
     playSound('cancel_order');
+    const totalCancelled = normalCancelled + chaseOk;
     if (failCount === 0) {
-      toast.success(`撤鋪單完成：${okCount}/${targets.length} 檔已撤`);
+      toast.success(`撤鋪單完成：實際撤 ${totalCancelled} 筆（本次鋪出 ${targets.length} 檔；未撤到的多半已成交）`);
     } else {
-      toast.warn(`撤鋪單：成功 ${okCount}、失敗 ${failCount}（失敗的請至委託列表手動處理）`);
+      toast.warn(`撤鋪單：實際撤 ${totalCancelled} 筆、失敗 ${failCount}（失敗的請至委託列表手動處理）`);
     }
-  }, [laidOrders, scheduleOrderRefresh, refreshSmartOrders, targetSymbol, toast]);
+  }, [laidOrders, scheduleOrderRefresh, refreshSmartOrders, targetSymbol, toast, confirm]);
 
   return {
     layProgress,

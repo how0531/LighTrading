@@ -7,6 +7,7 @@ import { useToast } from './../contexts/ToastContext';
 import { useApiErrorToast } from '../hooks/useApiErrorToast';
 import { useTradingCore } from '../contexts/TradingContext';
 import { getApiToken, setApiToken } from '../utils/backendUrl';
+import { acquireHotkeyBlock } from '../utils/hotkeyGate';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -66,6 +67,14 @@ const SettingsModal: React.FC<SettingsModalProps> = ({ isOpen, onClose }) => {
     apiClient.get('/risk_config').then((res) => {
       setRiskCfg(res.data as RiskConfigShape);
     }).catch(() => { /* 後端不可用就隱藏該分頁的數字 */ });
+  }, [isOpen]);
+
+  // P0-1：設定開啟時停用全域下單熱鍵（避免 modal 背後被 F1/a/s… 誤觸下單）。
+  // 用旗標而非 capture 攔截 —— 本 modal 內有「按鍵捕捉」重綁與 Enter 送出，
+  // capture stopPropagation 會把那些一起吞掉。
+  useEffect(() => {
+    if (!isOpen) return;
+    return acquireHotkeyBlock();
   }, [isOpen]);
 
   const saveRisk = async (patch: Partial<RiskConfigShape>) => {

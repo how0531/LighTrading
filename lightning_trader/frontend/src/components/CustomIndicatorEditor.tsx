@@ -122,7 +122,7 @@ const CustomIndicatorEditor: React.FC<CustomIndicatorEditorProps> = ({
           <h2 className="text-sm font-bold text-white tracking-wide">
             {def ? '編輯自訂指標' : '新增自訂指標'}
             <span className="ml-2 text-[9px] text-slate-500 font-normal">
-              Web Worker 沙箱執行 · 2s timeout · 無網路/儲存存取
+              獨立 Web Worker 執行 · 2s 逾時保護 · 全域網路/儲存能力已清空
             </span>
           </h2>
           <button onClick={onClose} className="p-1 text-slate-400 hover:text-white rounded" title="關閉">
@@ -141,6 +141,15 @@ const CustomIndicatorEditor: React.FC<CustomIndicatorEditorProps> = ({
               placeholder="指標名稱（顯示在 picker / legend）"
             />
           </label>
+
+          <div className="flex items-start gap-1.5 rounded border border-amber-500/30 bg-amber-500/10 px-2 py-1 text-[10px] leading-snug text-amber-300/90">
+            <AlertTriangle className="w-3 h-3 mt-0.5 flex-shrink-0" />
+            <span>
+              指標程式碼會在你的瀏覽器內執行。沙箱（獨立 Worker + 能力清空 + constructor
+              毒化）大幅提高逃逸門檻，但<strong className="text-amber-200">並非牢不可破</strong>——
+              請勿貼上來源不明或不信任的指標程式碼。
+            </span>
+          </div>
 
           <textarea
             value={code}

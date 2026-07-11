@@ -13,6 +13,7 @@
 import React, { useEffect, useState } from 'react';
 import { Keyboard, X } from 'lucide-react';
 import { useSettings } from '../contexts/SettingsContext';
+import { acquireHotkeyBlock } from '../utils/hotkeyGate';
 
 const ACTION_LABEL: Record<string, string> = {
   Buy:          '買進當前價',
@@ -57,6 +58,12 @@ export const HotkeyCheatSheet: React.FC = () => {
     };
     window.addEventListener('keydown', handler);
     return () => window.removeEventListener('keydown', handler);
+  }, [open]);
+
+  // P0-1：速查表開啟時停用全域下單熱鍵（避免背後被 F1/a/s… 誤觸）。
+  useEffect(() => {
+    if (!open) return;
+    return acquireHotkeyBlock();
   }, [open]);
 
   if (!open) return null;

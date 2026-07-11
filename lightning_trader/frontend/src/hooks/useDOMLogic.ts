@@ -73,6 +73,8 @@ export function useDOMLogic() {
   // 拆單進度 + 中止（Sprint UX3）
   const [splitProgress, setSplitProgress] = useState<SplitProgress | null>(null);
   const splitAbortRef = useRef(false);
+  // 中止後讓「已中止 x/y」狀態短暫顯示再清（見 finally；否則 finally 立即清、UI 永不渲染）
+  const splitClearTimerRef = useRef<ReturnType<typeof setTimeout>>(undefined);
   const abortSplit = useCallback(() => { splitAbortRef.current = true; }, []);
 
   // 拖曳改價中的掛單（Item 6）：送出期間舊價位標籤轉虛線半透明
@@ -84,6 +86,7 @@ export function useDOMLogic() {
     return () => {
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
       if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
+      if (splitClearTimerRef.current) clearTimeout(splitClearTimerRef.current);
     };
   }, []);
 
@@ -330,7 +333,15 @@ export function useDOMLogic() {
       feedbackTimerRef.current = setTimeout(() => setOrderFeedback(null), 800);
     } finally {
       isOrderPendingRef.current = false;
-      setSplitProgress(null);
+      // 中止態短暫保留（~1.8s）讓「已中止 x/y」渲染得出來；其餘情況立即清。
+      setSplitProgress((p) => {
+        if (p && p.aborted) {
+          if (splitClearTimerRef.current) clearTimeout(splitClearTimerRef.current);
+          splitClearTimerRef.current = setTimeout(() => setSplitProgress(null), 1800);
+          return p;
+        }
+        return null;
+      });
     }
   }, [targetSymbol, orderValue, orderType, priceType, orderCond, orderLot, splitCfg, scheduleOrderRefresh, toast, confirm, settings.confirmations.placeOrder, settings.isCombatMode, chaseMode, settings.chase, refreshSmartOrders]);
 
@@ -347,13 +358,26 @@ export function useDOMLogic() {
       if (!ok) return;
     }
     try {
-      await apiClient.post('/cancel_all', { symbol: targetSymbol, action, price });
+      // P0-2：price 有值 → 後端只撤該精確價位（cancel_orders_by_action_price），
+      // 不再誤刪整側含手動單；回傳 cancelled = 實際撤單數，據實回報（撤 0 也不當成功）。
+      const res = await apiClient.post('/cancel_all', { symbol: targetSymbol, action, price });
       scheduleOrderRefresh();
       playSound('cancel_order');
+      const cancelled = Number((res?.data as { cancelled?: number } | undefined)?.cancelled ?? NaN);
+      if (Number.isFinite(cancelled)) {
+        const sideZh = action === 'Buy' ? '買方' : '賣方';
+        const atZh = price != null ? ` @ ${price}` : '';
+        if (cancelled > 0) {
+          toast.success(`已撤 ${cancelled} 筆${sideZh}掛單${atZh}`);
+        } else if (price != null) {
+          // 指定價位卻撤到 0 筆 → 單已不在（已成交/已撤），如實告知，不假裝成功
+          toast.info(`該價位已無${sideZh}掛單可撤${atZh}`);
+        }
+      }
     } catch (e) {
       handleApiError(e, '刪單失敗');
     }
-  }, [targetSymbol, scheduleOrderRefresh, handleApiError, confirm, settings.confirmations.cancelOrder, settings.isCombatMode]);
+  }, [targetSymbol, scheduleOrderRefresh, handleApiError, confirm, toast, settings.confirmations.cancelOrder, settings.isCombatMode]);
 
   const handleAddStopOrder = useCallback(async (triggerPrice: number, action: 'Buy' | 'Sell') => {
     if (!targetSymbol) return;
@@ -423,6 +447,11 @@ export function useDOMLogic() {
   // 追買＝以「賣一價」掛買（吃最優賣方流動性）；追賣＝以「買一價」掛賣。
   // 都走 handlePlaceOrder → 沿用戰鬥模式 / 確認流 / 風控 409 confirm 全套。
   const handleChaseOrder = useCallback(async (action: 'Buy' | 'Sell') => {
+    // P3：報價假死（isStale）時盤口第一檔是凍結值 → 追買/追賣可能貼到過期價，直接擋。
+    if (isStale) {
+      toast.warn('報價已停止更新，暫停追價（等連線恢復再試）');
+      return;
+    }
     const askArr = bidAsk?.AskPrice || [];
     const bidArr = bidAsk?.BidPrice || [];
     const px = action === 'Buy' ? Number(askArr[0] || 0) : Number(bidArr[0] || 0);
@@ -431,7 +460,7 @@ export function useDOMLogic() {
       return;
     }
     await handlePlaceOrder(px, action);
-  }, [bidAsk, handlePlaceOrder, toast]);
+  }, [bidAsk, handlePlaceOrder, toast, isStale]);
 
   // 市價單熱鍵：price=0 + price_type MKT（不改使用者的 priceType 選單狀態）
   const handleMarketOrder = useCallback(async (action: 'Buy' | 'Sell') => {
