@@ -103,13 +103,23 @@ async def place_order(req: PlaceOrderRequest, request: Request):
     if risk_manager is not None:
         is_market = req.price_type.upper() in {"MKT", "MKP"}
         # 取得目前持倉狀態（給部位上限檢查）
+        # ★ 聚合同商品所有列（多帳號、現股買+融資買、一多一空…）成有號淨部位，
+        #   與 reverse 路徑 / order_guard 共用唯一定義。之前只取 next() 第一列：
+        #   多列同向 → 部位上限用錯基數、可被繞過超額建倉；異向多列取到反符號 →
+        #   開倉單被誤判 reduce-only 而豁免 trading_enabled / 日虧損熔斷。
+        from core.risk_manager import net_position_of
         try:
             positions = await shared.run_in_broker_thread(shared.shioaji_client.list_positions)
-            pos = next((p for p in positions if p.get("symbol", "").upper() == req.symbol.upper()), None)
+            net = net_position_of(positions, req.symbol)
         except Exception:
-            pos = None
-        pos_qty = (pos.get("qty", 0) if pos else 0)
-        pos_dir = (pos.get("direction", "Flat") if pos else "Flat")
+            net = 0
+        pos_qty = abs(net)
+        if net > 0:
+            pos_dir = "Buy"
+        elif net < 0:
+            pos_dir = "Sell"
+        else:
+            pos_dir = "Flat"
         result = risk_manager.pre_order_check(
             symbol=req.symbol,
             action=req.action,

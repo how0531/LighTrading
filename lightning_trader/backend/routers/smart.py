@@ -76,6 +76,28 @@ def _normalize_condition(cond: Optional[str], action: str) -> str:
     return "price_gte" if action.lower() == "buy" else "price_lte"
 
 
+def _validate_oco_prices(action: str, take_profit: float, stop_loss: float) -> None:
+    """C2：OCO 停利/停損價格順序校驗（action 為「平倉方向」）。
+
+      Sell（平多）：take_profit 必須 > stop_loss（停利在上、停損在下）
+      Buy （平空）：take_profit 必須 < stop_loss（停利在下、停損在上）
+
+    順序不合理 → 停損掛在比停利更差的一側，兩腿條件會在同一價區同時滿足、
+    形同無效保護 → 回 422（比照 INVALID_OCO）。BRACKET 以「成交後自動掛的
+    OCO 方向（進場方向的反向）」套用同一規則。
+    """
+    if action == "Sell" and take_profit <= stop_loss:
+        raise HTTPException(status_code=422, detail={
+            "code": "INVALID_OCO",
+            "user_msg": "停利價需高於停損價（Sell 平倉：take_profit > stop_loss）",
+        })
+    if action == "Buy" and take_profit >= stop_loss:
+        raise HTTPException(status_code=422, detail={
+            "code": "INVALID_OCO",
+            "user_msg": "停利價需低於停損價（Buy 平倉：take_profit < stop_loss）",
+        })
+
+
 def _validate_chase(req: SmartOrderRequest) -> dict:
     """驗證 CHASE 參數，回傳補上預設值後的 kwargs；非法值丟結構化 422。"""
     max_chase_ticks = req.max_chase_ticks if req.max_chase_ticks is not None \
@@ -158,6 +180,8 @@ def _create_smart_order(req: SmartOrderRequest):
                 "code": "INVALID_OCO",
                 "user_msg": "OCO 需要 take_profit_price 與 stop_loss_price 都 > 0",
             })
+        # C2：價格順序校驗（action 即平倉方向）
+        _validate_oco_prices(action_val, req.take_profit_price, req.stop_loss_price)
         oco_id = engine.add_oco(
             symbol=req.symbol, action=action_val, qty=qty_val,
             take_profit=req.take_profit_price, stop_loss=req.stop_loss_price,
@@ -171,6 +195,10 @@ def _create_smart_order(req: SmartOrderRequest):
                 "code": "INVALID_BRACKET",
                 "user_msg": "Bracket 需要 entry_price / take_profit_price / stop_loss_price 都 > 0",
             })
+        # C2：成交後自動掛的 OCO 方向 = 進場方向的反向；以該方向校驗 tp/sl 順序
+        #   （Buy 進場 → Sell 平倉需 tp>sl；Sell 進場 → Buy 平倉需 tp<sl）
+        _oco_action = "Sell" if action_val == "Buy" else "Buy"
+        _validate_oco_prices(_oco_action, req.take_profit_price, req.stop_loss_price)
         bracket_id = engine.add_bracket(
             symbol=req.symbol, action=action_val, qty=qty_val,
             entry_price=req.entry_price,

@@ -37,6 +37,20 @@ class ShioajiClient:
         # 直接回呼 (繞過 Qt signal，解決 uvicorn 跨執行緒問題)
         self._direct_quote_callback = None
 
+        # ★ B1：券商 API 序列化鎖。所有「直接觸及 self.api 的網路呼叫」
+        #   （place_order / update_status / list_trades / cancel_* / list_positions /
+        #    list_accounts / login / confirm_order_cancelled 的輪詢區塊等）一律以
+        #   `with self._api_lock:` 包住，讓跨三個 executor（broker/order/sync）+ Timer
+        #   執行緒的呼叫真正互斥；重連時重建 self.api 的路徑也在同鎖內，避免其他
+        #   執行緒在半重建的 api 物件上呼叫。RLock：同執行緒巢狀呼叫（如 login →
+        #   list_accounts）可重入。
+        self._api_lock = threading.RLock()
+        # ★ B1：帳務更新去抖合流。on_order_status 每筆回報都排一個 Timer 打帳務，
+        #   尾盤爆量時數十條 Timer 同時觸發 → 阻塞。改為單一 pending Timer，
+        #   每次回報取消上一個 pending 再重排（>=1s coalesce），只在回報停歇後打一次。
+        self._acct_update_lock = threading.Lock()
+        self._acct_update_timer: Optional[threading.Timer] = None
+
         # ★ 統一商品代號正規化（解期貨 tick.code vs user-facing symbol 不一致）
         self.symbol_resolver = SymbolResolver()
 
@@ -53,6 +67,27 @@ class ShioajiClient:
         self.last_message_time = time.time()
         self._start_reconnect_timer()
 
+    def _run_on_broker(self, fn):
+        """把觸及 self.api 的工作丟進 backend 的 broker executor 執行（B1）。
+
+        Timer 執行緒不應直接打 api（看門狗/重連/帳務更新等）——一律 submit 進
+        `shared.broker_executor`，與其他券商呼叫在同一條序列化通道上跑。
+        backend 不可用時（core 獨立執行 / 單元測試）退回同步 inline 執行。
+        """
+        try:
+            from backend import shared  # 延遲載入，避免 core → backend 硬相依
+            ex = getattr(shared, "broker_executor", None)
+            if ex is not None:
+                return ex.submit(fn)
+        except Exception:
+            pass
+        # 退回：無 backend executor 時直接執行（api 呼叫本身仍受 _api_lock 保護）
+        try:
+            fn()
+        except Exception as e:
+            logger.debug(f"_run_on_broker inline 執行例外: {e}")
+        return None
+
     def _start_reconnect_timer(self):
         # 巡檢間隔縮短到 5 秒（搭配 15s watchdog），最壞 20s 內偵測到靜默斷線
         self._reconnect_timer = threading.Timer(5.0, self._on_reconnect_timer_tick)
@@ -60,8 +95,30 @@ class ShioajiClient:
         self._reconnect_timer.start()
 
     def _on_reconnect_timer_tick(self):
-        self.check_connection()
+        # B1：看門狗巡檢會打 api（list_accounts）→ 不在 Timer 執行緒直接呼叫，
+        #     submit 進 broker executor 與其他券商呼叫序列化。
+        self._run_on_broker(self.check_connection)
         self._start_reconnect_timer()
+
+    def _schedule_account_update(self, delay: float = 1.0):
+        """去抖合流帳務更新（B1）：取消上一個 pending Timer 再重排，
+        回報停歇 `delay` 秒後只打一次 trigger_account_update（走 broker executor，
+        不在 Timer 執行緒直接打 api）。"""
+        with self._acct_update_lock:
+            if self._acct_update_timer is not None:
+                try:
+                    self._acct_update_timer.cancel()
+                except Exception:
+                    pass
+            t = threading.Timer(delay, self._run_account_update)
+            t.daemon = True
+            self._acct_update_timer = t
+            t.start()
+
+    def _run_account_update(self):
+        with self._acct_update_lock:
+            self._acct_update_timer = None
+        self._run_on_broker(self.trigger_account_update)
 
     def _contract_in_session(self, contract, now: Optional[datetime] = None) -> bool:
         """判斷「單一合約」此刻是否在其行情時段內。
@@ -116,7 +173,8 @@ class ShioajiClient:
         api_ok = False
         if self._is_connected:
             try:
-                self.api.list_accounts()
+                with self._api_lock:
+                    self.api.list_accounts()
                 api_ok = True
             except Exception as e:
                 logger.warning(f"連線檢查失敗 (API 異常)，準備重連: {e}")
@@ -153,7 +211,9 @@ class ShioajiClient:
                 self.event_bus.on_connection_state.emit("reconnecting")
             except Exception:
                 pass
-        threading.Timer(5.0, self._do_login_reconnect).start()
+        # B1：Timer 只負責延遲排程，實際重連（login/api）丟 broker executor 執行，
+        #     不在 Timer 執行緒直接打 api。
+        threading.Timer(5.0, lambda: self._run_on_broker(self._do_login_reconnect)).start()
 
     def _do_login_reconnect(self):
         if self.login():
@@ -170,7 +230,7 @@ class ShioajiClient:
                     logger.error(f"還原合約訂閱失敗: {e}")
         else:
             logger.warning("重連失敗，10 秒後重試")
-            threading.Timer(10.0, self._do_login_reconnect).start()
+            threading.Timer(10.0, lambda: self._run_on_broker(self._do_login_reconnect)).start()
 
     def _resubscribe_background(self):
         """重連 / 重新登入後把所有背景訂閱（持倉、自選）補回來。"""
@@ -335,7 +395,10 @@ class ShioajiClient:
                 payload = dict(msg) if isinstance(msg, dict) else {"raw": str(msg)}
                 payload.setdefault("state", str(state))
                 self.signal_trade_update.emit(payload)
-            threading.Timer(0.5, self.trigger_account_update).start()
+            # B1：去抖合流 —— 尾盤爆量時每筆回報各排一條 Timer 打帳務會阻塞；
+            #     改為取消上一個 pending、>=1s coalesce，只在回報停歇後打一次，
+            #     且帳務更新走 broker executor（不在回呼/Timer 執行緒直接打 api）。
+            self._schedule_account_update(1.0)
 
         self.api.set_order_callback(on_order_status)
 
@@ -343,44 +406,51 @@ class ShioajiClient:
         key = api_key or Config.API_KEY
         secret = secret_key or Config.SECRET_KEY
         target_simulation = simulation if simulation is not None else self.is_simulation
-        if self.api is None or self.is_simulation != target_simulation:
-            try:
-                self.api.logout()
-            except Exception as e:
-                logger.debug(f"登出舊連線時發生例外（可忽略）: {e}")
-            self.is_simulation = target_simulation
-            self.api = sj.Shioaji(simulation=self.is_simulation)
-            self._setup_callbacks()
-        try:
-            self.api.login(api_key=key, secret_key=secret)
-            if not self.is_simulation and (ca_path or Config.CA_PATH):
-                self.api.activate_ca(ca_path=(ca_path or Config.CA_PATH).replace("\\", "/"), ca_passwd=(ca_passwd or Config.CA_PASSWD))
-            accounts = self.api.list_accounts()
-            self.active_stock_account = next((a for a in accounts if "Stock" in a.__class__.__name__), None)
-            self.active_futopt_account = next((a for a in accounts if "Future" in a.__class__.__name__), None)
-            self._is_connected = True
-            # ★ 關鍵：login 後強制重新註冊回呼，確保 set_quote_callback 在已登入狀態下生效
-            self._setup_callbacks()
-            logger.info("✅ Shioaji 登入成功，回呼已重新註冊")
-            self.signal_login_status.emit(True, "登入成功")
-            if self.event_bus:
+        # B1：整段「重建 api + login + activate_ca + list_accounts + 回呼註冊」在
+        #     _api_lock 內序列化 —— 重建 self.api 期間不得有其他執行緒在舊/半建的
+        #     api 物件上呼叫。訂閱（subscribe/_resubscribe_background）走 _subscribe_lock，
+        #     刻意放到 _api_lock 釋放後再做，避免與 _subscribe_lock 的鎖序交錯。
+        with self._api_lock:
+            if self.api is None or self.is_simulation != target_simulation:
                 try:
-                    self.event_bus.on_connection_state.emit("connected")
-                except Exception:
-                    pass
-            threading.Timer(1.0, self.trigger_account_update).start()
-            if self.current_contract: self.subscribe(self.current_contract.symbol)
-            # 補回所有背景訂閱（持倉 / 自選）— 之前重連只還原 current_contract
-            self._resubscribe_background()
-            return True
-        except Exception as e:
-            self._is_connected = False
-            self.signal_login_status.emit(False, f"登入失敗: {str(e)}")
-            return False
+                    self.api.logout()
+                except Exception as e:
+                    logger.debug(f"登出舊連線時發生例外（可忽略）: {e}")
+                self.is_simulation = target_simulation
+                self.api = sj.Shioaji(simulation=self.is_simulation)
+                self._setup_callbacks()
+            try:
+                self.api.login(api_key=key, secret_key=secret)
+                if not self.is_simulation and (ca_path or Config.CA_PATH):
+                    self.api.activate_ca(ca_path=(ca_path or Config.CA_PATH).replace("\\", "/"), ca_passwd=(ca_passwd or Config.CA_PASSWD))
+                accounts = self.api.list_accounts()
+                self.active_stock_account = next((a for a in accounts if "Stock" in a.__class__.__name__), None)
+                self.active_futopt_account = next((a for a in accounts if "Future" in a.__class__.__name__), None)
+                self._is_connected = True
+                # ★ 關鍵：login 後強制重新註冊回呼，確保 set_quote_callback 在已登入狀態下生效
+                self._setup_callbacks()
+            except Exception as e:
+                self._is_connected = False
+                self.signal_login_status.emit(False, f"登入失敗: {str(e)}")
+                return False
+        # ── _api_lock 已釋放：以下發訊號 / 排帳務更新 / 訂閱不佔用 api 序列化鎖 ──
+        logger.info("✅ Shioaji 登入成功，回呼已重新註冊")
+        self.signal_login_status.emit(True, "登入成功")
+        if self.event_bus:
+            try:
+                self.event_bus.on_connection_state.emit("connected")
+            except Exception:
+                pass
+        self._schedule_account_update(1.0)
+        if self.current_contract: self.subscribe(self.current_contract.symbol)
+        # 補回所有背景訂閱（持倉 / 自選）— 之前重連只還原 current_contract
+        self._resubscribe_background()
+        return True
 
     def set_active_account(self, full_account_id: str):
         target_id = str(full_account_id).split('-')[-1]
-        accounts = self.api.list_accounts()
+        with self._api_lock:
+            accounts = self.api.list_accounts()
         for acc in accounts:
             if acc.account_id == target_id:
                 if "Stock" in acc.__class__.__name__: self.active_stock_account = acc
@@ -413,36 +483,39 @@ class ShioajiClient:
         保護變成死碼：查倉失敗被當「無倉」→ 錯誤退訂持倉商品，PnL 串流無聲中斷。
         """
         all_pos: List[Dict[str, Any]] = []
-        # list_accounts 失敗 → 直接往外拋（整體查詢失敗）
-        accounts = self.api.list_accounts()
         # 過濾掉不支援 list_positions 的帳號類型 (H=海外期貨)
         UNSUPPORTED_TYPES = {'H'}
         queried = 0
         failed = 0
-        for acc in accounts:
-            acc_type = getattr(acc, 'account_type', None) or getattr(acc, 'category', '')
-            if str(acc_type).upper() in UNSUPPORTED_TYPES:
-                continue
-            try:
-                self.api.update_status(acc)
-                positions = self.api.list_positions(acc)
-                queried += 1
-                for p in positions:
-                    qty = int(p.quantity)
-                    raw_code = str(p.code).strip().upper()
-                    # canonical：若 resolver 有 alias 就用 user-facing symbol，否則保留 raw
-                    canonical = self.symbol_resolver.canonical(raw_code) or raw_code
-                    all_pos.append({
-                        "symbol": canonical,
-                        "qty": qty,
-                        "direction": "Buy" if p.direction == Action.Buy else "Sell",
-                        "price": float(p.price),
-                        "pnl": float(p.pnl),
-                        "account": f"{acc.broker_id}-{acc.account_id}"
-                    })
-            except Exception as e:
-                failed += 1
-                logger.warning(f"查詢帳號 {acc.account_id} 持倉失敗: {e}")
+        # B1：整段查倉（list_accounts + 逐帳號 update_status/list_positions）在
+        #     _api_lock 內序列化，避免與其他 executor/Timer 的 api 呼叫交錯。
+        with self._api_lock:
+            # list_accounts 失敗 → 直接往外拋（整體查詢失敗）
+            accounts = self.api.list_accounts()
+            for acc in accounts:
+                acc_type = getattr(acc, 'account_type', None) or getattr(acc, 'category', '')
+                if str(acc_type).upper() in UNSUPPORTED_TYPES:
+                    continue
+                try:
+                    self.api.update_status(acc)
+                    positions = self.api.list_positions(acc)
+                    queried += 1
+                    for p in positions:
+                        qty = int(p.quantity)
+                        raw_code = str(p.code).strip().upper()
+                        # canonical：若 resolver 有 alias 就用 user-facing symbol，否則保留 raw
+                        canonical = self.symbol_resolver.canonical(raw_code) or raw_code
+                        all_pos.append({
+                            "symbol": canonical,
+                            "qty": qty,
+                            "direction": "Buy" if p.direction == Action.Buy else "Sell",
+                            "price": float(p.price),
+                            "pnl": float(p.pnl),
+                            "account": f"{acc.broker_id}-{acc.account_id}"
+                        })
+                except Exception as e:
+                    failed += 1
+                    logger.warning(f"查詢帳號 {acc.account_id} 持倉失敗: {e}")
         # 有支援帳號但「全部」查詢失敗 → 這是查詢失敗、不是無倉
         if queried == 0 and failed > 0:
             raise RuntimeError(f"list_positions: 所有帳號持倉查詢失敗（{failed} 個帳號）")
@@ -586,7 +659,8 @@ class ShioajiClient:
         except Exception as e:
             logger.warning(f"取得 Snapshot 失敗: {e}")
         
-        threading.Timer(0.5, self.trigger_account_update).start()
+        # B1：帳務更新走去抖合流 → broker executor，不在 Timer 執行緒直接打 api
+        self._schedule_account_update(0.5)
         return contract.symbol
 
     def subscribe_background(self, symbol: str) -> str:
@@ -752,9 +826,11 @@ class ShioajiClient:
             order_kwargs["order_lot"] = order_lot or StockOrderLot.Common
             order_kwargs["order_cond"] = order_cond or StockOrderCond.Cash
 
-        order = self.api.Order(**order_kwargs)
         try:
-            return self.api.place_order(contract, order)
+            # B1：Order 組裝 + place_order 在同一 _api_lock 內序列化。
+            with self._api_lock:
+                order = self.api.Order(**order_kwargs)
+                return self.api.place_order(contract, order)
         except Exception as e:
             logger.error(f"place_order 失敗: {symbol} {action} {qty}@{price} — {e}")
             return None
@@ -834,7 +910,8 @@ class ShioajiClient:
 
     def get_all_accounts(self) -> List[Dict[str, str]]:
         try:
-            raw_accounts = self.api.list_accounts()
+            with self._api_lock:
+                raw_accounts = self.api.list_accounts()
             return [
                 {
                     "account_id": acc.account_id,
@@ -858,7 +935,8 @@ class ShioajiClient:
         try:
             acc = self.active_stock_account or self.active_futopt_account
             if acc:
-                return self.api.account_balance(acc)
+                with self._api_lock:
+                    return self.api.account_balance(acc)
             return None
         except Exception as e:
             logger.error(f"get_account_balance 失敗: {e}")
@@ -868,8 +946,9 @@ class ShioajiClient:
         try:
             # ★ 關鍵修復：從外部平台下單時，本地的 list_trades 不會自動更新
             # 必須先呼叫 update_status 強制向交易所/券商同步最新狀態
-            self.update_status()
-            return self.api.list_trades()
+            self.update_status()  # 內部已以 _api_lock 序列化
+            with self._api_lock:
+                return self.api.list_trades()
         except Exception as e:
             logger.error(f"get_order_history 失敗: {e}")
             return []
@@ -888,7 +967,8 @@ class ShioajiClient:
             end = datetime.now()
             start = (end - timedelta(days=max(1, days))).strftime("%Y-%m-%d")
             end_s = end.strftime("%Y-%m-%d")
-            kb = self.api.kbars(contract, start=start, end=end_s)
+            with self._api_lock:
+                kb = self.api.kbars(contract, start=start, end=end_s)
             # Shioaji Kbars 物件：ts / Open / High / Low / Close / Volume，
             # ts 為 nanoseconds since epoch（int64）。轉成秒以利前端 lightweight-charts
             n = len(kb.ts)
@@ -912,12 +992,13 @@ class ShioajiClient:
     def update_status(self, account=None):
         """更新帳戶狀態並觸發帳務更新訊號"""
         try:
-            if account:
-                self.api.update_status(account)
-            else:
-                for acc in self.api.list_accounts():
-                    self.api.update_status(acc)
-            self.trigger_account_update()
+            with self._api_lock:
+                if account:
+                    self.api.update_status(account)
+                else:
+                    for acc in self.api.list_accounts():
+                        self.api.update_status(acc)
+            self.trigger_account_update()  # lock 外：避免持鎖時發訊號/查倉巢狀佔用
         except Exception as e:
             logger.error(f"update_status 失敗: {e}")
 
@@ -929,35 +1010,38 @@ class ShioajiClient:
           減量: api.update_order(trade=trade, qty=new_qty)
         """
         try:
-            trades = self.api.list_trades()
-            for trade in trades:
-                if (trade.contract.symbol == symbol and
-                    trade.order.action == action and
-                    float(trade.order.price) == old_price and
-                    trade.status.status.name in ['PendingSubmit', 'PreSubmitted', 'Submitted']):
-                    
-                    # 依據是否改價/減量，選擇適當的 API 呼叫
-                    price_changed = abs(new_price - old_price) > 0.001
-                    qty_changed = qty is not None and qty != trade.order.quantity
-                    
-                    if price_changed and qty_changed:
-                        # 同時改價與減量：先改價，再減量
-                        self.api.update_order(trade=trade, price=new_price)
-                        time.sleep(0.2)
-                        self.api.update_order(trade=trade, qty=qty)
-                        logger.info(f"改單(價+量)成功: {symbol} price {old_price} -> {new_price}, qty -> {qty}")
-                    elif price_changed:
-                        self.api.update_order(trade=trade, price=new_price)
-                        logger.info(f"改價成功: {symbol} {old_price} -> {new_price}")
-                    elif qty_changed:
-                        self.api.update_order(trade=trade, qty=qty)
-                        logger.info(f"減量成功: {symbol} qty -> {qty}")
-                    else:
-                        logger.warning(f"update_order: 價格與數量均無變更，跳過")
-                        return False
-                    
-                    threading.Timer(0.5, self.trigger_account_update).start()
-                    return True
+            # B1：list_trades + 逐筆 update_order 在同一 _api_lock 內序列化
+            #     （含價+量兩段改單，維持對同一 trade 的原子改單語意）。
+            with self._api_lock:
+                trades = self.api.list_trades()
+                for trade in trades:
+                    if (trade.contract.symbol == symbol and
+                        trade.order.action == action and
+                        float(trade.order.price) == old_price and
+                        trade.status.status.name in ['PendingSubmit', 'PreSubmitted', 'Submitted']):
+
+                        # 依據是否改價/減量，選擇適當的 API 呼叫
+                        price_changed = abs(new_price - old_price) > 0.001
+                        qty_changed = qty is not None and qty != trade.order.quantity
+
+                        if price_changed and qty_changed:
+                            # 同時改價與減量：先改價，再減量
+                            self.api.update_order(trade=trade, price=new_price)
+                            time.sleep(0.2)
+                            self.api.update_order(trade=trade, qty=qty)
+                            logger.info(f"改單(價+量)成功: {symbol} price {old_price} -> {new_price}, qty -> {qty}")
+                        elif price_changed:
+                            self.api.update_order(trade=trade, price=new_price)
+                            logger.info(f"改價成功: {symbol} {old_price} -> {new_price}")
+                        elif qty_changed:
+                            self.api.update_order(trade=trade, qty=qty)
+                            logger.info(f"減量成功: {symbol} qty -> {qty}")
+                        else:
+                            logger.warning(f"update_order: 價格與數量均無變更，跳過")
+                            return False
+
+                        self._schedule_account_update(0.5)
+                        return True
             logger.warning(f"update_order: 找不到符合的委託 {symbol} {action} @{old_price}")
             return False
         except Exception as e:
@@ -977,24 +1061,26 @@ class ShioajiClient:
         if not ids:
             return False
         try:
-            trades = self.api.list_trades()
-            for trade in trades:
-                order = getattr(trade, "order", None)
-                candidates = {str(getattr(order, a, "") or "")
-                              for a in ("id", "seqno", "ordno")}
-                candidates.discard("")
-                if not (candidates & ids):
-                    continue
-                status_name = (trade.status.status.name if hasattr(trade.status, "status")
-                               else getattr(trade.status, "name", ""))
-                if status_name in ("PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"):
-                    self.api.cancel_order(trade)
-                    logger.info(f"cancel_order_by_ids: 已撤單 {sorted(candidates & ids)}")
-                    threading.Timer(0.5, self.trigger_account_update).start()
-                    return True
-                logger.info(f"cancel_order_by_ids: 委託 {sorted(candidates & ids)} "
-                            f"已非活躍狀態（{status_name}），不撤")
-                return False
+            # B1：list_trades + cancel_order 在同一 _api_lock 內序列化
+            with self._api_lock:
+                trades = self.api.list_trades()
+                for trade in trades:
+                    order = getattr(trade, "order", None)
+                    candidates = {str(getattr(order, a, "") or "")
+                                  for a in ("id", "seqno", "ordno")}
+                    candidates.discard("")
+                    if not (candidates & ids):
+                        continue
+                    status_name = (trade.status.status.name if hasattr(trade.status, "status")
+                                   else getattr(trade.status, "name", ""))
+                    if status_name in ("PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"):
+                        self.api.cancel_order(trade)
+                        logger.info(f"cancel_order_by_ids: 已撤單 {sorted(candidates & ids)}")
+                        self._schedule_account_update(0.5)
+                        return True
+                    logger.info(f"cancel_order_by_ids: 委託 {sorted(candidates & ids)} "
+                                f"已非活躍狀態（{status_name}），不撤")
+                    return False
             logger.warning(f"cancel_order_by_ids: 找不到委託 {sorted(ids)}")
             return False
         except Exception as e:
@@ -1020,15 +1106,24 @@ class ShioajiClient:
             return {"cancelled": True, "filled_qty": 0}
         deadline = time.time() + max(timeout_s, 0.0)
         last_filled = 0
+        # C1：至少「觀測過一次」該委託（某輪讀到 found 並取得 status/成交量）才
+        #     信任「不在清單=已離開活躍集合」。委託首輪就查不到（例如剛送出、
+        #     交易所端尚未回報、或撤單前它從未進入我方快照）而未觀測時，用
+        #     filled=0 去算剩量會讓 CHASE 以為零成交而超額重掛 → 回 None 讓引擎
+        #     保留舊單、下輪再確認，絕不放行重掛。
+        observed = False
         active = {"PendingSubmit", "PreSubmitted", "Submitted", "PartFilled"}
         while True:
             try:
-                for acc in self.api.list_accounts():
-                    try:
-                        self.api.update_status(acc)
-                    except Exception:
-                        pass
-                trades = self.api.list_trades()
+                # B1：整輪查詢（list_accounts + 逐帳號 update_status + list_trades）
+                #     在 _api_lock 內序列化。
+                with self._api_lock:
+                    for acc in self.api.list_accounts():
+                        try:
+                            self.api.update_status(acc)
+                        except Exception:
+                            pass
+                    trades = self.api.list_trades()
             except Exception as e:
                 logger.warning(f"confirm_order_cancelled 查詢失敗: {e}")
                 return None
@@ -1042,13 +1137,20 @@ class ShioajiClient:
                     found = trade
                     break
             if found is None:
-                # 委託已不在清單 → 已離開活躍集合
-                return {"cancelled": True, "filled_qty": last_filled}
+                if observed:
+                    # 曾觀測過該委託、現已不在清單 → 已離開活躍集合
+                    return {"cancelled": True, "filled_qty": last_filled}
+                # 從未觀測過該委託：不得據 filled=0 放行重掛。逾時仍未觀測 → None
+                if time.time() >= deadline:
+                    return None
+                time.sleep(poll_interval_s)
+                continue
             status_name = (found.status.status.name if hasattr(found.status, "status")
                            else getattr(found.status, "name", ""))
             filled = int(getattr(found.status, "deal_quantity",
                                  getattr(found.status, "filled_quantity", 0)) or 0)
             last_filled = max(last_filled, filled)
+            observed = True
             if status_name not in active:
                 # Cancelled / Filled / Failed → 撤單終態確認
                 return {"cancelled": True, "filled_qty": last_filled}
@@ -1060,16 +1162,18 @@ class ShioajiClient:
         """批次刪單：取消指定標的與方向的所有未完成委託"""
         cancel_count = 0
         try:
-            trades = self.api.list_trades()
-            for trade in trades:
-                if (trade.contract.symbol == symbol and
-                    trade.order.action == action and
-                    trade.status.status.name in ['PendingSubmit', 'PreSubmitted', 'Submitted']):
-                    self.api.cancel_order(trade)
-                    cancel_count += 1
+            # B1：list_trades + 逐筆 cancel_order 在同一 _api_lock 內序列化
+            with self._api_lock:
+                trades = self.api.list_trades()
+                for trade in trades:
+                    if (trade.contract.symbol == symbol and
+                        trade.order.action == action and
+                        trade.status.status.name in ['PendingSubmit', 'PreSubmitted', 'Submitted']):
+                        self.api.cancel_order(trade)
+                        cancel_count += 1
             if cancel_count > 0:
                 logger.info(f"cancel_all: 已送出 {cancel_count} 筆刪單 ({symbol} {'Buy' if action == Action.Buy else 'Sell'})")
-                threading.Timer(0.5, self.trigger_account_update).start()
+                self._schedule_account_update(0.5)
             return cancel_count
         except Exception as e:
             logger.error(f"cancel_all 失敗: {e}")
@@ -1079,17 +1183,19 @@ class ShioajiClient:
         """刪除指定標的、方向、價格的未完成委託"""
         cancel_count = 0
         try:
-            trades = self.api.list_trades()
-            for trade in trades:
-                if (trade.contract.symbol == symbol and
-                    trade.order.action == action and
-                    float(trade.order.price) == price and
-                    trade.status.status.name in ['PendingSubmit', 'PreSubmitted', 'Submitted']):
-                    self.api.cancel_order(trade)
-                    cancel_count += 1
+            # B1：list_trades + 逐筆 cancel_order 在同一 _api_lock 內序列化
+            with self._api_lock:
+                trades = self.api.list_trades()
+                for trade in trades:
+                    if (trade.contract.symbol == symbol and
+                        trade.order.action == action and
+                        float(trade.order.price) == price and
+                        trade.status.status.name in ['PendingSubmit', 'PreSubmitted', 'Submitted']):
+                        self.api.cancel_order(trade)
+                        cancel_count += 1
             if cancel_count > 0:
                 logger.info(f"cancel_orders_by_action_price: 已刪 {cancel_count} 筆 ({symbol} @{price})")
-                threading.Timer(0.5, self.trigger_account_update).start()
+                self._schedule_account_update(0.5)
             return cancel_count
         except Exception as e:
             logger.error(f"cancel_orders_by_action_price 失敗: {e}")

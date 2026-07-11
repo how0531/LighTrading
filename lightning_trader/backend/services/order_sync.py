@@ -119,8 +119,12 @@ def _ts_to_ms(ts) -> int:
 def extract_deal_fills(trades) -> list[dict]:
     """從 trades 的 status.deals 展開成 journal 標準 fill dict。
 
-    id = ordno#seq —— 與 callback 路徑（extract_fill 的 dealseq/seq）對齊，
+    id 走共用的 trade_journal.authoritative_fill_id —— 與 callback 落地路徑
+    （extract_fill）同一份邏輯：優先 ordno + Deal.seq(exchange_seq)，缺序號
+    才退回內容組合鍵 `ordno#price#qty#該單當下累計成交量`。兩路徑同鍵，
     INSERT OR IGNORE 天然去重，同一筆成交不會被記兩次。
+    ★ 缺序號時絕不落到 wall-clock（ts_ms）當鍵 —— 那會讓兩路徑 id 分歧、
+      去重失效、日已實現損益翻倍。
     """
     fills = []
     for t in trades or []:
@@ -130,22 +134,29 @@ def extract_deal_fills(trades) -> list[dict]:
                      or getattr(order, "id", "") or "")
             symbol = getattr(t.contract, "code", "") or getattr(t.contract, "symbol", "")
             action = "Buy" if "Buy" in str(getattr(order, "action", "")) else "Sell"
+            cum_qty = 0  # 該單當下累計成交量：沿 deals list 累加（= 內容鍵所需）
             for d in getattr(t.status, "deals", None) or []:
                 price = float(getattr(d, "price", 0) or 0)
                 qty = int(getattr(d, "quantity", 0) or 0)
                 if price <= 0 or qty <= 0 or not symbol:
                     continue
-                seq = getattr(d, "seq", "") or ""
+                cum_qty += qty
+                seq = getattr(d, "seq", None)
+                if seq in (None, ""):
+                    seq = getattr(d, "exchange_seq", None)
                 ts_ms = _ts_to_ms(getattr(d, "ts", 0))
+                fill_id = trade_journal.authoritative_fill_id(
+                    ordno, seq=seq, price=price, qty=qty, cum_qty=cum_qty)
                 fills.append({
-                    "id": f"{ordno or 'noid'}#{seq or ts_ms}",
+                    "id": fill_id,
                     "ts": ts_ms,
                     "symbol": str(symbol).upper(),
                     "action": action,
                     "price": price,
                     "qty": qty,
                     "order_id": str(ordno),
-                    "raw": json.dumps({"source": "order_sync", "seq": str(seq)}),
+                    "raw": json.dumps({"source": "order_sync",
+                                       "seq": ("" if seq in (None, "") else str(seq))}),
                 })
         except Exception as e:
             logger.debug(f"order_sync 略過異常 deal: {e}")

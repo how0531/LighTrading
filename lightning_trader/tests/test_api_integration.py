@@ -85,6 +85,23 @@ def _reset_state():
     rm._current_positions.clear()
     rm._current_prices.clear()
     rate_limit._buckets.clear()
+    # ── 對帳/去重的模組級單例也必須每測試重置，否則測試順序相依 ──
+    # order_sync 的 in-memory watermark（_seen_fill_ids）跨測試累積 →
+    # 同 id 的成交在後續測試被誤判「已處理」，new_fills 少算；更嚴重的是
+    # 這層記憶體去重會遮蔽 insert_fill 對 journal DB 重複入帳的回歸。
+    # _last_fingerprint 殘留 → WorkingOrdersSnapshot 的 changed 判定失準。
+    import backend.services.order_sync as _os
+    _os._seen_fill_ids.clear()
+    _os._last_fingerprint = ""
+    # journal 是全 session 共用同一個 SQLite 檔（_CONN 單例）——不清空 fills
+    # 表，前一測試的成交會漏進下一測試的 FIFO 已實現損益重算，金額斷言
+    # 變成順序相依。每測試清空 fills，讓已實現損益 / 去重回歸各自獨立。
+    from backend.services import trade_journal as _tj
+    try:
+        with _tj._DB_LOCK:
+            _tj._connect().execute("DELETE FROM fills")
+    except Exception:
+        pass
     yield
 
 

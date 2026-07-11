@@ -77,11 +77,27 @@ def test_position_limit_block():
 
 
 def test_position_limit_ok_when_disabled():
-    rm = _rm(max_position_per_symbol=5, max_position_enabled=False)
+    # 關掉部位上限 → 即使遠超上限也不得因此被擋。
+    # 原斷言 `r.level != BLOCK or "部位" not in r.reason` 是 A-or-not-B 析取：
+    # 若被 duplicate/frequency/reverse 等「reason 不含部位」的規則擋下仍為真，
+    # 會放過「放行語意壞掉」的回歸。改法：孤立部位上限這一條（關掉其他干擾
+    # 檢查），用正向斷言 r.passed，確定是真的放行而非被別條規則擋下。
+    rm = _rm(max_position_per_symbol=5, max_position_enabled=False,
+             duplicate_check_enabled=False, max_order_rate_enabled=False,
+             reverse_confirm=False)
     r = rm.pre_order_check("TXFR1", "Buy", qty=10, price=17000,
                            position_qty=4, position_direction="Buy")
-    # 部位上限關掉，不該因此 block；其他檢查仍可能擋（市價單 confirm 等）
-    assert r.level != CheckLevel.BLOCK or "部位" not in r.reason
+    assert r.passed, r.reason
+
+    # 對照組：同一筆超限單在部位上限「開啟」時必須真的 BLOCK 且理由是部位上限，
+    # 確保上面的放行來自「關掉上限」、測試本身有效（否則 disabled 分支形同虛設）。
+    rm_on = _rm(max_position_per_symbol=5, max_position_enabled=True,
+                duplicate_check_enabled=False, max_order_rate_enabled=False,
+                reverse_confirm=False)
+    r_on = rm_on.pre_order_check("TXFR1", "Buy", qty=10, price=17000,
+                                 position_qty=4, position_direction="Buy")
+    assert r_on.level == CheckLevel.BLOCK
+    assert "部位" in r_on.reason
 
 
 def test_opposite_direction_does_not_count_as_addon():

@@ -103,6 +103,9 @@ from backend.services.order_guard import smart_place_order
 from backend.services.contract_specs import get_tick_size
 engine.smart_order_engine._place_order = smart_place_order
 engine.smart_order_engine.set_dispatch(shared.submit_order_task)
+# D1：CHASE 的 cancel-replace 含 ~1s confirm 輪詢，改走獨立 blocking executor，
+# 避免 head-of-line 阻塞走 order executor 的保護性停損市價單。
+engine.smart_order_engine.set_chase_dispatch(shared.submit_blocking_task)
 # ★ Sprint C：CHASE 追價單需要「精準撤單」（cancel-replace）與 tick 級距
 engine.smart_order_engine.set_chase_helpers(
     cancel_order_fn=engine.client.cancel_order_by_ids,

@@ -203,8 +203,6 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
   const [brokerState, setBrokerState] = useState<BrokerState>('unknown');
   // Item 12：最近成交事件（TradeUpdate 正規化後，新的在前）
   const [recentFills, setRecentFills] = useState<FillEvent[]>([]);
-  // 每筆 id-less 成交遞增序號 → fallback id 才不會讓「兩筆 2口@同價」撞成同鍵被吞
-  const fillSeqRef = useRef(0);
   const seenFillIdsRef = useRef<Set<string>>(new Set());
   // Item 13：風控熔斷即時告警 + toast 去重（相同原因 5 秒內只跳一次）
   const [riskAlert, setRiskAlert] = useState<RiskAlert | null>(null);
@@ -345,7 +343,10 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       if (pendingHistoryRef.current.length > 0) {
         const batch = pendingHistoryRef.current;
         pendingHistoryRef.current = [];
-        setQuoteHistory(prev => [...batch, ...prev].slice(0, QUOTE_HISTORY_MAX));
+        // D4：batch 是本窗到達順序（舊→新）。tape 契約 index0=最新，故 flush 前先反轉，
+        // 否則該窗最新筆會被壓在最舊筆下方 → 主動買賣/內外盤/力道條判斷全數失真。
+        const rev = batch.slice().reverse();
+        setQuoteHistory(prev => [...rev, ...prev].slice(0, QUOTE_HISTORY_MAX));
       }
       if (pendingAccountRef.current !== null) {
         const summary = pendingAccountRef.current;
@@ -467,7 +468,23 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     // URL 解析共用 utils/backendUrl（與 api/client 同一套 host 邏輯；含選配 ?token=）
     const ws = new WebSocket(resolveWsUrl());
 
+    // F6：CONNECTING 狀態的 app 層握手逾時。stale watchdog 在 !isConnected 就 return，
+    // 救不了卡在 CONNECTING 的 socket；若握手被中間層黑洞化（onopen/onclose/onerror
+    // 都不觸發），連線會乾等到瀏覽器 TCP 逾時（可能數十秒~數分鐘）。這裡在建立連線後、
+    // onopen 前 arm 一個 9s 逾時：仍在 CONNECTING 就主動 close，接回 onclose 的既有退避重連。
+    let connectTimeout: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      connectTimeout = null;
+      if (ws.readyState === WebSocket.CONNECTING) {
+        console.warn('[WS] 連線握手逾時（CONNECTING > 9s），強制關閉觸發重連');
+        ws.close();
+      }
+    }, 9000);
+    const clearConnectTimeout = () => {
+      if (connectTimeout !== null) { clearTimeout(connectTimeout); connectTimeout = null; }
+    };
+
     ws.onopen = () => {
+      clearConnectTimeout();
       if (isUnmounted.current) { ws.close(); return; }
       setIsConnected(true);
       reconnectDelayRef.current = 1000;
@@ -624,11 +641,16 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
           const fillPrice = Number(d.price ?? 0);
           const fillQty = Number(d.quantity ?? d.qty ?? 0);
           const fillOrderId = String(d.order_id ?? d.ordno ?? '');
-          // P2：fallback id 加單調序號 —— 同單同價同量的第二筆部分成交才不會撞鍵被吞。
-          // 有真 id 時仍以真 id 去重（WS 重送不重複計入）。
+          // F1：去重鍵改用「穩定內容鍵」，對齊後端 journal 的 order_id#exchange_seq。
+          // 有真 id 時以真 id 去重；否則退回 order_id#exchange_seq，缺 seq 再退回 ts，
+          // 最後才退回 price#qty。★ 不再摻遞增序號 —— 摻序號會讓 bridge 無條件廣播的
+          // 同一筆成交（同 exchange_seq）每次前端算出不同鍵 → recentFills 雙入列 + 雙通知。
+          // 取捨：先前「加序號防同價碰撞」是為了讓同單同價同量的兩筆 partial 不撞鍵；
+          // 但有 exchange_seq 時兩筆不同 partial 天然不同鍵，無 seq 時退回 ts/price#qty，
+          // 已足以區分正常情境。後端 journal 的 INSERT OR IGNORE 保證不會重複入帳。
           const fillId = d.id != null && String(d.id) !== ''
             ? String(d.id)
-            : `${fillOrderId}#${fillPrice}#${fillQty}#${(fillSeqRef.current += 1)}`;
+            : `${fillOrderId}#${d.exchange_seq ?? d.ts ?? `${fillPrice}#${fillQty}`}`;
           if (fillSymbol && fillQty > 0 && !seenFillIdsRef.current.has(fillId)) {
             seenFillIdsRef.current.add(fillId);
             trimSet(seenFillIdsRef.current, MAX_SEEN_FILL_IDS);
@@ -723,6 +745,7 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
     };
 
     ws.onclose = (ev?: CloseEvent) => {
+      clearConnectTimeout(); // F6：不論 onopen 是否來過，close 一定解除握手逾時計時器
       setIsConnected(false);
       setBrokerState('unknown'); // Item 11：WS 斷了就不知道券商端狀態，重連後 hello frame 會補
       if (isUnmounted.current) return;
@@ -807,6 +830,12 @@ export const TradingProvider: React.FC<{ children: React.ReactNode }> = ({ child
       apiClient.post('/unwatch', { symbols: removed }).catch(() => { /* 靜默；重連時後端不持久化訂閱，洩漏自然消失 */ });
     }
     watchSymbolsRef.current = union;
+    // F4：先修剪 watchlist 的 dirty 緩衝（比照下方 bidAskBySymbolDirtyRef）——
+    // 否則已移除的 symbol 若還留在 dirty 緩衝，下一次 flush 會把它重新塞回
+    // watchlistQuotes（state 修剪了也沒用）。
+    for (const s of Object.keys(watchlistDirtyRef.current)) {
+      if (!union.has(s)) delete watchlistDirtyRef.current[s];
+    }
     // 移除掉不再 watch 的 symbol（舊資料留著會佔記憶體 + UI 顯示舊價）
     setWatchlistQuotes((prev) => {
       const next: Record<string, MiniQuote> = {};

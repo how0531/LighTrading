@@ -112,6 +112,19 @@ def submit_sync_task(fn):
     return sync_executor.submit(fn)
 
 
+# CHASE 追價的「可阻塞輪詢」通道（D1）：cancel-replace / 收尾轉市價會做
+# confirm_order_cancelled 這種 ~1s 的撤單終態輪詢。若與保護性停損共用
+# order_executor（單 worker），一筆追價輪詢會 head-of-line 阻塞停損出場的
+# 市價單。獨立一條阻塞用 executor，讓 order_executor 只跑「不阻塞的快下單」
+# （智慧單觸發的保護性市價單），追價的阻塞輪詢走這裡、彼此不排隊。
+blocking_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="blocking")
+
+
+def submit_blocking_task(fn):
+    """CHASE cancel-replace / 收尾的可阻塞輪詢專用通道（不與保護性停損下單共用佇列）。"""
+    return blocking_executor.submit(fn)
+
+
 async def drop_connection(conn: WebSocket) -> None:
     """
     把 WebSocket 從活躍集合移除「並且真正關閉它」。

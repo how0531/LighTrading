@@ -275,6 +275,12 @@ class SmartOrderEngine:
         # 觸發後實際下單的派工 hook；backend 會注入 broker executor，
         # 預設 None = 同步執行（測試 / standalone 用）
         self._dispatch: Optional[Callable[[Callable], None]] = None
+        # D1：CHASE cancel-replace / 收尾的「可阻塞派工」hook。改價/收尾會做
+        #   confirm_order_cancelled（~1s 撤單終態輪詢），若與保護性停損共用
+        #   _dispatch（order executor 單 worker），一筆追價輪詢會 head-of-line
+        #   阻塞停損出場的市價單。backend 注入獨立的 blocking executor；未注入時
+        #   退回 _dispatch（再退回同步 inline），維持測試 / standalone 行為不變。
+        self._chase_dispatch: Optional[Callable[[Callable], None]] = None
 
         # ── CHASE 執行期狀態（不持久化） ──
         self._now_ms: Callable[[], float] = lambda: time.monotonic() * 1000.0
@@ -313,6 +319,16 @@ class SmartOrderEngine:
     def set_dispatch(self, dispatch: Callable[[Callable], None]):
         """注入觸發下單的派工函數（例如丟進 broker thread pool）。"""
         self._dispatch = dispatch
+
+    def set_chase_dispatch(self, dispatch: Callable[[Callable], None]):
+        """注入 CHASE 改價/收尾（可阻塞輪詢）的專用派工函數（D1）。
+
+        backend 應注入獨立的 blocking executor（shared.submit_blocking_task），
+        讓 confirm_order_cancelled 的 ~1s 撤單終態輪詢不與保護性停損市價單
+        （走 set_dispatch 注入的 order executor）在同一單 worker 上排隊。
+        未注入時 _dispatch_chase_task 退回 _dispatch（保持既有行為）。
+        """
+        self._chase_dispatch = dispatch
 
     def set_chase_helpers(self, cancel_order_fn: Optional[Callable] = None,
                           tick_size_fn: Optional[Callable] = None,
@@ -411,6 +427,21 @@ class SmartOrderEngine:
         """
         新增 OCO (One Cancels Other) 停利停損二擇一
         """
+        # C2 防禦：價格順序不合理的 OCO 是無效保護（停損掛在比停利更差的一側，
+        #   兩腿條件會在同一價區/同一 tick 同時滿足 → 雙邊重複觸發）。REST 端已擋，
+        #   這裡是引擎最後一道防線（Bracket 自動掛 OCO 等內部路徑也走這裡）：
+        #     Sell（平多）需 take_profit > stop_loss
+        #     Buy （平空）需 take_profit < stop_loss
+        #   反向（嚴格倒置）直接拒絕；相等留給 _on_tick 的同 tick 互斥兜底。
+        if action == "Sell" and take_profit < stop_loss:
+            raise ValueError(
+                f"OCO 價格順序不合理：Sell 需 take_profit(>{stop_loss}) > stop_loss，"
+                f"收到 tp={take_profit} sl={stop_loss}")
+        if action == "Buy" and take_profit > stop_loss:
+            raise ValueError(
+                f"OCO 價格順序不合理：Buy 需 take_profit(<{stop_loss}) < stop_loss，"
+                f"收到 tp={take_profit} sl={stop_loss}")
+
         tp_id = self._next_id()
         sl_id = self._next_id()
         sym = symbol.strip().upper()
@@ -625,6 +656,19 @@ class SmartOrderEngine:
         else:
             fn()
 
+    def _dispatch_chase_task(self, fn: Callable):
+        """D1：CHASE 改價/收尾的可阻塞輪詢專用派工。
+
+        優先用 _chase_dispatch（blocking executor）→ 退回 _dispatch（order
+        executor）→ 退回同步 inline（測試 / standalone）。讓追價的撤單終態
+        輪詢不 head-of-line 阻塞保護性停損市價單。
+        """
+        disp = self._chase_dispatch or self._dispatch
+        if disp is not None:
+            disp(fn)
+        else:
+            fn()
+
     # ──── CHASE 腿（leg）記帳：filled_qty = Σ 各腿已成量（P1-2） ────
 
     def _add_leg_nolock(self, order: SmartOrder, ids) -> None:
@@ -729,10 +773,12 @@ class SmartOrderEngine:
                 else:
                     self._chase_runtime.setdefault(order.id, {})["last_reprice_ms"] = now
                     to_reprice.append((order, target))
+        # D1：改價/收尾含 confirm_order_cancelled 的可阻塞輪詢 → 走 chase 專用
+        #     （blocking executor）派工，不阻塞保護性停損的 order executor。
         for order, price in to_reprice:
-            self._dispatch_task(lambda o=order, p=price: self._reprice_chase(o, p))
+            self._dispatch_chase_task(lambda o=order, p=price: self._reprice_chase(o, p))
         for order in to_finalize:
-            self._dispatch_task(lambda o=order: self._finalize_chase(o))
+            self._dispatch_chase_task(lambda o=order: self._finalize_chase(o))
 
     def _cancel_broker_order(self, order: SmartOrder) -> bool:
         """撤掉 chase 目前的 working order（在 order executor 上執行）。"""
@@ -1177,22 +1223,29 @@ class SmartOrderEngine:
 
         triggered = []
         linked_by_order: dict = {}
+        # C2：同一 tick 內 OCO 兩腿互斥。若某腿本輪已觸發，其配對腿（linked）
+        #   本輪不得再送單——避免價格恰好同時滿足兩腿條件（tp==sl 之類的退化/
+        #   跳空邊界）時 OCO 雙邊重複下單。先觸發的那腿贏，配對腿只被取消不下單。
+        oco_claimed: set = set()
         with self._lock:
             for order in self._smart_orders:
                 if not order.is_active or order.symbol != symbol:
                     continue
+                if order.id in oco_claimed:
+                    continue  # 同 tick 其配對腿已觸發 → 本輪不送
 
+                hit = False
                 if order.order_type == SmartOrderType.MIT:
-                    if self._check_mit(order, price):
-                        triggered.append(order)
-
+                    hit = self._check_mit(order, price)
                 elif order.order_type == SmartOrderType.TRAILING_STOP:
-                    if self._check_trailing(order, price):
-                        triggered.append(order)
-
+                    hit = self._check_trailing(order, price)
                 elif order.order_type == SmartOrderType.OCO:
-                    if self._check_mit(order, price):  # OCO 本質是兩張觸價單
-                        triggered.append(order)
+                    hit = self._check_mit(order, price)  # OCO 本質是兩張觸價單
+
+                if hit:
+                    triggered.append(order)
+                    if order.linked_id:
+                        oco_claimed.add(order.linked_id)
 
             # 在 lock 內先標記為非 active，確保同一張單不會被下一個 tick 重複觸發；
             # SQLite 寫檔不在 lock 內、也不在行情執行緒上做。

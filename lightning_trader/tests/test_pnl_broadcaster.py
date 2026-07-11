@@ -15,8 +15,22 @@ import sys
 import os
 from unittest.mock import MagicMock
 
+import pytest
+
 from backend.services import pnl_broadcaster as pb
 from backend import shared
+
+
+@pytest.fixture(autouse=True)
+def _restore_shared():
+    """本檔會把 shared.shioaji_client 換成 MagicMock、並改 pb._pos_cache；
+    用完必須還原，否則會污染字母序在後、依賴真 fake client 的整合測試
+    （例如 test_position_aggregation 讀 shared.shioaji_client.api）。"""
+    orig_client = shared.shioaji_client
+    orig_pos_cache = pb._pos_cache
+    yield
+    shared.shioaji_client = orig_client
+    pb._pos_cache = orig_pos_cache
 
 
 def _setup_client(latest_prices: dict):

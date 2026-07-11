@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components --
  * Context Provider 與 hook 需同檔共享；改動本檔會整頁 HMR reload，可接受 */
-import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef, useCallback } from 'react';
 import { apiClient } from '../api/client';
 import { configureSound } from '../utils/sound';
 import type { SizingMode } from '../utils/sizing';
@@ -290,27 +290,66 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     configureSound(settings.notifications.sound);
   }, [settings.notifications.sound]);
 
-  const syncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // ── F5：DOM 副作用（即時） vs 持久化（debounce） 拆分 ────────────────────
+  // DOM 副作用維持即時：切主題 / 改字級要立刻反映，不能等 debounce。
   useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(settings));
-    } catch {
-      // quota 爆掉 / 隱私模式不可寫 → 降級：僅記憶體 + 後端同步,不要 throw 進 effect
-    }
     if (settings.theme === 'dark') {
       document.documentElement.classList.add('dark');
     } else {
       document.documentElement.classList.remove('dark');
     }
     document.documentElement.style.setProperty('--base-font-size', `${settings.visuals.fontSize || 12}px`);
+  }, [settings.theme, settings.visuals.fontSize]);
 
-    // debounced 後端同步
-    if (!hydratedFromServerRef.current) return;
-    if (syncTimerRef.current) clearTimeout(syncTimerRef.current);
-    syncTimerRef.current = setTimeout(() => {
-      apiClient.put('/user_settings', { data: settings }).catch(() => { /* 靜默，localStorage 為主 */ });
-    }, 800);
+  // 重的持久化（localStorage 全量 JSON.stringify —— 含自訂指標 JS 原始碼 blob ——
+  // 以及後端 PUT）改走 debounce 300ms。此前每次 setSettings 都同步全量序列化寫
+  // localStorage，色票拖曳 / 滑桿每幀觸發時會逐幀阻塞主執行緒造成卡頓。
+  const latestSettingsRef = useRef(settings);
+  // 於 commit 後更新（不可在 render 期寫 ref）；persistNow 由 setTimeout /
+  // beforeunload 呼叫，屆時此 effect 已跑完，ref 必為最新快照。
+  useEffect(() => {
+    latestSettingsRef.current = settings;
   }, [settings]);
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const persistNow = useCallback(() => {
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+    const snapshot = latestSettingsRef.current;
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshot));
+    } catch {
+      // quota 爆掉 / 隱私模式不可寫 → 降級：僅記憶體 + 後端同步，不要 throw
+    }
+    // 後端同步：本地尚未被伺服器設定 hydrate 前不寫回（避免用預設值覆蓋雲端）
+    if (hydratedFromServerRef.current) {
+      apiClient.put('/user_settings', { data: snapshot }).catch(() => { /* 靜默，localStorage 為主 */ });
+    }
+  }, []);
+
+  useEffect(() => {
+    if (persistTimerRef.current) clearTimeout(persistTimerRef.current);
+    persistTimerRef.current = setTimeout(persistNow, 300);
+    return () => {
+      if (persistTimerRef.current) {
+        clearTimeout(persistTimerRef.current);
+        persistTimerRef.current = null;
+      }
+    };
+  }, [settings, persistNow]);
+
+  // unmount / 分頁關閉前 flush：debounce 視窗內的最後一次變更不遺失
+  // （localStorage.setItem 是同步的，beforeunload 期間仍能落盤）。
+  useEffect(() => {
+    const flush = () => persistNow();
+    window.addEventListener('beforeunload', flush);
+    return () => {
+      window.removeEventListener('beforeunload', flush);
+      persistNow();
+    };
+  }, [persistNow]);
 
   const updateSetting = (updates: Partial<Settings> | ((prev: Settings) => Settings)) => {
     setSettings(prev => {

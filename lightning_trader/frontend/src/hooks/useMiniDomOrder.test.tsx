@@ -26,6 +26,8 @@ vi.mock('../api/client', async (importOriginal) => {
     apiClient: {
       get: vi.fn(() => Promise.resolve({ data: {} })),
       post: vi.fn(() => Promise.resolve({ data: {} })),
+      put: vi.fn(() => Promise.resolve({ data: {} })),
+      delete: vi.fn(() => Promise.resolve({ data: {} })),
     },
   };
 });
@@ -230,14 +232,38 @@ describe('useMiniDomOrder（非戰鬥模式：確認流）', () => {
     expect(mockedPost).not.toHaveBeenCalled();
   });
 
-  it('確認框接受 → 送單且帶 confirm:true（前端確認一併授權後端 WARNING）', async () => {
+  it('C3：確認框接受 → 送單但首發不帶 confirm（一般確認框不授權跳過後端 WARNING）', async () => {
     mockConfirm.mockResolvedValue(true);
     const { result } = renderHook(() => useMiniDomOrder(), { wrapper });
     await act(async () => {
       await result.current.placeFromGrid('2454', 995, 'Buy', 3);
     });
+    // 只彈一次一般確認框；後端無 WARNING（回 200）→ 單發、payload 不含 confirm:true
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
     expect(mockedPost).toHaveBeenCalledTimes(1);
-    expect(mockedPost).toHaveBeenCalledWith('/place_order',
-      { ...EXPECTED_GRID_PAYLOAD, confirm: true });
+    expect(mockedPost).toHaveBeenCalledWith('/place_order', EXPECTED_GRID_PAYLOAD);
+    expect(mockedPost.mock.calls[0][1]).not.toHaveProperty('confirm');
+  });
+
+  it('C3：一般確認接受後仍遇 409 → 再彈含全文的 danger 框授權，帶 confirm:true 重送', async () => {
+    mockedPost
+      .mockRejectedValueOnce(confirmRequiredError())
+      .mockResolvedValueOnce({ data: {} });
+    mockConfirm.mockResolvedValue(true); // 一般框 + danger 框皆接受
+
+    const { result } = renderHook(() => useMiniDomOrder(), { wrapper });
+    await act(async () => {
+      await result.current.placeFromGrid('2454', 995, 'Buy', 3);
+    });
+
+    // 兩個確認框：先一般下單確認、後風控 danger（含 warnings 全文）
+    expect(mockConfirm).toHaveBeenCalledTimes(2);
+    const dangerOpts = mockConfirm.mock.calls[1][0] as ConfirmOptions;
+    expect(dangerOpts.danger).toBe(true);
+    expect(dangerOpts.message).toContain('價格偏離參考價 3%');
+
+    expect(mockedPost).toHaveBeenCalledTimes(2);
+    expect(mockedPost.mock.calls[0]).toEqual(['/place_order', EXPECTED_GRID_PAYLOAD]);
+    expect(mockedPost.mock.calls[1]).toEqual(['/place_order', { ...EXPECTED_GRID_PAYLOAD, confirm: true }]);
   });
 });
