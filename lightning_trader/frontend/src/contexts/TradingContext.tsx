@@ -10,6 +10,19 @@ import { useToast } from './ToastContext';
 import { playSound } from '../utils/sound';
 import { riskHaltToastedRecently, markRiskHaltToasted } from '../utils/riskToastDedupe';
 
+// 對外 WS 線協定的權威型別集中在 src/contracts；此處 re-export，讓 TradingContext
+// 與其消費者從單一契約表面取用。下方 ws.onmessage 的每個 data.type 分支即對應
+// WsServerMessage 聯集的一個成員，每個 data.action 分支對應 WsServerResponse。
+// @stable-contract — 見 src/contracts 與 docs/CONTRACT.md
+export type {
+  WsServerMessage,
+  WsServerMessageType,
+  WsServerResponse,
+  WsClientMessage,
+  WsInboundMessage,
+  SeqKind,
+} from '../contracts';
+
 export interface AccountPosition {
   symbol: string; qty: number; direction: 'Buy' | 'Sell'; price: number; pnl: number; account?: string; raw_qty?: number;
 }
@@ -74,6 +87,9 @@ export interface MiniQuote {
  * 高頻 context — 100ms throttle flush 更新的 tick 資料。
  * 只有真的要跟著每筆報價重繪的元件（DOM ladder、K 線、逐筆、報價看板…）
  * 才透過 useQuotes() 訂閱，其餘面板不會被 10 次/秒的 flush 掃到。
+ *
+ * @stable-contract — 對外穩定契約。鍵的增刪改需同步 docs/CONTRACT.md、
+ *   src/contracts（QUOTES_CONTEXT_KEYS）與 TradingContext.contract.test.tsx 護欄測試。
  */
 export interface QuotesContextType {
   quote: QuoteData | null;
@@ -95,6 +111,9 @@ export interface QuotesContextType {
 /**
  * 低頻 context — 連線狀態、帳戶、委託與所有 action 方法。
  * action 方法全部 useCallback 固定，value 只在低頻狀態真的變動時才換新。
+ *
+ * @stable-contract — 對外穩定契約。鍵的增刪改需同步 docs/CONTRACT.md、
+ *   src/contracts（TRADING_CORE_CONTEXT_KEYS）與 TradingContext.contract.test.tsx 護欄測試。
  */
 export interface TradingCoreContextType {
   isConnected: boolean;
