@@ -42,13 +42,11 @@ def _fake_api():
 
 @pytest.fixture(autouse=True)
 def _reset_state():
-    sj = shared.shioaji_client
-    sj._is_connected = True
-    sj.active_stock_account = _fake_api()._accounts[0]
-    sj.active_futopt_account = _fake_api()._accounts[1]
-    _fake_api().trades = []
-    _fake_api().placed_orders.clear()
-    _fake_api().cancelled_orders.clear()
+    """沿用 tests/conftest.py 的統一 reset_backend_state()（登入旗標、
+    active accounts、fake api 的 trades/placed_orders/cancelled_orders 等），
+    不再各自複製那段 reset。"""
+    from conftest import reset_backend_state
+    reset_backend_state()
     yield
 
 

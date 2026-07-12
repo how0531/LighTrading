@@ -48,60 +48,17 @@ def _rm():
     return shared.engine.risk_manager
 
 
-def _drain_executors():
-    """抽乾三個單 worker executor：submit 哨兵並等它完成，FIFO 保證
-    先前排入的背景工作（智慧單觸發的下單、cancel_all 的撤單、成交副作用
-    排的重算）全部落地。避免前一測試遲到的 place_order 在下一測試
-    clear 之後才寫進 placed_orders，造成 test_create_bracket_via_rest
-    這類「多看到一筆」的 flaky。"""
-    for ex in (shared.broker_executor, shared.order_executor, shared.sync_executor):
-        try:
-            ex.submit(lambda: None).result(timeout=5)
-        except Exception:
-            pass
-
-
 @pytest.fixture(autouse=True)
 def _reset_state():
-    """每個測試前重置：登入狀態、風控、rate limit、假下單紀錄。"""
-    sj_client = shared.shioaji_client
-    sj_client._is_connected = True
-    sj_client.active_stock_account = _fake_api()._accounts[0]
-    sj_client.active_futopt_account = _fake_api()._accounts[1]
-    eng = getattr(shared.engine, "smart_order_engine", None)
-    if eng is not None:
-        eng.cancel_all()
-    # 先抽乾背景 executor，再清假下單紀錄 —— 順序關鍵：確保前一測試
-    # 在背景執行緒上 dispatch 的下單/撤單都已落地後才 clear，之後不再有
-    # 遲到的寫入污染下一測試。
-    _drain_executors()
-    _fake_api().positions = []
-    _fake_api().trades = []
-    _fake_api().placed_orders.clear()
-    _fake_api().cancelled_orders.clear()
-    rm = _rm()
-    rm.reset_daily()
-    rm.update_config(max_position_per_symbol=10, max_daily_loss=-50000.0)
-    rm._current_positions.clear()
-    rm._current_prices.clear()
-    rate_limit._buckets.clear()
-    # ── 對帳/去重的模組級單例也必須每測試重置，否則測試順序相依 ──
-    # order_sync 的 in-memory watermark（_seen_fill_ids）跨測試累積 →
-    # 同 id 的成交在後續測試被誤判「已處理」，new_fills 少算；更嚴重的是
-    # 這層記憶體去重會遮蔽 insert_fill 對 journal DB 重複入帳的回歸。
-    # _last_fingerprint 殘留 → WorkingOrdersSnapshot 的 changed 判定失準。
-    import backend.services.order_sync as _os
-    _os._seen_fill_ids.clear()
-    _os._last_fingerprint = ""
-    # journal 是全 session 共用同一個 SQLite 檔（_CONN 單例）——不清空 fills
-    # 表，前一測試的成交會漏進下一測試的 FIFO 已實現損益重算，金額斷言
-    # 變成順序相依。每測試清空 fills，讓已實現損益 / 去重回歸各自獨立。
-    from backend.services import trade_journal as _tj
-    try:
-        with _tj._DB_LOCK:
-            _tj._connect().execute("DELETE FROM fills")
-    except Exception:
-        pass
+    """每個測試前重置整合測試共用的 backend 狀態。
+
+    統一邏輯已收斂到 tests/conftest.py 的 reset_backend_state()：登入旗標、
+    active accounts、fake api 的 positions/trades/placed_orders/cancelled_orders、
+    smart_order_engine cancel_all + 抽乾三個 executor、risk_manager reset、
+    rate_limit buckets、order_sync watermark、journal fills、還原 shared client。
+    本檔沿用該共用邏輯，不再各自複製。"""
+    from conftest import reset_backend_state
+    reset_backend_state()
     yield
 
 

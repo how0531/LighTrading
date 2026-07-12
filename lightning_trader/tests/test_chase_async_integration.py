@@ -70,38 +70,14 @@ def _wait_for(cond, timeout=3.0):
 
 @pytest.fixture(autouse=True)
 def _reset_state():
-    """每測試前重置：登入狀態、風控、假下單紀錄、CHASE 引擎、fake 競速旗標。"""
-    sj = shared.shioaji_client
-    sj._is_connected = True
-    api = _fake_api()
-    sj.active_stock_account = api._accounts[0]
-    sj.active_futopt_account = api._accounts[1]
+    """每測試前重置整合測試共用的 backend 狀態。
 
-    eng = getattr(shared.engine, "smart_order_engine", None)
-    if eng is not None:
-        eng.cancel_all()
-    # 抽乾背景 executor：確保前一測試 dispatch 的撤單/下單都落地後再 clear
-    for ex in (shared.broker_executor, shared.order_executor, shared.sync_executor):
-        try:
-            ex.submit(lambda: None).result(timeout=5)
-        except Exception:
-            pass
-
-    api.positions = []
-    api.trades = []
-    api.placed_orders.clear()
-    api.cancelled_orders.clear()
-    # fake 的可選競速行為一律回預設（同步撤單），避免污染其他測試
-    api.async_cancel = False
-    api.flush_cancels_on_status = False
-    api.cancel_race_hook = None
-    api._pending_cancels.clear()
-
-    rm = _rm()
-    rm.reset_daily()
-    rm.update_config(max_position_per_symbol=10, max_daily_loss=-50000.0)
-    rm._current_positions.clear()
-    rm._current_prices.clear()
+    統一邏輯已收斂到 tests/conftest.py 的 reset_backend_state()，其中已含
+    本檔原本特有的 fake 競速旗標重置（async_cancel / flush_cancels_on_status /
+    cancel_race_hook / _pending_cancels）——只在 fake api 有這些屬性時才動，
+    對其他模組無害。本檔沿用該共用邏輯，不再各自複製那段 reset。"""
+    from conftest import reset_backend_state
+    reset_backend_state()
     yield
 
 

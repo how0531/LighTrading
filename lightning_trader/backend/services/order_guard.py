@@ -36,9 +36,19 @@ from shioaji.constant import Action
 
 from backend import shared
 from backend.services import trade_journal
+from backend.services import audit_log
 from backend.services.equity_curve import compute_realized_curve
+from core import risk_invariants
 
 logger = logging.getLogger(__name__)
+
+
+def _inv_deps():
+    """取注入不變量層的 event_bus / risk_manager（缺則 None，observe-only）。"""
+    eng = shared.engine
+    event_bus = getattr(eng, "event_bus", None) if eng else None
+    rm = getattr(eng, "risk_manager", None) if eng else None
+    return event_bus, rm
 
 # 觸發路徑允許沿用 pnl_broadcaster 持倉快取的最大年齡（秒）——
 # 避免每次停損觸發都多一輪阻塞的 list_positions
@@ -131,11 +141,25 @@ def smart_place_order(symbol: str, price: float, action: str, qty: int):
                 pass
             # #8：暫態封鎖（頻率限制）回 RATE_LIMITED（CHASE 本輪放棄、下輪重試），
             # 真正的風控封鎖才回 RISK_BLOCKED（終態）
+            audit_log.record(audit_log.EVENT_RISK_BLOCK, symbol=symbol,
+                             action=str(action), qty=qty, price=price,
+                             meta={"reason": msg, "source": "smart"})
             return RATE_LIMITED if getattr(result, "transient", False) else RISK_BLOCKED
+
+    # 不變量 (a)：送單前「意圖量 ≥ 0 且經過 pre_order_check（或為豁免的
+    # 保護性平倉單）」。protective 走豁免路徑、rm 存在則已通過檢查才到這裡。
+    event_bus, inv_rm = _inv_deps()
+    risk_invariants.check_order_intent(
+        send_qty, checked_or_protective=(protective or rm is not None),
+        event_bus=event_bus, risk_manager=inv_rm,
+        context={"symbol": symbol, "action": str(action), "protective": protective})
 
     action_enum = action if isinstance(action, Action) else (
         Action.Buy if str(action).lower() == "buy" else Action.Sell
     )
+    audit_log.record(audit_log.EVENT_SENT, symbol=symbol, action=str(action),
+                     qty=send_qty, price=price,
+                     meta={"protective": protective, "source": "smart"})
     return client.place_order(symbol, price, action_enum, send_qty)
 
 
@@ -192,6 +216,24 @@ def fill_side_effects(fill: Optional[dict]) -> None:
             shared.engine.event_bus.on_fill.emit(fill)
     except Exception:
         pass
+    # 委託生命週期審計：成交事件（callback 與對帳兩路徑共用此處，故全部成交都入軌）
+    if fill:
+        audit_log.record(
+            audit_log.EVENT_FILL,
+            order_id=fill.get("order_id") or fill.get("ordno"),
+            symbol=fill.get("symbol") or fill.get("code"),
+            action=fill.get("action"),
+            qty=fill.get("qty") or fill.get("quantity"),
+            price=fill.get("price"),
+            meta={"id": fill.get("id")})
+    # 不變量 (b)：成交入帳時「活躍掛單量 + 已成量 ≤ 委託量」（超額偵測）。
+    # 資料取不到 → check_fill_no_overfill 內部 skip（回 None），不誤報。
+    try:
+        event_bus, inv_rm = _inv_deps()
+        risk_invariants.check_fill_no_overfill(
+            fill, event_bus=event_bus, risk_manager=inv_rm)
+    except Exception:
+        logger.debug("fill 超額不變量檢查略過", exc_info=True)
     try:
         from backend.services import pnl_broadcaster as pb
         pb.on_fill_event()
@@ -260,5 +302,19 @@ def refresh_daily_realized():
             rm.update_daily_pnl(realized=safe)
         else:
             rm.update_daily_pnl(realized=realized)
+
+        # 不變量 (c)：對帳時「(realized+unrealized) 與券商回報偏差在閾值內」。
+        # ★ 誠實：此路徑目前取不到券商權威 realized（broker_reported=None）→
+        #   record_reconciliation 內部 skip（僅登錄「不可得」供健康列顯示），
+        #   不製造假違反。日後接上券商 realized 即可傳入實值啟用比對。
+        try:
+            event_bus = getattr(shared.engine, "event_bus", None) if shared.engine else None
+            computed = (float(getattr(rm, "_daily_realized_pnl", 0.0) or 0.0)
+                        + float(getattr(rm, "_daily_unrealized_pnl", 0.0) or 0.0))
+            risk_invariants.record_reconciliation(
+                computed=computed, broker_reported=None,
+                event_bus=event_bus, risk_manager=rm)
+        except Exception:
+            logger.debug("對帳不變量登錄略過", exc_info=True)
     except Exception as e:
         logger.error(f"refresh_daily_realized 失敗: {e}")

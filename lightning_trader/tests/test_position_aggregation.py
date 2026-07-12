@@ -56,36 +56,14 @@ def _rm():
     return shared.engine.risk_manager
 
 
-def _drain_executors():
-    """抽乾背景單 worker executor，確保前一測試的下單/撤單落地後才 clear。"""
-    for ex in (shared.broker_executor, shared.order_executor, shared.sync_executor):
-        try:
-            ex.submit(lambda: None).result(timeout=5)
-        except Exception:
-            pass
-
-
 @pytest.fixture(autouse=True)
 def _reset_state():
-    """每個測試前重置：登入狀態、風控、rate limit、假下單/持倉紀錄。"""
-    sj_client = shared.shioaji_client
-    sj_client._is_connected = True
-    sj_client.active_stock_account = _fake_api()._accounts[0]
-    sj_client.active_futopt_account = _fake_api()._accounts[1]
-    eng = getattr(shared.engine, "smart_order_engine", None)
-    if eng is not None:
-        eng.cancel_all()
-    _drain_executors()
-    _fake_api().positions = []
-    _fake_api().trades = []
-    _fake_api().placed_orders.clear()
-    _fake_api().cancelled_orders.clear()
-    rm = _rm()
-    rm.reset_daily()
-    rm.update_config(max_position_per_symbol=10, max_daily_loss=-50000.0)
-    rm._current_positions.clear()
-    rm._current_prices.clear()
-    rate_limit._buckets.clear()
+    """每個測試前重置整合測試共用的 backend 狀態。
+
+    統一邏輯已收斂到 tests/conftest.py 的 reset_backend_state()（見該處
+    完整清單）；本檔沿用該共用邏輯，不再各自複製那一大段 reset。"""
+    from conftest import reset_backend_state
+    reset_backend_state()
     yield
 
 
