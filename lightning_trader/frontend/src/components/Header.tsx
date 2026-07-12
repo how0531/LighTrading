@@ -3,6 +3,8 @@ import { useQuotes, useTradingCore } from '../contexts/TradingContext';
 import { Activity, Settings, Lock, Unlock, Maximize, Minimize, RefreshCw, ShieldAlert, Zap } from 'lucide-react';
 import { apiClient, getAccountBalance } from '../api/client';
 import { SymbolPicker } from './SymbolPicker';
+import PanicButton from './PanicButton';
+import HealthStrip from './HealthStrip';
 import { PRESET_ORDER, presetLabel, LAYOUT_PRESETS, type LayoutPresetId } from '../utils/layoutPresets';
 import type { RiskStatus } from '../hooks/useRiskStatus';
 
@@ -140,6 +142,10 @@ const Header: React.FC<HeaderProps> = ({ onOpenSettings, isLayoutLocked = true, 
       </div>
 
       <div className="flex items-center gap-4">
+        {/* 安全網：健康列 + 恐慌鈕（保命裝置，顯眼紅） */}
+        <HealthStrip />
+        <PanicButton />
+
         {/* 保證金 widget */}
         {balance && (
           <div className="hidden lg:flex flex-col items-end mr-2 min-w-[110px]">
