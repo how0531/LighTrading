@@ -153,6 +153,14 @@ async def lifespan(app):
                 logger.info("✅ Shioaji 自動登入成功")
                 await asyncio.sleep(1)
                 await subscribe_position_contracts()
+                # ★ WS3 啟動對帳協議：登入成功且已補訂持倉商品後，與券商校準一次
+                #   （偵測部位/委託/智慧單落差 → 告警 + audit；殭屍智慧單交回既有引擎）。
+                #   best-effort：對帳任何例外都不可擋 backend 啟動。
+                try:
+                    from backend.services.reconciliation import reconcile_on_startup
+                    await reconcile_on_startup()
+                except Exception as recon_err:
+                    logger.error(f"❌ 啟動對帳發生例外（已忽略，不擋啟動）: {recon_err}")
             else:
                 logger.warning("⚠️ Shioaji 自動登入失敗，請檢查 .env 設定")
         except Exception as e:

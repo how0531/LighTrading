@@ -17,6 +17,7 @@ shioaji_client）時才動手**，純單元測試（test_equity_curve 等不碰 
 """
 import sys
 import os
+import types as _types
 import unittest.mock as _mock
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -31,6 +32,17 @@ import pytest
 # fake client」時記住它，之後任何一次 reset 發現當前 client 變成 mock，
 # 就還原回這個正典參考 —— 防 pnl_broadcaster 型污染的最後防線。
 _CANONICAL_CLIENT = None
+
+# ─── shared.engine 還原用的「正典」參考 ─────────────────────────
+# test_realized_lookback 一類純函式測試會把 shared.engine 暫時換成
+# SimpleNamespace 假引擎（只塞 risk_manager / event_bus），且不還原。
+# 字母序在後、依賴真 TradingEngine 的整合測試（讀 engine.smart_order_engine、
+# engine.event_bus.on_risk_breach.connect…）就會壞——例如 test_reconciliation
+# 對 on_risk_breach.connect 會炸（假 _Signal 只有 emit）。同 client 手法：
+# 第一次看到真引擎時記為正典，之後任何 reset 發現當前 engine 是 SimpleNamespace
+# 假引擎，就還原回正典。真引擎的測試（realized_lookback）在 autouse reset 之後
+# 才於測試 body 裝自己的假引擎，故不受影響。
+_CANONICAL_ENGINE = None
 
 
 def _mod(name):
@@ -61,7 +73,7 @@ def reset_backend_state():
     否則直接 no-op，讓純單元測試不受影響。各整合測試檔的 `_reset_state`
     可直接沿用本函式，消除重複的 reset 段落。
     """
-    global _CANONICAL_CLIENT
+    global _CANONICAL_CLIENT, _CANONICAL_ENGINE
 
     shared = _mod("backend.shared")
     if shared is None or getattr(shared, "shioaji_client", None) is None:
@@ -75,6 +87,15 @@ def reset_backend_state():
     elif _CANONICAL_CLIENT is not None:
         # 當前被換成 mock 且沒還原 → 還原成原本的 fake client
         shared.shioaji_client = _CANONICAL_CLIENT
+
+    # ── 0b. 還原 shared.engine（防 test_realized_lookback 型污染） ──
+    cur_eng = getattr(shared, "engine", None)
+    if cur_eng is not None and not isinstance(cur_eng, _types.SimpleNamespace):
+        # 當前是真 TradingEngine → 記為正典
+        _CANONICAL_ENGINE = cur_eng
+    elif isinstance(cur_eng, _types.SimpleNamespace) and _CANONICAL_ENGINE is not None:
+        # 當前被換成假引擎且沒還原 → 還原成真引擎
+        shared.engine = _CANONICAL_ENGINE
 
     sj = shared.shioaji_client
     api = getattr(sj, "api", None)
