@@ -50,24 +50,15 @@ def _rm():
 
 @pytest.fixture(autouse=True)
 def _reset_state():
-    """每個測試前重置：登入狀態、風控、rate limit、假下單紀錄。"""
-    sj_client = shared.shioaji_client
-    sj_client._is_connected = True
-    sj_client.active_stock_account = _fake_api()._accounts[0]
-    sj_client.active_futopt_account = _fake_api()._accounts[1]
-    _fake_api().positions = []
-    _fake_api().trades = []
-    _fake_api().placed_orders.clear()
-    _fake_api().cancelled_orders.clear()
-    eng = getattr(shared.engine, "smart_order_engine", None)
-    if eng is not None:
-        eng.cancel_all()
-    rm = _rm()
-    rm.reset_daily()
-    rm.update_config(max_position_per_symbol=10, max_daily_loss=-50000.0)
-    rm._current_positions.clear()
-    rm._current_prices.clear()
-    rate_limit._buckets.clear()
+    """每個測試前重置整合測試共用的 backend 狀態。
+
+    統一邏輯已收斂到 tests/conftest.py 的 reset_backend_state()：登入旗標、
+    active accounts、fake api 的 positions/trades/placed_orders/cancelled_orders、
+    smart_order_engine cancel_all + 抽乾三個 executor、risk_manager reset、
+    rate_limit buckets、order_sync watermark、journal fills、還原 shared client。
+    本檔沿用該共用邏輯，不再各自複製。"""
+    from conftest import reset_backend_state
+    reset_backend_state()
     yield
 
 

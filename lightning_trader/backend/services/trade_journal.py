@@ -36,6 +36,57 @@ logger = logging.getLogger(__name__)
 _DB_LOCK = threading.Lock()
 _CONN: Optional[sqlite3.Connection] = None
 
+# 縱深防禦：內容型防重的近接時窗（毫秒）。權威鍵去重是第一道防線，
+# 這是「同一筆成交在兩條路徑產生了不同 id」時的第二道防線。
+# 需覆蓋 callback 與 order_sync 對帳（每 SYNC_INTERVAL_S≈2.5s 一輪）之間的
+# 觀測時間差，故預設 2000ms。可用環境變數覆寫。
+_DEDUP_WINDOW_MS = int(os.environ.get("LIGHTRADE_FILL_DEDUP_WINDOW_MS", "2000") or 2000)
+
+
+def _norm_price_key(price) -> str:
+    """把價格正規化成穩定字串，讓兩條路徑（int 17050 vs float 17050.0）產生同鍵。"""
+    try:
+        return f"{float(price):.6f}"
+    except (TypeError, ValueError):
+        return "0.000000"
+
+
+def authoritative_fill_id(order_id, *, seq=None, price=None,
+                          qty=None, cum_qty=None) -> str:
+    """
+    單一決定性「權威成交鍵」——callback 落地路徑（extract_fill）與 order_sync
+    對帳路徑（extract_deal_fills）共用同一份邏輯，確保同一筆成交在兩條路徑
+    推導出**同一個 id**，INSERT OR IGNORE 才能正確去重。
+
+    優先序：
+      1. `ordno + 交易所成交序號`（exchange_seq / Deal.seq）—— 最穩固。
+      2. 缺序號 → 內容組合鍵 `ordno#price#qty#該單當下累計成交量`，
+         兩條路徑各自都能推導出同一鍵（cum_qty：callback 帶累計欄、
+         order_sync 走 deals list 累加）。
+
+    ★ 絕不使用 wall-clock（time.time()）：那會讓同一筆成交在兩路徑取得不同鍵，
+      去重失效 → 成交重複入帳 → 日已實現損益翻倍。
+    ★ 不可用 seqno（委託序號）當去重序號：同一單的多筆部分成交會撞成一筆。
+    """
+    oid = str(order_id or "noid")
+    s = "" if seq is None else str(seq).strip()
+    if s:
+        return f"{oid}#{s}"
+    # 退回內容組合鍵（決定性、無 wall-clock）
+    p = _norm_price_key(price)
+    try:
+        q = int(qty or 0)
+    except (TypeError, ValueError):
+        q = 0
+    if cum_qty in (None, ""):
+        c = q
+    else:
+        try:
+            c = int(cum_qty)
+        except (TypeError, ValueError):
+            c = q
+    return f"{oid}#{p}#{q}#{c}"
+
 
 def _db_path() -> Path:
     raw = os.environ.get("LIGHTRADE_JOURNAL_DB")
@@ -118,16 +169,6 @@ def extract_fill(trade_data: dict) -> Optional[dict]:
         trade_data.get("ordno") or trade_data.get("seqno")
         or order.get("ordno") or order.get("seqno") or ""
     )
-    # 唯一 id：order_id + 「每筆成交」的交易所序號。
-    # ★ 必須優先取 exchange_seq —— Shioaji Deal 回報的欄位是
-    #   trade_id/seqno/ordno/exchange_seq/ts（沒有 dealseq/seq），而
-    #   order_sync 對帳路徑用 list_trades 的 Deal.seq（= exchange_seq）產生 id。
-    #   之前這裡落到 wall-clock 時間戳，同一筆成交兩條路徑 id 不同 →
-    #   INSERT OR IGNORE 去重失效 → 成交重複入帳、日已實現損益翻倍。
-    #   注意不可用 seqno（那是「委託」序號，同一單的多筆部分成交會撞成一筆）。
-    deal_seq = (trade_data.get("exchange_seq") or trade_data.get("dealseq")
-                or trade_data.get("seq") or int(time.time() * 1000))
-    fill_id = f"{order_id or 'noid'}#{deal_seq}"
 
     try:
         price = float(price)
@@ -136,6 +177,19 @@ def extract_fill(trade_data: dict) -> Optional[dict]:
         return None
     if price <= 0 or qty <= 0 or not symbol:
         return None
+
+    # 唯一 id：走共用的權威鍵 helper（與 order_sync 對帳路徑同一份邏輯）。
+    #   優先 ordno + exchange_seq/Deal.seq；缺序號退回內容組合鍵。
+    #   ★ 絕不用 wall-clock —— 否則同一筆成交兩路徑 id 不同、去重失效、
+    #     日已實現損益翻倍。詳見 authoritative_fill_id docstring。
+    deal_seq = (trade_data.get("exchange_seq") or trade_data.get("dealseq")
+                or trade_data.get("seq"))
+    # 該單當下累計成交量（多筆部分成交時用來區分同價同量的兩筆）：
+    # 優先取回報帶的累計欄，缺則退回本筆量（單筆成交時累計==本筆）。
+    cum_qty = (trade_data.get("cum_quantity") or trade_data.get("cum_qty")
+               or trade_data.get("total_quantity"))
+    fill_id = authoritative_fill_id(order_id, seq=deal_seq, price=price,
+                                    qty=qty, cum_qty=cum_qty)
 
     return {
         "id": fill_id,
@@ -190,6 +244,20 @@ def insert_fill(fill: dict) -> bool:
     try:
         with _DB_LOCK:
             conn = _connect()
+            # 縱深防禦：即使 id 不同，同 order_id+price+qty 且時間近接視為同一筆
+            #   —— 針對「某一路徑缺序號、退回內容鍵，另一路徑有序號」導致兩路徑
+            #   id 分歧、權威鍵去重失效的情形兜底。
+            #   ★ 但兩邊都是「序號鍵」(ordno#seq) 且不同時，代表是同單同價的兩筆
+            #     真實部分成交（交易所給了不同序號）→ 不可誤併，照常各自入帳。
+            dup_id = _near_duplicate_id(conn, row)
+            if dup_id is not None and dup_id != row["id"] \
+                    and not (_is_seq_id(dup_id) and _is_seq_id(row["id"])):
+                logger.info(
+                    f"trade_journal.insert_fill 內容型防重命中，略過 {row['symbol']} "
+                    f"{row['action']} {row['qty']}@{row['price']} "
+                    f"(id={row['id']} ≈ 既有 {dup_id})"
+                )
+                return False
             cur = conn.execute(
                 "INSERT OR IGNORE INTO fills (id, ts, symbol, action, price, qty, order_id, raw, created_at)"
                 " VALUES (:id, :ts, :symbol, :action, :price, :qty, :order_id, :raw, :created_at)",
@@ -199,6 +267,34 @@ def insert_fill(fill: dict) -> bool:
     except Exception as e:
         logger.error(f"trade_journal.insert_fill 失敗: {e}")
         return False
+
+
+def _is_seq_id(fill_id: str) -> bool:
+    """
+    序號鍵 = `ordno#seq`（authoritative_fill_id 第 1 優先）→ 恰含 1 個 '#'。
+    內容鍵 = `ordno#price#qty#cum`（退回鍵）→ 含 3 個 '#'。
+    兩邊都是序號鍵才代表交易所給了不同序號的兩筆真實成交，內容防重需放行。
+    """
+    return str(fill_id).count("#") == 1
+
+
+def _near_duplicate_id(conn: sqlite3.Connection, row: dict) -> Optional[str]:
+    """
+    內容型防重查詢：同 order_id + price + qty 且 |ts 差| <= 時窗，回傳既有列 id。
+    無 order_id（例如外部成交無 ordno）時不做內容防重（避免把不相關成交誤併），
+    改由權威鍵 / 序號那一層負責。
+    """
+    if not row.get("order_id"):
+        return None
+    try:
+        r = conn.execute(
+            "SELECT id FROM fills WHERE order_id = ? AND price = ? AND qty = ? "
+            "AND ABS(ts - ?) <= ? LIMIT 1",
+            (row["order_id"], row["price"], row["qty"], row["ts"], _DEDUP_WINDOW_MS),
+        ).fetchone()
+        return r[0] if r else None
+    except Exception:
+        return None
 
 
 def fetch_fills(from_ts: Optional[int] = None, to_ts: Optional[int] = None,
@@ -225,6 +321,39 @@ def fetch_fills(from_ts: Optional[int] = None, to_ts: Optional[int] = None,
         return [dict(zip(cols, r)) for r in rows]
     except Exception as e:
         logger.error(f"trade_journal.fetch_fills 失敗: {e}")
+        return []
+
+
+def fetch_fills_for_fifo(from_ts: Optional[int] = None,
+                         symbol: Optional[str] = None,
+                         hard_cap: int = 500_000) -> list[dict]:
+    """
+    FIFO 重建專用：以 ts **升序**回傳，且**不套 fetch_fills 的 5000 截斷**。
+
+    為什麼另開一支：refresh_daily_realized 需要用完整歷史重建 open_lots。
+    若沿用 fetch_fills（LIMIT 5000 + 近端優先），久遠的開倉腳會被截掉 →
+    今日平倉配不到反向倉 → 被當新開倉 delta=0 → 已實現虧損漏計 → 熔斷被繞過。
+    這裡改抓齊（升序、只設一個很寬的 hard_cap 護欄防記憶體爆掉）。
+    """
+    where: list[str] = []
+    args: list = []
+    if from_ts is not None:
+        where.append("ts >= ?"); args.append(int(from_ts))
+    if symbol:
+        where.append("symbol = ?"); args.append(symbol.upper())
+    sql = "SELECT id, ts, symbol, action, price, qty, order_id, tag, notes FROM fills"
+    if where:
+        sql += " WHERE " + " AND ".join(where)
+    sql += " ORDER BY ts ASC LIMIT ?"
+    args.append(max(1, int(hard_cap)))
+    try:
+        with _DB_LOCK:
+            conn = _connect()
+            rows = conn.execute(sql, args).fetchall()
+        cols = ["id", "ts", "symbol", "action", "price", "qty", "order_id", "tag", "notes"]
+        return [dict(zip(cols, r)) for r in rows]
+    except Exception as e:
+        logger.error(f"trade_journal.fetch_fills_for_fifo 失敗: {e}")
         return []
 
 

@@ -5,6 +5,7 @@ shared.py — 後端共用狀態與工具
 避免循環引用和全域變數散落在 main.py 中。
 """
 import asyncio
+import collections
 import functools
 import logging
 import time
@@ -26,8 +27,121 @@ fastapi_loop: asyncio.AbstractEventLoop = None
 # 活躍的 WebSocket 連接
 active_connections: set[WebSocket] = set()
 
-# Shioaji → WebSocket 的報價佇列
-quotes_to_broadcast: asyncio.Queue = asyncio.Queue()
+
+# ─── 廣播佇列：關鍵回報 / 純報價分流 + 背壓（WS5-D3）────────────
+# 問題：舊版 quotes_to_broadcast 是「無界」asyncio.Queue，且把關鍵回報
+#   （OrderUpdate/TradeUpdate/SmartOrderUpdate/…）與純報價（Tick/BidAsk）
+#   塞在同一條佇列。慢客戶端下：
+#     1. 佇列無上限 → 記憶體隨報價無限成長。
+#     2. 關鍵回報夾在大量報價後面 → 成交/委託狀態延遲送達前端。
+#
+# 修法（型別/格式對前端完全不變，只改排程與背壓）：
+#   - 兩條內部佇列：
+#       critical（無界，永不丟）：除 Tick/BidAsk 外的所有訊息。
+#       quotes  （有界 maxsize，drop-oldest）：Tick / BidAsk。
+#   - 取用時「關鍵優先」：get() / get_nowait() 一律先出 critical 再出 quotes。
+#   - quotes 滿時丟「最舊」的一筆（報價可丟舊、關鍵不可丟）。
+#
+# 對外仍暴露 asyncio.Queue 風格介面（put_nowait / get / get_nowait / empty），
+# producer（bridge / order_sync）與既有測試無需改動。
+_QUOTE_TYPES = frozenset({"Tick", "BidAsk"})
+# 有界報價佇列上限：足以吸收突發，又不至於在慢客戶端下無限成長。
+QUOTE_QUEUE_MAXSIZE = 2000
+
+
+class BroadcastQueue:
+    """關鍵回報優先 + 報價有界背壓的雙佇列。介面相容 asyncio.Queue 子集。"""
+
+    def __init__(self, quote_maxsize: int = QUOTE_QUEUE_MAXSIZE):
+        self._critical: "collections.deque" = collections.deque()
+        self._quotes: "collections.deque" = collections.deque()
+        self._quote_maxsize = int(quote_maxsize)
+        self._not_empty = asyncio.Event()
+        # 觀測用計數（測試/監控可讀）
+        self.dropped_quotes = 0
+
+    # ── 分類 ──
+    @staticmethod
+    def _is_quote(item) -> bool:
+        return isinstance(item, dict) and item.get("type") in _QUOTE_TYPES
+
+    # ── 寫入 ──
+    def put_nowait(self, item) -> None:
+        """放入一筆訊息。報價滿佇列時丟最舊的一筆（drop-oldest）；關鍵永不丟。"""
+        if self._is_quote(item):
+            if len(self._quotes) >= self._quote_maxsize:
+                # drop-oldest：丟掉最舊的報價，換上最新的，佇列長度維持上限
+                self._quotes.popleft()
+                self.dropped_quotes += 1
+            self._quotes.append(item)
+        else:
+            self._critical.append(item)
+        self._not_empty.set()
+
+    # asyncio.Queue 相容別名（put 在無界語意下等同 put_nowait）
+    def put_nowait_quote(self, item) -> None:  # 明確語意的便捷入口（可選）
+        self.put_nowait(item)
+
+    # ── 讀取 ──
+    def _pop_priority(self):
+        """關鍵優先取一筆；兩條都空則 raise asyncio.QueueEmpty。"""
+        if self._critical:
+            return self._critical.popleft()
+        if self._quotes:
+            return self._quotes.popleft()
+        raise asyncio.QueueEmpty
+
+    def get_nowait(self):
+        item = self._pop_priority()
+        if self.empty():
+            self._not_empty.clear()
+        return item
+
+    def pop_critical_nowait(self):
+        """只取關鍵回報；沒有關鍵回報則 raise asyncio.QueueEmpty（不動報價）。"""
+        if self._critical:
+            item = self._critical.popleft()
+            if self.empty():
+                self._not_empty.clear()
+            return item
+        raise asyncio.QueueEmpty
+
+    async def get(self):
+        """阻塞取一筆，關鍵回報優先。"""
+        while self.empty():
+            self._not_empty.clear()
+            # 單執行緒事件迴圈語意：check→clear→await 之間不會被 producer 搶插，
+            # producer 的 put 只會在此處 await 讓出時執行並重新 set，不會遺失喚醒。
+            await self._not_empty.wait()
+        return self.get_nowait()
+
+    # ── 狀態查詢 ──
+    def empty(self) -> bool:
+        return not self._critical and not self._quotes
+
+    def critical_empty(self) -> bool:
+        return not self._critical
+
+    def qsize(self) -> int:
+        return len(self._critical) + len(self._quotes)
+
+    def critical_qsize(self) -> int:
+        return len(self._critical)
+
+    def quote_qsize(self) -> int:
+        return len(self._quotes)
+
+    def stats(self) -> dict:
+        return {
+            "critical": len(self._critical),
+            "quotes": len(self._quotes),
+            "quote_maxsize": self._quote_maxsize,
+            "dropped_quotes": self.dropped_quotes,
+        }
+
+
+# Shioaji → WebSocket 的報價/回報佇列（關鍵優先 + 報價有界背壓）
+quotes_to_broadcast: BroadcastQueue = BroadcastQueue()
 
 # ─── 訂單序號（分流） ──────────────────────────────────────
 # 分成兩條獨立流：
@@ -110,6 +224,19 @@ async def run_in_sync_thread(func, *args, **kwargs):
 
 def submit_sync_task(fn):
     return sync_executor.submit(fn)
+
+
+# CHASE 追價的「可阻塞輪詢」通道（D1）：cancel-replace / 收尾轉市價會做
+# confirm_order_cancelled 這種 ~1s 的撤單終態輪詢。若與保護性停損共用
+# order_executor（單 worker），一筆追價輪詢會 head-of-line 阻塞停損出場的
+# 市價單。獨立一條阻塞用 executor，讓 order_executor 只跑「不阻塞的快下單」
+# （智慧單觸發的保護性市價單），追價的阻塞輪詢走這裡、彼此不排隊。
+blocking_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="blocking")
+
+
+def submit_blocking_task(fn):
+    """CHASE cancel-replace / 收尾的可阻塞輪詢專用通道（不與保護性停損下單共用佇列）。"""
+    return blocking_executor.submit(fn)
 
 
 async def drop_connection(conn: WebSocket) -> None:

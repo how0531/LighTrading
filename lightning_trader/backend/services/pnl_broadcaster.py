@@ -49,22 +49,60 @@ def on_fill_event(order_msg: dict = None) -> None:
         loop.call_soon_threadsafe(_tick_event.set)
 
 
-async def _refresh_positions_if_stale() -> list:
-    """依 TTL 或 invalidate 旗標決定是否重新拉持倉。"""
-    global _pos_cache, _pos_cache_time
-    now = _time.monotonic()
+# 持倉刷新的「進行中」旗標：確保同一時間只有一個 list_positions 在飛，
+# 且刷新永遠是非阻塞的背景 task（見 _schedule_position_refresh）。
+_refresh_inflight: bool = False
+_refresh_task = None  # 最近一次背景刷新 task（測試可 await）
+
+
+async def _refresh_positions() -> None:
+    """背景刷新持倉快取。
+
+    WS5-D2 關鍵改動：
+      - 走 **sync_executor**（run_in_sync_thread），與 broker_executor 上的
+        kbars 下載 / 全商品搜尋等慢查詢隔離，避免 list_positions 排在慢查詢
+        後面被 head-of-line 阻塞。
+      - 由 _schedule_position_refresh 以「非阻塞背景 task」啟動，主廣播迴圈
+        不 await 它 —— 即使 list_positions 卡住，風控餵入（_feed_risk_manager）
+        仍每個 tick 週期用「快取持倉 + 最新價」照常更新，日虧損熔斷不會凍結。
+    """
+    global _pos_cache, _pos_cache_time, _refresh_inflight
     forced = _invalidate_event.is_set()
-    if forced or (now - _pos_cache_time > POS_CACHE_TTL):
-        try:
-            fresh = await shared.run_in_broker_thread(shared.shioaji_client.list_positions)
-            if fresh is not None:
-                _pos_cache = fresh
-                _pos_cache_time = now
-        except Exception as e:
-            logger.warning(f"refresh positions 失敗: {e}")
+    try:
+        fresh = await shared.run_in_sync_thread(shared.shioaji_client.list_positions)
+        if fresh is not None:
+            _pos_cache = fresh
+            _pos_cache_time = _time.monotonic()
+    except Exception as e:
+        logger.warning(f"refresh positions 失敗: {e}")
+    finally:
         if forced:
             _invalidate_event.clear()
-    return _pos_cache
+        _refresh_inflight = False
+
+
+def _schedule_position_refresh():
+    """依 TTL / invalidate 旗標，**非阻塞**地觸發一次背景持倉刷新。
+
+    回傳啟動的 task（或 None：不需刷新 / 已有刷新在途）。永不阻塞呼叫端，
+    因此主迴圈的風控餵入不會被慢 list_positions 卡住。
+    """
+    global _refresh_inflight, _refresh_task
+    now = _time.monotonic()
+    forced = _invalidate_event.is_set()
+    if not (forced or (now - _pos_cache_time > POS_CACHE_TTL)):
+        return None
+    if _refresh_inflight:
+        return None
+    _refresh_inflight = True
+    try:
+        _refresh_task = asyncio.ensure_future(_refresh_positions())
+    except Exception as e:
+        # 沒有 running loop 等極端情況：還原旗標，下一輪再試
+        _refresh_inflight = False
+        logger.warning(f"schedule position refresh 失敗: {e}")
+        return None
+    return _refresh_task
 
 
 def _compute_pnl_payload() -> dict:
@@ -163,6 +201,34 @@ async def _broadcast_pnl(payload: dict):
     await asyncio.gather(*tasks, return_exceptions=True)
 
 
+async def _broadcast_cycle() -> None:
+    """一輪 PnL 計算 / 風控餵入 / 廣播（不含 tick 等待與 debounce，便於單測）。
+
+    WS5-D2：風控餵入用「當前快取持倉 + 最新價」**立即**執行，並以**非阻塞**方式
+    觸發持倉刷新（走 sync_executor）。因此即使 list_positions 卡住，日虧損熔斷的
+    未實現損益資料源仍每個 tick 週期照常更新，不會凍結。
+    """
+    client = shared.shioaji_client
+    if not client or not getattr(client, "_is_connected", False):
+        return
+
+    # 1) 立即以「快取持倉 + 最新價」計算並餵風控 —— 永不等券商 list_positions。
+    #   ★ 風控餵入不依賴 WS 連線、也不依賴「有持倉」——
+    #     全部平倉後 payload 為 {positions: [], total_pnl: 0}，
+    #     必須把未實現損益歸零，否則熔斷會拿「已實現 + 凍結的舊未實現」重複計算。
+    payload = _compute_pnl_payload()
+    _feed_risk_manager(payload)
+
+    # 2) 非阻塞觸發持倉刷新（sync_executor，與 kbars/搜尋隔離）；
+    #    刷新完成後，下一輪 cycle 自然採用新持倉。
+    _schedule_position_refresh()
+
+    # 3) 廣播（用當前快取；無持倉時不推 PnLUpdate，維持原行為）。
+    if not _pos_cache:
+        return
+    await _broadcast_pnl(payload)
+
+
 async def pnl_broadcaster():
     """
     主迴圈：
@@ -181,19 +247,7 @@ async def pnl_broadcaster():
             await asyncio.sleep(_DEBOUNCE_MS / 1000.0)
             _tick_event.clear()
 
-            client = shared.shioaji_client
-            if not client or not getattr(client, "_is_connected", False):
-                continue
-
-            await _refresh_positions_if_stale()
-            payload = _compute_pnl_payload()
-            # ★ 風控餵入不依賴 WS 連線、也不依賴「有持倉」——
-            #   全部平倉後 payload 為 {positions: [], total_pnl: 0}，
-            #   必須把未實現損益歸零，否則熔斷會拿「已實現 + 凍結的舊未實現」重複計算
-            _feed_risk_manager(payload)
-            if not _pos_cache:
-                continue
-            await _broadcast_pnl(payload)
+            await _broadcast_cycle()
         except asyncio.CancelledError:
             break
         except Exception as e:

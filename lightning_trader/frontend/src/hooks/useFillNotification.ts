@@ -62,6 +62,59 @@ export function diffFills(
   return { deltas, nextFilled: next };
 }
 
+// C4：diff 後援路徑 vs recentFills 主路徑的「已涵蓋量」對帳。
+//
+// 舊版用 `symbol|action|price` 布林集合當去重鍵：只要該價位曾被主路徑涵蓋過一次，
+// diff 路徑就永遠視為「已播」——同價位第二筆成交（尤其換一張新單掛在同價）會被永久
+// 遮蔽而漏通知。改為「累計量」對帳：把主路徑（recentFills）每筆成交量累加進各 sig 的
+// 涵蓋餘額，diff 每筆 delta 依序扣抵；扣得完＝主路徑已播、不重播，扣不完＝主路徑漏了
+// （TradeUpdate 沒送到）→ 照播。fill id 只計入涵蓋量一次，且隨 recentFills 視窗汰換而清掉。
+export interface CoverageState {
+  /** 已累加進涵蓋餘額的 recentFills fill id（避免同一筆重複加總） */
+  countedFillIds: Set<string>;
+  /** 各 sig（symbol|action|price）尚未被 diff 扣抵的主路徑成交量 */
+  coverRemaining: Map<string, number>;
+}
+
+export function fillSig(o: { symbol: string; action: string; price: number }): string {
+  return `${o.symbol}|${o.action}|${o.price}`;
+}
+
+/** 依 recentFills 更新涵蓋餘額、扣抵 diff deltas，回傳仍需由 diff 路徑播報的清單。state 就地更新。 */
+export function reconcileDiffCoverage(
+  deltas: FillDelta[],
+  recentFills: { id: string; symbol: string; action: string; price: number; qty: number }[],
+  state: CoverageState,
+): FillDelta[] {
+  // 1) 把新的 recentFills 成交量累加進涵蓋餘額（每個 fill id 只計一次）；
+  //    已汰出 recentFills 視窗的 id 從 counted 移除，避免無上限成長。
+  const live = new Set(recentFills.map((f) => f.id));
+  for (const id of state.countedFillIds) {
+    if (!live.has(id)) state.countedFillIds.delete(id);
+  }
+  for (const f of recentFills) {
+    if (state.countedFillIds.has(f.id)) continue;
+    state.countedFillIds.add(f.id);
+    const sig = fillSig(f);
+    state.coverRemaining.set(sig, (state.coverRemaining.get(sig) ?? 0) + f.qty);
+  }
+  // 2) 逐筆 delta 用涵蓋餘額扣抵：扣得完 → 主路徑已涵蓋、不重播；扣不完 → 照播。
+  const toAnnounce: FillDelta[] = [];
+  for (const d of deltas) {
+    const sig = fillSig(d.order);
+    const remaining = state.coverRemaining.get(sig) ?? 0;
+    if (remaining >= d.newFills) {
+      const left = remaining - d.newFills;
+      if (left > 0) state.coverRemaining.set(sig, left);
+      else state.coverRemaining.delete(sig);
+      continue;
+    }
+    if (remaining > 0) state.coverRemaining.delete(sig); // 用掉殘餘涵蓋量，剩下的照播
+    toAnnounce.push(d);
+  }
+  return toAnnounce;
+}
+
 const MAX_ANNOUNCED_IDS = 500;
 
 export function useFillNotification(): void {
@@ -71,6 +124,8 @@ export function useFillNotification(): void {
   const lastFilledRef = useRef<Map<string, number>>(new Map());
   // 兩條路徑共用的「已播報」成交 id（TradeUpdate 真 id / compound fallback / diff 合成 id）
   const announcedIdsRef = useRef<Set<string>>(new Set());
+  // C4：diff 後援路徑與主路徑的「已涵蓋量」對帳狀態（跨 render 保存）
+  const coverageStateRef = useRef<CoverageState>({ countedFillIds: new Set(), coverRemaining: new Map() });
   const permissionRequestedRef = useRef(false);
 
   const rememberAnnounced = useCallback((id: string) => {
@@ -141,21 +196,22 @@ export function useFillNotification(): void {
     }
 
     const { deltas, nextFilled } = diffFills(workingOrders as SimpleOrder[], lastFilledRef.current);
-    // P2：統一去重口徑 —— diff 路徑是 TradeUpdate 的後援。TradeUpdate（recentFills）帶真 id
-    // 時，diff 路徑的 compoundId（order_id#price#qty）永遠對不上真 id → 同筆會雙播
-    // （市價單/優價成交最容易踩）。改為：若 recentFills 已涵蓋同 symbol|action|price，
-    // 視為主路徑已播、diff 路徑不再重播；仍更新 lastFilled 避免之後重算成 delta。
-    const coveredSig = new Set<string>();
-    for (const f of recentFills) coveredSig.add(`${f.symbol}|${f.action}|${f.price}`);
-    for (const { order: o, newFills, key: k } of deltas) {
-      const diffKey = `diff:${k}#${o.filled_qty}`;
+    // diffKey 去重：同一 snapshot 重跑（同一 order 同一累計 filled_qty）不重算。
+    // 每個增量只會產生一次 delta（下一輪 lastFilled 已含此量），此處是額外保險。
+    const fresh: FillDelta[] = [];
+    for (const d of deltas) {
+      const diffKey = `diff:${d.key}#${d.order.filled_qty}`;
       if (announcedIdsRef.current.has(diffKey)) continue;
-      if (coveredSig.has(`${o.symbol}|${o.action}|${o.price}`)) {
-        // TradeUpdate 主路徑已涵蓋此成交 → 記下 diffKey 防日後重播，但不再發第二次通知
-        rememberAnnounced(diffKey);
-        continue;
-      }
       rememberAnnounced(diffKey);
+      fresh.push(d);
+    }
+    // C4：統一去重口徑 —— diff 路徑是 TradeUpdate 的後援。改用「累計已涵蓋量」對帳
+    //（reconcileDiffCoverage）：主路徑（recentFills）已涵蓋的量扣抵掉、不重播；主路徑漏送的
+    // 量照播。舊版用 symbol|action|price 布林集合，同價第二筆會被永久遮蔽漏通知。
+    // 注意：即使本輪沒有 fresh delta，也要呼叫以把新 recentFills 的量先累加進涵蓋餘額，
+    // 供之後才到的 diff delta 扣抵。
+    const toAnnounce = reconcileDiffCoverage(fresh, recentFills, coverageStateRef.current);
+    for (const { order: o, newFills, key: k } of toAnnounce) {
       const sideZh = o.action === 'Buy' ? '買進' : '賣出';
       const title = `已成交 ${newFills} 口 ${o.symbol}`;
       const body = `${sideZh} @${o.price}  (累計 ${o.filled_qty}/${o.qty})`;

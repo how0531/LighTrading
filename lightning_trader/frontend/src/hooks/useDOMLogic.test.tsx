@@ -56,9 +56,17 @@ vi.mock('../contexts/ToastContext', async (importOriginal) => {
   return { ...actual, useToast: () => ({ toast: mockToast }) };
 });
 
+// 拆單：保留真實 splitOrders，只把 randomDelay 換成可控 mock（F2 中止測試在拆單間隙觸發中止）
+vi.mock('../utils/splitOrder', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../utils/splitOrder')>();
+  return { ...actual, randomDelay: vi.fn(() => Promise.resolve()) };
+});
+
 // 取得 mock 後的 apiClient（vi.mock hoisting 保證這裡拿到的是 mock）
 import { apiClient } from '../api/client';
+import { randomDelay } from '../utils/splitOrder';
 const mockedPost = vi.mocked(apiClient.post);
+const mockedRandomDelay = vi.mocked(randomDelay);
 
 const quoteStub: QuoteData = {
   Symbol: '2330', Price: 100, Volume: 1, Reference: 100,
@@ -253,13 +261,53 @@ describe('useDOMLogic 前端確認（非戰鬥模式）', () => {
     expect(mockedPost).not.toHaveBeenCalled();
   });
 
-  it('確認框接受 → 送單且帶 confirm:true（前端確認一併授權後端 WARNING）', async () => {
+  it('C3：確認框接受 → 送單但首發不帶 confirm（一般確認框不授權跳過後端 WARNING）', async () => {
     mockConfirm.mockResolvedValue(true);
     const { result } = renderHook(() => useDOMLogic(), { wrapper });
     await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
+    // 只彈一次一般下單確認框；後端無 WARNING（回 200）→ 單發、且 payload 不含 confirm:true
+    expect(mockConfirm).toHaveBeenCalledTimes(1);
     expect(mockedPost).toHaveBeenCalledTimes(1);
-    expect(mockedPost).toHaveBeenCalledWith('/place_order',
-      expect.objectContaining({ symbol: '2330', price: 100, action: 'Buy', confirm: true }));
+    expect(mockedPost).toHaveBeenCalledWith('/place_order', EXPECTED_LIMIT_PAYLOAD);
+    expect(mockedPost.mock.calls[0][1]).not.toHaveProperty('confirm');
+  });
+
+  it('C3：一般確認接受後仍遇 409 → 再彈含全文的 danger 框授權，帶 confirm:true 重送', async () => {
+    mockedPost
+      .mockRejectedValueOnce(confirmRequiredError())
+      .mockResolvedValueOnce({ data: {} });
+    mockConfirm.mockResolvedValue(true); // 一般框 + danger 框皆接受
+
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
+
+    // 兩個確認框：先一般下單確認、後風控 danger（含 user_msg + warnings 全文）
+    expect(mockConfirm).toHaveBeenCalledTimes(2);
+    const generalOpts = mockConfirm.mock.calls[0][0] as ConfirmOptions;
+    expect(generalOpts.title).toBe('下單確認');
+    const dangerOpts = mockConfirm.mock.calls[1][0] as ConfirmOptions;
+    expect(dangerOpts.danger).toBe(true);
+    expect(dangerOpts.message).toContain('此單需要確認');
+    expect(dangerOpts.message).toContain('市價單風險');
+    expect(dangerOpts.message).toContain('價格偏離參考價 3%');
+
+    // 首發不帶 confirm → 觸發後端 409；danger 授權後帶 confirm:true 重送
+    expect(mockedPost).toHaveBeenCalledTimes(2);
+    expect(mockedPost.mock.calls[0]).toEqual(['/place_order', EXPECTED_LIMIT_PAYLOAD]);
+    expect(mockedPost.mock.calls[1]).toEqual(['/place_order', { ...EXPECTED_LIMIT_PAYLOAD, confirm: true }]);
+  });
+
+  it('C3：一般確認接受後遇 409、danger 框拒絕 → 不重送', async () => {
+    mockedPost.mockRejectedValueOnce(confirmRequiredError());
+    // 第一個(一般框) 接受、第二個(danger 框) 拒絕
+    mockConfirm.mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
+
+    expect(mockConfirm).toHaveBeenCalledTimes(2);
+    expect(mockedPost).toHaveBeenCalledTimes(1); // 僅首發，未重送
+    expect(coreValue.scheduleOrderRefresh).not.toHaveBeenCalled();
   });
 
   it('刪單確認拒絕 → 不送 /cancel_all', async () => {
@@ -453,5 +501,55 @@ describe('useDOMLogic 追價模式（CHASE 智慧單）', () => {
     const opts = mockConfirm.mock.calls[0][0] as ConfirmOptions;
     expect(`${opts.title ?? ''} ${opts.message}`).toContain('追價');
     expect(mockedPost).not.toHaveBeenCalled();
+  });
+});
+
+// ─── F2：拆單中止時不播「成功」回饋 ────────────────
+describe('useDOMLogic 拆單中止（F2）', () => {
+  beforeEach(() => {
+    localStorage.clear();
+    // 戰鬥模式（跳過前端確認）+ 開啟拆單，門檻低到必拆、每批 1 口 → orderValue=3 拆成 3 批
+    localStorage.setItem('lightrade_settings', JSON.stringify({
+      isCombatMode: true,
+      splitOrder: { enabled: true, threshold: 1, minPerLot: 1, maxPerLot: 1, minDelay: 0, maxDelay: 0 },
+    }));
+    coreValue = makeCoreValue();
+    vi.clearAllMocks();
+    mockConfirm.mockReset();
+    mockedPost.mockResolvedValue({ data: {} });
+    mockedRandomDelay.mockReset();
+    mockedRandomDelay.mockResolvedValue(undefined);
+  });
+
+  afterEach(() => { vi.restoreAllMocks(); });
+
+  it('拆單送出第一批後中止 → 只留「已中止」提示，不播成功回饋（成功 toast / 綠閃）', async () => {
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    act(() => { result.current.setOrderValue(3); });
+    // 第一批送出後、進第二批前會 await randomDelay → 於此時觸發中止
+    mockedRandomDelay.mockImplementation(async () => { result.current.abortSplit(); });
+
+    await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
+
+    // 只送出第一批（中止後不再連發）
+    expect(mockedPost).toHaveBeenCalledTimes(1);
+    // 中止提示有、成功 toast 無
+    expect(mockToast.info).toHaveBeenCalledWith(expect.stringContaining('已中止'));
+    expect(mockToast.success).not.toHaveBeenCalled();
+    // 中止不留下成功綠閃（pending 已清）
+    expect(result.current.orderFeedback).toBeNull();
+    // 真實已下單 → 仍對帳
+    expect(coreValue.scheduleOrderRefresh).toHaveBeenCalled();
+  });
+
+  it('拆單全部送完（未中止）→ 照播成功回饋', async () => {
+    const { result } = renderHook(() => useDOMLogic(), { wrapper });
+    act(() => { result.current.setOrderValue(3); });
+
+    await act(async () => { await result.current.handlePlaceOrder(100, 'Buy'); });
+
+    expect(mockedPost).toHaveBeenCalledTimes(3);
+    expect(mockToast.success).toHaveBeenCalled();
+    expect(mockToast.info).not.toHaveBeenCalledWith(expect.stringContaining('已中止'));
   });
 });

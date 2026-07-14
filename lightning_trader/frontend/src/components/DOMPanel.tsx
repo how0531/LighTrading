@@ -203,7 +203,8 @@ export const DOMPanel: React.FC = () => {
       if (!ok) return;
     }
     try {
-      await apiClient.post('/flatten', { symbol: targetSymbol });
+      // F3：cancel_pending=true → 後端先原子性撤掉同商品兩側掛單再平倉（取代前端各自 cancel_all）
+      await apiClient.post('/flatten', { symbol: targetSymbol, cancel_pending: true });
       toast.success(`${targetSymbol} 平倉指令已送出`);
     } catch (e) {
       handleApiError(e, '平倉失敗');
@@ -286,9 +287,9 @@ export const DOMPanel: React.FC = () => {
           handleCancelOrder('Sell');
           break;
         case 'Flatten':
-          // B1 fix: 平倉前必須兩側都撤單，否則殘留掛單會被吃進新部位
-          handleCancelOrder('Buy');
-          handleCancelOrder('Sell');
+          // F3：平倉前的撤單交給後端 /flatten 的 cancel_pending 原子性兜底
+          //（先 cancel_all 兩側再平倉），前端不再另外呼叫 handleCancelOrder —— 那會多彈
+          // 兩個刪單確認框（連同平倉框共三框）並對後端重複下 cancel_all。
           await handleFlatten();
           break;
         case 'ScrollCenter':

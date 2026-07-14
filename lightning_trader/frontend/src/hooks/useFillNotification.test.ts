@@ -8,7 +8,10 @@
  *   4. orders 在某輪整批消失（全平倉）→ lastFilled 不該漏清，下一輪不會「補發」舊資料
  */
 import { describe, it, expect } from 'vitest';
-import { orderKey, diffFills, type SimpleOrder } from './useFillNotification';
+import {
+  orderKey, diffFills, reconcileDiffCoverage, fillSig,
+  type SimpleOrder, type FillDelta, type CoverageState,
+} from './useFillNotification';
 
 const O = (over: Partial<SimpleOrder>): SimpleOrder => ({
   symbol: 'TXFR1',
@@ -117,5 +120,92 @@ describe('diffFills', () => {
     const r = diffFills([], last);
     expect(r.nextFilled.size).toBe(0);
     expect(r.deltas).toHaveLength(0);
+  });
+});
+
+// C4：diff 後援路徑與 recentFills 主路徑的「已涵蓋量」對帳（reconcileDiffCoverage）
+describe('reconcileDiffCoverage (C4)', () => {
+  type Fill = { id: string; symbol: string; action: string; price: number; qty: number };
+  const F = (over: Partial<Fill>): Fill => ({
+    id: 'f1', symbol: 'TXFR1', action: 'Buy', price: 17000, qty: 1, ...over,
+  });
+  const D = (over: Partial<SimpleOrder>, newFills: number): FillDelta => {
+    const order: SimpleOrder = {
+      symbol: 'TXFR1', action: 'Buy', price: 17000, qty: 5, filled_qty: newFills,
+      status: 'Filled', ...over,
+    };
+    return { order, newFills, key: orderKey(order) };
+  };
+  const freshState = (): CoverageState => ({ countedFillIds: new Set(), coverRemaining: new Map() });
+
+  it('主路徑（recentFills）已涵蓋同量 → diff 不重播', () => {
+    const state = freshState();
+    const out = reconcileDiffCoverage(
+      [D({ order_id: 'X1' }, 2)],
+      [F({ id: 'f1', qty: 2 })],
+      state,
+    );
+    expect(out).toHaveLength(0);
+    // 涵蓋量被扣光 → 該 sig 不殘留
+    expect(state.coverRemaining.get(fillSig({ symbol: 'TXFR1', action: 'Buy', price: 17000 }))).toBeUndefined();
+  });
+
+  it('同價第二筆：recentFills 也涵蓋 → 一樣被扣抵、不重播', () => {
+    const state = freshState();
+    // 第一筆
+    reconcileDiffCoverage([D({ order_id: 'X1' }, 2)], [F({ id: 'f1', qty: 2 })], state);
+    // 第二筆（新單同價），recentFills 帶第二筆 f2
+    const out = reconcileDiffCoverage(
+      [D({ order_id: 'X2' }, 3)],
+      [F({ id: 'f1', qty: 2 }), F({ id: 'f2', qty: 3 })],
+      state,
+    );
+    expect(out).toHaveLength(0);
+  });
+
+  it('BUG 修復：同價第二筆但主路徑漏送（recentFills 沒有）→ 照播，不被永久遮蔽', () => {
+    const state = freshState();
+    // 第一筆：主路徑涵蓋 → 被扣抵
+    const out1 = reconcileDiffCoverage([D({ order_id: 'X1' }, 2)], [F({ id: 'f1', qty: 2 })], state);
+    expect(out1).toHaveLength(0);
+    // 第二筆：TradeUpdate 沒送到（recentFills 仍只有 f1）→ 涵蓋餘額為 0 → 照播
+    const out2 = reconcileDiffCoverage([D({ order_id: 'X2' }, 3)], [F({ id: 'f1', qty: 2 })], state);
+    expect(out2).toHaveLength(1);
+    expect(out2[0].newFills).toBe(3);
+  });
+
+  it('同一 fill id 只計入涵蓋量一次（多輪不重複扣抵）', () => {
+    const state = freshState();
+    // 主路徑先到（無對應 diff）→ 累加涵蓋量 2
+    reconcileDiffCoverage([], [F({ id: 'f1', qty: 2 })], state);
+    // 同一批 recentFills 再跑一次（id 相同）→ 不應再加
+    reconcileDiffCoverage([], [F({ id: 'f1', qty: 2 })], state);
+    // 之後 diff delta=2 到 → 恰好扣光、不重播
+    const out = reconcileDiffCoverage([D({ order_id: 'X1' }, 2)], [F({ id: 'f1', qty: 2 })], state);
+    expect(out).toHaveLength(0);
+    // delta=1 再來一次 → 已無涵蓋量 → 照播
+    const out2 = reconcileDiffCoverage([D({ order_id: 'X1', filled_qty: 3 }, 1)], [F({ id: 'f1', qty: 2 })], state);
+    expect(out2).toHaveLength(1);
+  });
+
+  it('部分涵蓋（涵蓋量 < 增量）→ 該筆照播', () => {
+    const state = freshState();
+    const out = reconcileDiffCoverage(
+      [D({ order_id: 'X1' }, 5)],
+      [F({ id: 'f1', qty: 2 })],
+      state,
+    );
+    expect(out).toHaveLength(1);
+    expect(out[0].newFills).toBe(5);
+  });
+
+  it('汰出 recentFills 視窗的 fill id 會從 counted 移除（避免無上限成長）', () => {
+    const state = freshState();
+    reconcileDiffCoverage([], [F({ id: 'f1', qty: 1 })], state);
+    expect(state.countedFillIds.has('f1')).toBe(true);
+    // 下一輪 recentFills 已不含 f1（視窗滑出）→ 應被清掉
+    reconcileDiffCoverage([], [F({ id: 'f9', qty: 1 })], state);
+    expect(state.countedFillIds.has('f1')).toBe(false);
+    expect(state.countedFillIds.has('f9')).toBe(true);
   });
 });

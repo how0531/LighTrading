@@ -113,34 +113,42 @@ describe('settings.chart round-trip', () => {
     expect(chart.custom[0].code).toBe("plot('x', close)");
   });
 
-  it('updateSetting（picker 寫入）→ localStorage 寫回,重載一致', async () => {
-    const api = renderProvider();
-    act(() => {
-      api.current.updateSetting((prev) => {
-        const cfg = createActiveIndicator('supertrend', prev.chart.custom)!;
-        return {
-          ...prev,
-          chart: {
-            ...prev.chart,
-            active: [...prev.chart.active, { ...cfg, instanceId: 'st1' }],
-            favorites: ['supertrend'],
-          },
-        };
+  it('updateSetting（picker 寫入）→ localStorage 寫回,重載一致', () => {
+    // F5：localStorage 寫入改為 debounce（~300ms），用 fake timers 推進計時器讓它落盤
+    vi.useFakeTimers();
+    try {
+      const api = renderProvider();
+      act(() => {
+        api.current.updateSetting((prev) => {
+          const cfg = createActiveIndicator('supertrend', prev.chart.custom)!;
+          return {
+            ...prev,
+            chart: {
+              ...prev.chart,
+              active: [...prev.chart.active, { ...cfg, instanceId: 'st1' }],
+              favorites: ['supertrend'],
+            },
+          };
+        });
       });
-    });
 
-    expect(api.current.settings.chart.active.map((a) => a.indicatorId))
-      .toEqual(['sma', 'vol', 'supertrend']);
-    expect(api.current.settings.chart.active[2].params).toEqual({ period: 10, mult: 3 });
+      expect(api.current.settings.chart.active.map((a) => a.indicatorId))
+        .toEqual(['sma', 'vol', 'supertrend']);
+      expect(api.current.settings.chart.active[2].params).toEqual({ period: 10, mult: 3 });
 
-    // localStorage 已同步
-    const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY)!);
-    expect(persisted.chart.active.map((a: { indicatorId: string }) => a.indicatorId))
-      .toEqual(['sma', 'vol', 'supertrend']);
-    expect(persisted.chart.favorites).toEqual(['supertrend']);
+      // debounce flush → localStorage 落盤
+      act(() => { vi.advanceTimersByTime(300); });
 
-    // round-trip：以寫回的 JSON 再 normalize → 不變
-    expect(normalizeChartIndicatorSettings(persisted.chart)).toEqual(api.current.settings.chart);
+      const persisted = JSON.parse(localStorage.getItem(STORAGE_KEY)!);
+      expect(persisted.chart.active.map((a: { indicatorId: string }) => a.indicatorId))
+        .toEqual(['sma', 'vol', 'supertrend']);
+      expect(persisted.chart.favorites).toEqual(['supertrend']);
+
+      // round-trip：以寫回的 JSON 再 normalize → 不變
+      expect(normalizeChartIndicatorSettings(persisted.chart)).toEqual(api.current.settings.chart);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('壞資料清洗：未知指標丟棄、參數 clamp、非法樣式剔除、收藏過濾', () => {

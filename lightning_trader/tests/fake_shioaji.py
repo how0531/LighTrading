@@ -201,6 +201,12 @@ class FakeShioaji:
         # cancel_race_hook(trade)：撤單「送出當下」呼叫，模擬撤單在途時舊單
         #   於交易所端先部分/全部成交（P0-1 競速）。
         self.cancel_race_hook = None
+        # flush_cancels_on_status：True 時 update_status() 會把在途撤單推進到
+        #   Cancelled 終態（模擬「撤單的終態回報在一次狀態刷新時到達」）。
+        #   讓 confirm_order_cancelled 的輪詢（每輪先 update_status）能在
+        #   async_cancel 模式下自然收斂，供端到端追價測試用。預設關閉 →
+        #   既有測試（手動 flush_cancels + 同步撤單語意）完全不受影響。
+        self.flush_cancels_on_status = False
 
     # ── session ──
     def login(self, api_key: str = "", secret_key: str = "", **kw):
@@ -318,7 +324,11 @@ class FakeShioaji:
 
     # ── 查詢 ──
     def update_status(self, *args, **kwargs):
-        pass
+        # 真 SDK：向券商刷新委託狀態。async_cancel 模式下撤單的終態回報
+        # 正是在某次狀態刷新時到達 —— flush_cancels_on_status=True 時把在途
+        # 撤單推進到 Cancelled，讓 confirm_order_cancelled 輪詢自然收斂。
+        if self.flush_cancels_on_status and self._pending_cancels:
+            self.flush_cancels()
 
     def list_positions(self, acc=None):
         # 只有股票帳號回傳部位，避免 client 迭代兩個帳號時重複計算

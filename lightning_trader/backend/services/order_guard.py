@@ -15,9 +15,16 @@ client.place_order，完全繞過 RiskManager，即使 trading_enabled=False 也
 
 日已實現損益：
   RiskManager 的 max_daily_loss 需要真實的 realized PnL。作法：對 journal
-  近 30 天 fills 做完整 FIFO（避免跨午夜/隔日倉的斷頭配對產生幽靈損益），
-  再取「風控日邊界（每日 04:00，與 reset_daily 對齊）或最近一次手動 reset」
-  之後的增量餵回 RiskManager。
+  的**完整歷史** fills 做完整 FIFO 重建 open_lots（避免跨午夜/隔日倉、以及
+  久遠開倉今日平倉的斷頭配對產生幽靈損益/漏計虧損），再取「風控日邊界
+  （每日 04:00，與 reset_daily 對齊）或最近一次手動 reset」之後的增量餵回
+  RiskManager。
+
+  ★ A3：先前用固定 30 天回看窗切 FIFO —— >30 天前開倉的腳被排除，
+    今日平倉配不到反向倉 → 被當新開倉 delta=0 → 真實已實現虧損漏計 →
+    日虧損熔斷被繞過。現改以完整歷史重建（fetch_fills_for_fifo，無 5000 截斷），
+    並在偵測到「平倉配不到完整開倉腳」時發風控告警 + 保守處理。
+    （完整持久化 open_lots 快照為後續工作，見 refresh_daily_realized 註解。）
 """
 import logging
 import threading
@@ -29,9 +36,19 @@ from shioaji.constant import Action
 
 from backend import shared
 from backend.services import trade_journal
+from backend.services import audit_log
 from backend.services.equity_curve import compute_realized_curve
+from core import risk_invariants
 
 logger = logging.getLogger(__name__)
+
+
+def _inv_deps():
+    """取注入不變量層的 event_bus / risk_manager（缺則 None，observe-only）。"""
+    eng = shared.engine
+    event_bus = getattr(eng, "event_bus", None) if eng else None
+    rm = getattr(eng, "risk_manager", None) if eng else None
+    return event_bus, rm
 
 # 觸發路徑允許沿用 pnl_broadcaster 持倉快取的最大年齡（秒）——
 # 避免每次停損觸發都多一輪阻塞的 list_positions
@@ -124,18 +141,29 @@ def smart_place_order(symbol: str, price: float, action: str, qty: int):
                 pass
             # #8：暫態封鎖（頻率限制）回 RATE_LIMITED（CHASE 本輪放棄、下輪重試），
             # 真正的風控封鎖才回 RISK_BLOCKED（終態）
+            audit_log.record(audit_log.EVENT_RISK_BLOCK, symbol=symbol,
+                             action=str(action), qty=qty, price=price,
+                             meta={"reason": msg, "source": "smart"})
             return RATE_LIMITED if getattr(result, "transient", False) else RISK_BLOCKED
+
+    # 不變量 (a)：送單前「意圖量 ≥ 0 且經過 pre_order_check（或為豁免的
+    # 保護性平倉單）」。protective 走豁免路徑、rm 存在則已通過檢查才到這裡。
+    event_bus, inv_rm = _inv_deps()
+    risk_invariants.check_order_intent(
+        send_qty, checked_or_protective=(protective or rm is not None),
+        event_bus=event_bus, risk_manager=inv_rm,
+        context={"symbol": symbol, "action": str(action), "protective": protective})
 
     action_enum = action if isinstance(action, Action) else (
         Action.Buy if str(action).lower() == "buy" else Action.Sell
     )
+    audit_log.record(audit_log.EVENT_SENT, symbol=symbol, action=str(action),
+                     qty=send_qty, price=price,
+                     meta={"protective": protective, "source": "smart"})
     return client.place_order(symbol, price, action_enum, send_qty)
 
 
 # ─── 日已實現損益餵入 ───────────────────────────────────────
-
-# FIFO 回看窗（天）：足夠涵蓋隔夜/波段倉的開倉腳，避免斷頭配對
-_FIFO_LOOKBACK_DAYS = 30
 
 
 def _risk_day_start_ms() -> int:
@@ -188,6 +216,24 @@ def fill_side_effects(fill: Optional[dict]) -> None:
             shared.engine.event_bus.on_fill.emit(fill)
     except Exception:
         pass
+    # 委託生命週期審計：成交事件（callback 與對帳兩路徑共用此處，故全部成交都入軌）
+    if fill:
+        audit_log.record(
+            audit_log.EVENT_FILL,
+            order_id=fill.get("order_id") or fill.get("ordno"),
+            symbol=fill.get("symbol") or fill.get("code"),
+            action=fill.get("action"),
+            qty=fill.get("qty") or fill.get("quantity"),
+            price=fill.get("price"),
+            meta={"id": fill.get("id")})
+    # 不變量 (b)：成交入帳時「活躍掛單量 + 已成量 ≤ 委託量」（超額偵測）。
+    # 資料取不到 → check_fill_no_overfill 內部 skip（回 None），不誤報。
+    try:
+        event_bus, inv_rm = _inv_deps()
+        risk_invariants.check_fill_no_overfill(
+            fill, event_bus=event_bus, risk_manager=inv_rm)
+    except Exception:
+        logger.debug("fill 超額不變量檢查略過", exc_info=True)
     try:
         from backend.services import pnl_broadcaster as pb
         pb.on_fill_event()
@@ -201,18 +247,37 @@ def refresh_daily_realized():
     重算「本風控日」的已實現損益，餵給 RiskManager。
     請透過 schedule_refresh_daily_realized() 排程（合流 + 不佔下單佇列）。
 
-    作法：對近 30 天 fills 做完整 FIFO（跨午夜的夜盤回合、昨日開倉今日平倉
-    都能正確配對），取風控日邊界（或最近一次手動 reset）後的累積增量。
+    作法：對 journal **完整歷史** fills 做完整 FIFO 重建 open_lots（跨午夜夜盤、
+    久遠開倉今日平倉都能正確配對），取風控日邊界（或最近一次手動 reset）後的
+    累積增量。
+
+    ★ A3 安全核心修：
+      1. open_lots 基準改以完整歷史重建（fetch_fills_for_fifo，拿掉 30 天下限）。
+      2. 抓齊路徑不套 fetch_fills 的 5000 截斷（久遠開倉腳不可被截掉）。
+      3. compute_realized_curve 偵測到「平倉配不到完整開倉腳」→ 不靜默 delta=0，
+         發風控告警（logger.critical + on_risk_breach）並保守處理：不讓偏樂觀、
+         可能低估虧損的 realized 去解除熔斷（取與現值的較小者）。
+
+    後續（本次不做）：完整持久化 open_lots 快照（每日收盤 snapshot + 增量重播），
+      免去每次重算都全量掃歷史；屆時 fetch_fills_for_fifo 可只補快照後的增量。
     """
     rm = getattr(shared.engine, "risk_manager", None) if shared.engine else None
     if rm is None:
         return
     try:
         boundary = max(_risk_day_start_ms(), int(getattr(rm, "last_reset_ms", 0) or 0))
-        lookback_start = boundary - _FIFO_LOOKBACK_DAYS * 86_400_000
-        fills = trade_journal.fetch_fills(from_ts=lookback_start, limit=5000)
-        fills.sort(key=lambda f: f.get("ts") or 0)  # fetch_fills 是 DESC，FIFO 需要 ASC
-        curve = compute_realized_curve(fills)
+        # 完整歷史重建（升序、無 5000 截斷）——久遠開倉腳不可被排除
+        fills = trade_journal.fetch_fills_for_fifo(from_ts=None)
+
+        unmatched = {"hit": False, "detail": ""}
+
+        def _on_unmatched(symbol, fill, closed_qty, opened_qty):
+            unmatched["hit"] = True
+            unmatched["detail"] = (
+                f"{symbol} @ {fill.get('price')} 平倉配不到完整開倉腳"
+                f"（已平 {closed_qty}、反向新開 {opened_qty}）")
+
+        curve = compute_realized_curve(fills, on_unmatched=_on_unmatched)
         final = curve[-1]["realized_pnl"] if curve else 0.0
         baseline = 0.0
         for pt in curve:
@@ -220,6 +285,36 @@ def refresh_daily_realized():
                 baseline = pt["realized_pnl"]
             else:
                 break
-        rm.update_daily_pnl(realized=final - baseline)
+        realized = final - baseline
+
+        if unmatched["hit"]:
+            # 損益不明 → 保守：不可讓（可能低估虧損、偏樂觀的）realized 解除熔斷。
+            prev = float(getattr(rm, "_daily_realized_pnl", 0.0) or 0.0)
+            safe = min(realized, prev)
+            msg = (f"已實現損益重算偵測到配不到開倉腳的平倉，日損益可能被低估："
+                   f"{unmatched['detail']}；保守採用 {safe:,.0f}（不放寬熔斷）。"
+                   f"疑 journal 缺開倉腳，請人工核對。")
+            logger.critical(f"[order_guard] {msg}")
+            try:
+                shared.engine.event_bus.on_risk_breach.emit("warning", msg)
+            except Exception:
+                pass
+            rm.update_daily_pnl(realized=safe)
+        else:
+            rm.update_daily_pnl(realized=realized)
+
+        # 不變量 (c)：對帳時「(realized+unrealized) 與券商回報偏差在閾值內」。
+        # ★ 誠實：此路徑目前取不到券商權威 realized（broker_reported=None）→
+        #   record_reconciliation 內部 skip（僅登錄「不可得」供健康列顯示），
+        #   不製造假違反。日後接上券商 realized 即可傳入實值啟用比對。
+        try:
+            event_bus = getattr(shared.engine, "event_bus", None) if shared.engine else None
+            computed = (float(getattr(rm, "_daily_realized_pnl", 0.0) or 0.0)
+                        + float(getattr(rm, "_daily_unrealized_pnl", 0.0) or 0.0))
+            risk_invariants.record_reconciliation(
+                computed=computed, broker_reported=None,
+                event_bus=event_bus, risk_manager=rm)
+        except Exception:
+            logger.debug("對帳不變量登錄略過", exc_info=True)
     except Exception as e:
         logger.error(f"refresh_daily_realized 失敗: {e}")

@@ -14,7 +14,9 @@ RiskManager — 統一的風控與防呆引擎
 設計原則: Single source of truth — 所有下單前的驗證都通過 pre_order_check。
 """
 import logging
+import os
 import time
+from datetime import datetime, timedelta
 from enum import Enum
 from typing import Optional, Dict, List
 from dataclasses import dataclass, field
@@ -22,6 +24,41 @@ from dataclasses import dataclass, field
 
 
 logger = logging.getLogger(__name__)
+
+
+def _env_int(name: str, default: int) -> int:
+    """讀環境變數為 int；未設 / 空 / 不合法 → default。"""
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        v = int(float(raw))
+        return v if v >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        v = float(raw)
+        return v if v >= 0 else default
+    except (TypeError, ValueError):
+        return default
+
+
+def risk_day_start_ms(now: Optional[datetime] = None) -> int:
+    """
+    風控日邊界：每日 04:00（與 order_guard._risk_day_start_ms /
+    main.py _daily_risk_reset 對齊）。每日硬上限計數以此邊界歸零。
+    """
+    now = now or datetime.now()
+    start = now.replace(hour=4, minute=0, second=0, microsecond=0)
+    if now < start:
+        start -= timedelta(days=1)
+    return int(start.timestamp() * 1000)
 
 
 def signed_position_qty(direction, qty) -> int:
@@ -157,10 +194,31 @@ class RiskManager:
         # 避免手動 reset 後下一筆成交的全日重算又把舊虧損加回來
         self.last_reset_ms: float = 0.0
 
+        # ──── 每日硬上限（獨立於「日虧損熔斷」的獨立防線）────
+        # ★ 預設安全：未設環境變數或 0 = 無限（不改變現有交易行為）。
+        #   達上限回 BLOCK（fail-closed）。以風控日邊界（04:00）計數/歸零。
+        self.max_orders_per_day: int = _env_int("LIGHTRADE_MAX_ORDERS_PER_DAY", 0)
+        self.max_notional_per_day: float = _env_float("LIGHTRADE_MAX_NOTIONAL_PER_DAY", 0.0)
+        self._daily_order_count: int = 0
+        self._daily_notional: float = 0.0
+        self._count_boundary_ms: int = risk_day_start_ms()
+
+        # ──── 異常速率凍結（panic rate）────
+        # ★ 預設關閉：LIGHTRADE_PANIC_RATE=0 = 不檢查。設 N>0 時，短時間窗
+        #   （LIGHTRADE_PANIC_RATE_WINDOW_S，預設 10s）內下單數 > N 即自動
+        #   trading_enabled=False + critical 告警。
+        self.panic_rate: int = _env_int("LIGHTRADE_PANIC_RATE", 0)
+        self.panic_rate_window_s: float = _env_float("LIGHTRADE_PANIC_RATE_WINDOW_S", 10.0)
+        self._panic_timestamps: list = []
+
         # 監聽 EventBus（現價供價格偏離檢查）
         self.event_bus.on_tick.connect(self._on_tick)
 
-        logger.info("RiskManager 已初始化")
+        logger.info(
+            "RiskManager 已初始化 (max_orders/day=%s, max_notional/day=%s, panic_rate=%s)",
+            self.max_orders_per_day or "∞",
+            self.max_notional_per_day or "∞",
+            self.panic_rate or "off")
 
     # ──── 事件 / 資料餵入 ────
 
@@ -235,6 +293,9 @@ class RiskManager:
         symbol = symbol.strip().upper()
         warnings: List[str] = []
 
+        # 跨風控日（04:00）→ 每日硬上限計數歸零
+        self._roll_daily_counters_if_needed()
+
         # === 0. 基本參數驗證 ===
         if qty <= 0:
             return CheckResult.block("委託口數必須大於 0")
@@ -261,6 +322,14 @@ class RiskManager:
         # === 2. 日虧損上限（reduce-only 豁免） ===
         if not is_reduce_only:
             r = self._check_daily_loss()
+            if not r.passed:
+                return r
+
+        # === 2.5 每日硬上限（下單筆數 / 名目金額；reduce-only 豁免） ===
+        # 硬上限是「總量斷路器」，與日虧損熔斷各自獨立。豁免 reduce-only ——
+        # 與熔斷/日虧損一致，永不擋出場，避免把使用者鎖在部位裡。
+        if not is_reduce_only:
+            r = self._check_daily_hard_caps(symbol, qty, price, is_market_order)
             if not r.passed:
                 return r
 
@@ -344,6 +413,67 @@ class RiskManager:
             return CheckResult.block(reason)
         return CheckResult.ok()
 
+    def _notional_of(self, symbol: str, qty: int, price: float,
+                     is_market: bool) -> float:
+        """
+        單筆名目金額（best-effort）：qty × 價格。市價 / price=0 時退回現價。
+        取不到價格 → 0（不灌水；名目上限只在有價時才實質生效）。
+        注意：此處未乘合約乘數（core 不依賴 backend 的 contract_specs），
+        屬保守低估；期貨可依乘數把 LIGHTRADE_MAX_NOTIONAL_PER_DAY 折算後設定。
+        """
+        px = price if price and price > 0 else self._current_prices.get(symbol, 0)
+        try:
+            return abs(int(qty)) * float(px or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _roll_daily_counters_if_needed(self) -> None:
+        """跨過風控日邊界（04:00）→ 每日硬上限計數歸零。"""
+        boundary = risk_day_start_ms()
+        if boundary > self._count_boundary_ms:
+            self._daily_order_count = 0
+            self._daily_notional = 0.0
+            self._count_boundary_ms = boundary
+
+    def _check_daily_hard_caps(self, symbol: str, qty: int, price: float,
+                               is_market: bool) -> CheckResult:
+        """
+        每日硬上限（下單筆數 / 名目金額）。未設（0）= 無限 → 直接放行。
+        達上限回 BLOCK（fail-closed）。計數在通過檢查、實際送單時
+        （_record_order）才累加，故此處以「若再送這一筆是否超限」判定。
+        """
+        if self.max_orders_per_day and self._daily_order_count >= self.max_orders_per_day:
+            reason = (f"已達每日下單筆數上限 "
+                      f"{self._daily_order_count}/{self.max_orders_per_day}")
+            self.event_bus.on_risk_breach.emit("block", reason)
+            return CheckResult.block(reason)
+        if self.max_notional_per_day:
+            projected = self._daily_notional + self._notional_of(
+                symbol, qty, price, is_market)
+            if projected > self.max_notional_per_day:
+                reason = (f"已達每日名目金額上限 "
+                          f"{projected:,.0f}/{self.max_notional_per_day:,.0f}")
+                self.event_bus.on_risk_breach.emit("block", reason)
+                return CheckResult.block(reason)
+        return CheckResult.ok()
+
+    def _check_panic_rate(self) -> None:
+        """
+        異常速率凍結：短時間窗內下單數超過硬閾值 panic_rate → 自動熔斷 +
+        critical 告警。預設 panic_rate=0 → 關閉。於每次實際送單後呼叫。
+        """
+        if not self.panic_rate:
+            return
+        now = time.time()
+        window = self.panic_rate_window_s
+        self._panic_timestamps = [t for t in self._panic_timestamps if now - t < window]
+        if len(self._panic_timestamps) > self.panic_rate and self.config.trading_enabled:
+            self.config.trading_enabled = False
+            msg = (f"異常下單速率：{len(self._panic_timestamps)} 筆 / {window:.0f}s "
+                   f"超過硬閾值 {self.panic_rate}，已自動停止交易 (trading_enabled=False)")
+            logger.critical(f"[RiskManager] {msg}")
+            self.event_bus.on_risk_breach.emit("critical", msg)
+
     def _check_order_rate(self) -> CheckResult:
         if not self.config.max_order_rate_enabled:
             return CheckResult.ok()
@@ -405,6 +535,13 @@ class RiskManager:
         self._recent_orders.append(
             (now * 1000, symbol, action, price, qty)
         )
+        # 每日硬上限計數（實際送出才累加）
+        self._roll_daily_counters_if_needed()
+        self._daily_order_count += 1
+        self._daily_notional += self._notional_of(symbol, qty, price, price == 0)
+        # 異常速率凍結鉤子
+        self._panic_timestamps.append(now)
+        self._check_panic_rate()
 
     # ──── 管理 ────
 
@@ -419,6 +556,11 @@ class RiskManager:
         self._daily_unrealized_pnl = 0.0
         self._order_timestamps.clear()
         self._recent_orders.clear()
+        # 每日硬上限 / 速率凍結計數一併歸零
+        self._daily_order_count = 0
+        self._daily_notional = 0.0
+        self._panic_timestamps.clear()
+        self._count_boundary_ms = risk_day_start_ms()
         self.config.trading_enabled = True
         self.last_reset_ms = time.time() * 1000
         logger.info("[RiskManager] 日內狀態已重設")
@@ -434,4 +576,10 @@ class RiskManager:
             "pnl_ratio": (total / abs(self.config.max_daily_loss) * 100)
                          if self.config.max_daily_loss != 0 else 0,
             "max_position": self.config.max_position_per_symbol,
+            # 每日硬上限（0 = 無限）與當日計數
+            "daily_order_count": self._daily_order_count,
+            "max_orders_per_day": self.max_orders_per_day,
+            "daily_notional": self._daily_notional,
+            "max_notional_per_day": self.max_notional_per_day,
+            "panic_rate": self.panic_rate,
         }

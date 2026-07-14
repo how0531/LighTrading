@@ -251,10 +251,12 @@ export function useDOMLogic() {
         return;
       }
 
-      // 前端二次確認：戰鬥模式（已解鎖）一鍵直送；否則若開啟下單確認則先問。
-      // 前端確認過就視同「已授權」，送單直接帶 confirm:true —— 避免與後端風控
-      // WARNING 的 409 CONFIRM_REQUIRED 重複，一次下單最多問一次。
-      let preConfirmed = false;
+      // C3：前端二次確認 —— 戰鬥模式（已解鎖=明確意圖）一鍵直送、跳過此框；否則若開啟
+      // 下單確認則先問。但「一般下單確認框」只確認「要下這筆單」的意圖，**不**等於授權
+      // 跳過後端風控 WARNING（價格偏離／市價／反向）。故確認通過後首發仍不帶 confirm，
+      // 讓後端 RiskManager 有 WARNING 時回 409 CONFIRM_REQUIRED，再由
+      // placeOrderWithRiskConfirm 以「含全文」的 danger 框授權後帶 confirm:true 重送
+      // （比照 useLayOrders 的 P1-1）。之前預帶 confirm:true 會讓後端 skip_warnings 靜默丟掉警告。
       if (settings.confirmations.placeOrder && !settings.isCombatMode) {
         const dir = action === 'Buy' ? '買進' : '賣出';
         const at = (effPriceType === 'MKT' || effPriceType === 'MKP') ? '市價' : price;
@@ -264,7 +266,6 @@ export function useDOMLogic() {
           confirmLabel: `確認${dir}`,
         });
         if (!ok) return;
-        preConfirmed = true;
       }
       setOrderFeedback({ price, action, status: 'pending' });
       if (feedbackTimerRef.current) clearTimeout(feedbackTimerRef.current);
@@ -276,8 +277,9 @@ export function useDOMLogic() {
 
       // 送單核心抽到 utils/orderExec.placeOrderWithRiskConfirm（Sprint D，與 MiniDOM 宮格共用）：
       // POST + 後端 409 CONFIRM_REQUIRED 確認重送。回傳 true=已下單, false=使用者拒絕確認。
-      // 同一次操作只問一次，拆單後續批次沿用已確認結果。其餘錯誤 rethrow 給外層統一處理。
-      let confirmGranted = preConfirmed;
+      // C3：首發一律不帶 confirm（一般確認框不授權跳過後端 WARNING）；一旦某一筆經 409
+      // danger 框取得風控授權，confirmGranted=true，拆單後續批次沿用、不再重複詢問。
+      let confirmGranted = false;
       const sendOrder = async (qty: number): Promise<boolean> => {
         const outcome = await placeOrderWithRiskConfirm({ ...basePayload, qty }, confirm, confirmGranted);
         if (outcome.confirmGranted) confirmGranted = true;
@@ -288,11 +290,12 @@ export function useDOMLogic() {
       try {
         let placedCount = 0;
         let placedQty = 0; // 實際送出的總口數（拆單時逐批累計）
+        // F2：拆單中止旗標 hoist 到 try 範圍，讓下方「成功回饋」能據此排除中止情境。
+        let abortedByUser = false;
         if (splitCfg.enabled && orderValue > splitCfg.threshold) {
           const lots = splitOrders(orderValue, splitCfg.minPerLot, splitCfg.maxPerLot);
           splitAbortRef.current = false;
           setSplitProgress({ sent: 0, total: lots.length, aborted: false });
-          let abortedByUser = false;
           for (let i = 0; i < lots.length; i++) {
             // 每筆送出前檢查中止旗標（UI 的「中止」按鈕）
             if (splitAbortRef.current) { abortedByUser = true; break; }
@@ -314,12 +317,19 @@ export function useDOMLogic() {
         }
 
         if (placedCount > 0) {
-          setOrderFeedback({ price, action, status: 'success' });
+          // 真實已下單 → 一律對帳（中止與否都要，殘留掛單/部位需即時反映）
           scheduleOrderRefresh();
-          playSound('order_placed');
-          const dirZh = action === 'Buy' ? '買' : '賣';
-          const atLabel = (effPriceType === 'MKT' || effPriceType === 'MKP') ? '市價' : price;
-          toast.success(`${dirZh} ${placedQty} @ ${atLabel} ✓`);
+          // F2：使用者中止拆單時，不再播「成功」回饋（綠閃 / 音效 / 成功 toast），
+          // 只保留上方的「已中止 x/y」提示，並清掉 pending 閃爍。
+          if (!abortedByUser) {
+            setOrderFeedback({ price, action, status: 'success' });
+            playSound('order_placed');
+            const dirZh = action === 'Buy' ? '買' : '賣';
+            const atLabel = (effPriceType === 'MKT' || effPriceType === 'MKP') ? '市價' : price;
+            toast.success(`${dirZh} ${placedQty} @ ${atLabel} ✓`);
+          } else {
+            setOrderFeedback(null);
+          }
         } else {
           setOrderFeedback(null); // 使用者取消：清掉 pending 閃爍即可
         }

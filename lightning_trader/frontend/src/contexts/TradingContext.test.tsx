@@ -130,6 +130,44 @@ describe('TradingContext WS 訊息路由', () => {
     expect(getByTestId('price').textContent).toBe('123.5');
   });
 
+  it('D4：同一 100ms 窗多筆 tick flush 後 index0 = 最新到達（tape 不反序）', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    // 同一 flush 窗內連續三筆，到達順序 100 → 101 → 102
+    act(() => {
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 100, Volume: 1 } });
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 101, Volume: 1 } });
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 102, Volume: 1 } });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+
+    const hist = probe.ctx?.quoteHistory ?? [];
+    expect(hist.length).toBeGreaterThanOrEqual(3);
+    // tape 契約：index0 = 最新到達（102），最舊在後 —— 修正前批次未反轉會變成 100,101,102
+    expect(hist.slice(0, 3).map((q) => q.Price)).toEqual([102, 101, 100]);
+  });
+
+  it('D4：跨兩個 flush 窗 → 新窗整批壓在舊窗之上（仍 index0=最新）', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    act(() => {
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 10, Volume: 1 } });
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 11, Volume: 1 } });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+    act(() => {
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 20, Volume: 1 } });
+      ws.message({ type: 'Tick', data: { Symbol: '2330', Price: 21, Volume: 1 } });
+    });
+    await act(async () => { vi.advanceTimersByTime(100); });
+
+    const hist = probe.ctx?.quoteHistory ?? [];
+    // 新窗（20,21）反轉後為 21,20 壓在舊窗（反轉後 11,10）之上
+    expect(hist.slice(0, 4).map((q) => q.Price)).toEqual([21, 20, 11, 10]);
+  });
+
   it('OrderUpdate seq guard：舊 seq 忽略，不觸發委託同步', async () => {
     const { ws } = await setup();
     await act(async () => { ws.open(); });
@@ -491,10 +529,11 @@ describe('TradingContext WS 訊息路由', () => {
       });
     });
     expect(probe.ctx?.recentFills).toHaveLength(2);
-    // 新的在前；P2：無 id 時 fallback 帶單調序號後綴（order_id#price#qty#seq）
+    // 新的在前；F1：無 id / 無 exchange_seq / 無 ts 時退回穩定內容鍵 order_id#price#qty
+    // （不再摻遞增序號 —— 同一筆重送才不會每次算出不同鍵而雙入列）
     const firstFill = probe.ctx?.recentFills[0];
     expect(firstFill).toMatchObject({ symbol: '2330', action: 'Sell', price: 601, qty: 1 });
-    expect(firstFill?.id).toMatch(/^B001#601#1#\d+$/);
+    expect(firstFill?.id).toBe('B001#601#1');
 
     // 純狀態回報（無 symbol / qty）不進 recentFills
     await act(async () => {
@@ -503,15 +542,29 @@ describe('TradingContext WS 訊息路由', () => {
     expect(probe.ctx?.recentFills).toHaveLength(2);
   });
 
-  it('P2：同單同價同量的兩筆 id-less 部分成交 → 序號後綴使其不撞鍵、兩筆都收', async () => {
+  it('F1：同 exchange_seq 的 WS 重送 → 穩定內容鍵去重（不雙入列 / 不雙通知）', async () => {
     const { ws } = await setup();
     await act(async () => { ws.open(); });
 
-    const partial = { symbol: '2330', action: 'Buy', price: 600, qty: 2, order_id: 'X9' };
-    await act(async () => { ws.message({ type: 'TradeUpdate', data: { ...partial } }); });
-    await act(async () => { ws.message({ type: 'TradeUpdate', data: { ...partial } }); });
+    // bridge 每次 callback 無條件廣播：同一筆成交（order_id + exchange_seq 相同）重送兩次
+    const fill = { symbol: '2330', action: 'Buy', price: 600, qty: 2, order_id: 'X9', exchange_seq: 42 };
+    await act(async () => { ws.message({ type: 'TradeUpdate', data: { ...fill } }); });
+    await act(async () => { ws.message({ type: 'TradeUpdate', data: { ...fill } }); });
 
-    // 兩筆「2口@600」不同鍵 → 都進 recentFills（修正前第二筆會被 compound key 吞掉）
+    // 穩定鍵 X9#42 相同 → 第二次被去重（修正前摻遞增序號會讓兩者不同鍵 → 雙入列 + 雙通知）
+    expect(probe.ctx?.recentFills).toHaveLength(1);
+    expect(probe.ctx?.recentFills[0].id).toBe('X9#42');
+  });
+
+  it('F1：同單同價同量但不同 exchange_seq 的兩筆 partial → 天然不同鍵、兩筆都收', async () => {
+    const { ws } = await setup();
+    await act(async () => { ws.open(); });
+
+    const base = { symbol: '2330', action: 'Buy', price: 600, qty: 2, order_id: 'X9' };
+    await act(async () => { ws.message({ type: 'TradeUpdate', data: { ...base, exchange_seq: 1 } }); });
+    await act(async () => { ws.message({ type: 'TradeUpdate', data: { ...base, exchange_seq: 2 } }); });
+
+    // exchange_seq 不同 → 天然不同鍵，兩筆真實 partial 都進 recentFills
     expect(probe.ctx?.recentFills).toHaveLength(2);
     expect(probe.ctx?.recentFills[0].id).not.toBe(probe.ctx?.recentFills[1].id);
   });

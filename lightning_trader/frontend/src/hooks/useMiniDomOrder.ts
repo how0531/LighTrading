@@ -53,8 +53,10 @@ export function useMiniDomOrder() {
     }
     pendingSymbolsRef.current.add(sym);
     try {
-      // 前端二次確認（戰鬥模式跳過）；通過即帶 confirm:true，避免與後端 409 重複詢問
-      let preConfirmed = false;
+      // C3：前端二次確認（戰鬥模式已解鎖=明確意圖 → 跳過此框）。一般確認框只確認下單意圖，
+      // 不等於授權跳過後端風控 WARNING → 首發不帶 confirm，讓後端有 WARNING 時回 409
+      // CONFIRM_REQUIRED，再由 placeOrderWithRiskConfirm 以含全文的 danger 框授權後帶
+      // confirm:true 重送（比照 useLayOrders 的 P1-1）。之前預帶 confirm:true 會靜默 skip_warnings。
       if (settings.confirmations.placeOrder && !settings.isCombatMode) {
         const dir = action === 'Buy' ? '買進' : '賣出';
         const ok = await confirm({
@@ -63,7 +65,6 @@ export function useMiniDomOrder() {
           confirmLabel: `確認${dir}`,
         });
         if (!ok) return;
-        preConfirmed = true;
       }
 
       const payload = {
@@ -71,7 +72,7 @@ export function useMiniDomOrder() {
         order_type: 'ROD', price_type: 'LMT', order_cond: 'Cash', order_lot: 'Common',
       };
       try {
-        const outcome = await placeOrderWithRiskConfirm(payload, confirm, preConfirmed);
+        const outcome = await placeOrderWithRiskConfirm(payload, confirm);
         if (outcome.placed) {
           playSound('order_placed');
           const dirZh = action === 'Buy' ? '買' : '賣';

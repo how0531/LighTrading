@@ -90,3 +90,74 @@ export const getAccounts = async () => {
   const response = await apiClient.get('/accounts');
   return response.data;
 };
+
+// ─── 執行期安全網（backend/routers/safety.py）───────────────────────────────
+
+/** POST /api/panic 各步結果（各步 best-effort，errors 逐項回報） */
+export interface PanicResult {
+  /** 是否成功把 trading_enabled 翻成 false（停用一切新單） */
+  trading_disabled: boolean;
+  /** 撤掉的智慧單數；後端無智慧單引擎時為 null */
+  smart_orders_cancelled: number | null;
+  /** 雙側全撤掉的委託總筆數 */
+  cancelled_orders: number;
+  /** 成功送出平倉的商品代碼 */
+  flattened_symbols: string[];
+  /** 逐步錯誤（空陣列＝全成） */
+  errors: string[];
+  /** 'ok'＝零錯誤；'partial'＝部分步驟失敗 */
+  status: 'ok' | 'partial';
+}
+
+/** GET /api/safety/health 的 risk 區塊（risk_manager 不可用時整塊為 null） */
+export interface SafetyHealthRisk {
+  /** 熔斷中＝交易被停用（日虧損 / 硬上限 / 速率凍結 / 恐慌鈕任一） */
+  halted: boolean;
+  trading_enabled: boolean;
+  daily_total_pnl: number;
+  max_daily_loss: number;
+  daily_order_count: number;
+  max_orders_per_day: number;
+  daily_notional: number;
+  max_notional_per_day: number;
+  panic_rate: number;
+}
+
+/** 最近一次對帳落差（尚無資料時整塊為 null） */
+export interface SafetyReconciliation {
+  available: boolean;
+  computed: number | null;
+  broker_reported: number | null;
+  delta: number | null;
+  within_threshold?: boolean;
+  threshold: number | null;
+  ts: number;
+}
+
+export interface SafetyConnection {
+  shioaji_connected: boolean;
+  ws_clients: number;
+}
+
+export interface SafetyHealth {
+  status: string;
+  risk: SafetyHealthRisk | null;
+  invariant_enforce: boolean;
+  last_reconciliation: SafetyReconciliation | null;
+  connection: SafetyConnection;
+}
+
+/**
+ * 恐慌鈕：一鍵停用交易 + 撤所有委託（含智慧單，雙側）+ 平所有持倉。
+ * 走 apiClient → 帶 X-API-Token；回各步結果供 UI 回報。
+ */
+export const panic = async (): Promise<PanicResult> => {
+  const response = await apiClient.post<PanicResult>('/panic');
+  return response.data;
+};
+
+/** 安全健康列：熔斷/停用狀態、每日下單計數與上限、連線、對帳落差。 */
+export const getSafetyHealth = async (): Promise<SafetyHealth> => {
+  const response = await apiClient.get<SafetyHealth>('/safety/health');
+  return response.data;
+};

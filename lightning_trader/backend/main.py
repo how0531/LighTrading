@@ -103,6 +103,9 @@ from backend.services.order_guard import smart_place_order
 from backend.services.contract_specs import get_tick_size
 engine.smart_order_engine._place_order = smart_place_order
 engine.smart_order_engine.set_dispatch(shared.submit_order_task)
+# D1：CHASE 的 cancel-replace 含 ~1s confirm 輪詢，改走獨立 blocking executor，
+# 避免 head-of-line 阻塞走 order executor 的保護性停損市價單。
+engine.smart_order_engine.set_chase_dispatch(shared.submit_blocking_task)
 # ★ Sprint C：CHASE 追價單需要「精準撤單」（cancel-replace）與 tick 級距
 engine.smart_order_engine.set_chase_helpers(
     cancel_order_fn=engine.client.cancel_order_by_ids,
@@ -150,6 +153,14 @@ async def lifespan(app):
                 logger.info("✅ Shioaji 自動登入成功")
                 await asyncio.sleep(1)
                 await subscribe_position_contracts()
+                # ★ WS3 啟動對帳協議：登入成功且已補訂持倉商品後，與券商校準一次
+                #   （偵測部位/委託/智慧單落差 → 告警 + audit；殭屍智慧單交回既有引擎）。
+                #   best-effort：對帳任何例外都不可擋 backend 啟動。
+                try:
+                    from backend.services.reconciliation import reconcile_on_startup
+                    await reconcile_on_startup()
+                except Exception as recon_err:
+                    logger.error(f"❌ 啟動對帳發生例外（已忽略，不擋啟動）: {recon_err}")
             else:
                 logger.warning("⚠️ Shioaji 自動登入失敗，請檢查 .env 設定")
         except Exception as e:
@@ -265,7 +276,7 @@ app.add_middleware(
 )
 
 # 掛載路由模組
-from backend.routers import orders, accounts, smart, user_settings, risk, health, reports, journal
+from backend.routers import orders, accounts, smart, user_settings, risk, health, reports, journal, safety
 app.include_router(orders.router)
 app.include_router(accounts.router)
 app.include_router(smart.router)
@@ -274,6 +285,7 @@ app.include_router(risk.router)
 app.include_router(health.router)
 app.include_router(reports.router)
 app.include_router(journal.router)
+app.include_router(safety.router)   # 執行期安全網：/api/panic + /api/safety/health
 
 
 # ─── Frontend Static Serving (same-origin for Electron) ─────
