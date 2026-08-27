@@ -15,7 +15,7 @@
     "@tailwindcss/vite": "^4.2.1",
     "axios": "^1.13.5",
     "lightweight-charts": "^5.2.0",
-    "lucide-react": "^0.575.0",
+    "lucide-react": "^1.23.0",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
     "react-grid-layout": "^1.5.3",
