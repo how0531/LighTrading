@@ -82,7 +82,7 @@ jobs:
       # without relying on a published GitHub Release.
       - name: Upload installers
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: lightrade-${{ matrix.os }}
           path: electron/release/
